@@ -10,6 +10,9 @@
     var dashboardState = { instances: [], total_online: 0, total_offline: 0, total_items_active: 0 };
     var knownInstances = new Set();
 
+    // Idle states — items in these states get collapsed into a summary line
+    var IDLE_STATES = { "getting_task": true, "waiting": true, "unknown": true };
+
     var grid = document.getElementById("instance-grid");
     var totalOnlineEl = document.getElementById("total-online");
     var totalOfflineEl = document.getElementById("total-offline");
@@ -125,16 +128,26 @@
         var state = dashboardState;
         totalOnlineEl.textContent = state.total_online || 0;
         totalOfflineEl.textContent = state.total_offline || 0;
-        totalItemsEl.textContent = state.total_items_active || 0;
 
-        // Aggregate bandwidth
+        // Count total items and working (non-idle) items across all instances
         var aggDl = 0, aggUl = 0;
+        var totalItems = 0, workingItems = 0;
         if (state.instances) {
             for (var i = 0; i < state.instances.length; i++) {
-                aggDl += state.instances[i].bandwidth_down || 0;
-                aggUl += state.instances[i].bandwidth_up || 0;
+                var inst = state.instances[i];
+                aggDl += inst.bandwidth_down || 0;
+                aggUl += inst.bandwidth_up || 0;
+                if (inst.items) {
+                    for (var j = 0; j < inst.items.length; j++) {
+                        totalItems++;
+                        if (!IDLE_STATES[inst.items[j].state]) {
+                            workingItems++;
+                        }
+                    }
+                }
             }
         }
+        totalItemsEl.textContent = workingItems + "/" + totalItems;
         totalDlEl.textContent = fmtBytes(aggDl);
         totalUlEl.textContent = fmtBytes(aggUl);
 
@@ -178,7 +191,7 @@
 
         var stateLabel = inst.connection_state.replace("_", " ").toUpperCase();
 
-        // Bandwidth line
+        // Bandwidth
         var bwHtml = "";
         if (isOnline && (inst.bandwidth_down > 0 || inst.bandwidth_up > 0 || inst.bytes_downloaded > 0)) {
             bwHtml = '<p><span class="text-gray-500">BW:</span> ' +
@@ -191,19 +204,32 @@
             }
         }
 
-        // Item count
-        var itemCount = (inst.items && inst.items.length) ? inst.items.length : 0;
-
-        // Items — compact horizontal layout
-        var itemsHtml = "";
-        if (inst.items && inst.items.length > 0) {
-            itemsHtml = '<div class="items-container mt-3">';
+        // Split items into idle (getting_task/waiting) and active (everything else)
+        var idleItems = [];
+        var activeItems = [];
+        if (inst.items) {
             for (var i = 0; i < inst.items.length; i++) {
-                var item = inst.items[i];
+                if (IDLE_STATES[inst.items[i].state]) {
+                    idleItems.push(inst.items[i]);
+                } else {
+                    activeItems.push(inst.items[i]);
+                }
+            }
+        }
+
+        var totalCount = (inst.items && inst.items.length) ? inst.items.length : 0;
+
+        // Build items HTML — active items shown in full, idle collapsed to one line
+        var itemsHtml = "";
+        if (totalCount > 0) {
+            itemsHtml = '<div class="items-container mt-3">';
+
+            // Active items — full detail
+            for (var a = 0; a < activeItems.length; a++) {
+                var item = activeItems[a];
                 var badgeClass = "badge-" + item.state;
                 var taskDesc = item.task_description || "";
                 var itemName = item.item_name || "";
-                // Build a full description: "ItemName — TaskDescription"
                 var fullDesc = itemName;
                 if (taskDesc && taskDesc !== itemName) {
                     fullDesc = itemName + " \u2014 " + taskDesc;
@@ -213,6 +239,15 @@
                     '<span class="item-desc" title="' + escapeHtml(fullDesc) + '">' + escapeHtml(fullDesc) + '</span>' +
                     '</div>';
             }
+
+            // Idle items — collapsed summary
+            if (idleItems.length > 0) {
+                itemsHtml += '<div class="idle-summary">' +
+                    '<span class="idle-dot"></span>' +
+                    '<span>' + idleItems.length + ' item' + (idleItems.length !== 1 ? 's' : '') + ' waiting for tasks</span>' +
+                    '</div>';
+            }
+
             itemsHtml += '</div>';
         } else if (isOnline) {
             itemsHtml = '<p class="text-xs text-gray-500 mt-3">No active items</p>';
@@ -233,6 +268,18 @@
             ' class="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Remove instance">' +
             '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>';
 
+        // Items line: "Items: 2 working / 6" or "Items: 6 idle" or "Items: 6"
+        var itemsLine = "";
+        if (totalCount > 0) {
+            if (activeItems.length > 0) {
+                itemsLine = '<span class="text-green-400">' + activeItems.length + ' working</span> / ' + totalCount;
+            } else {
+                itemsLine = totalCount + ' <span class="text-gray-500">idle</span>';
+            }
+        } else {
+            itemsLine = "0";
+        }
+
         return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group">' +
             '<div class="absolute top-2 right-2 flex items-center gap-1">' + editBtn + removeBtn + '</div>' +
             '<div class="flex items-center gap-2 mb-2">' + statusDot +
@@ -241,7 +288,7 @@
             '<div class="text-xs text-gray-400 space-y-0.5">' +
             '<p><span class="text-gray-500">URL:</span> ' + escapeHtml(inst.url) + '</p>' +
             (isOnline ? '<p><span class="text-gray-500">Project:</span> <span class="text-white font-medium">' + escapeHtml(inst.current_project || "N/A") + '</span></p>' +
-            '<p><span class="text-gray-500">Items:</span> ' + itemCount + '</p>' +
+            '<p><span class="text-gray-500">Items:</span> ' + itemsLine + '</p>' +
             bwHtml : "") +
             '</div>' + errorMsg + itemsHtml +
             (inst.last_seen ? '<p class="text-xs text-gray-600 mt-2">Last seen: ' + formatTime(inst.last_seen) + '</p>' : "") +
