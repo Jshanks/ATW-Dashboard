@@ -50,16 +50,8 @@ def _get_tracker_pair():
             continue
         if not s.downloader:
             continue
-        slug = ""
         if s.project_slug:
-            slug = s.project_slug.lower().replace(" ", "")
-        elif s.current_project:
-            slug = s.current_project.lower()
-            for ch in [" ", ".", ",", "'", '"', "!", "?", ":", ";", "-", "the", "archiving", "sets", "of", "discovered", "outlinks"]:
-                slug = slug.replace(ch, "")
-            slug = slug.strip()
-        if slug:
-            return slug, s.downloader
+            return s.project_slug, s.downloader
     return None, None
 
 
@@ -316,9 +308,7 @@ async def bulk_change_project(request: BulkProjectRequest):
         if name not in clients:
             results[name] = {"status": "error", "detail": "Not found"}
             continue
-        client = clients[name]
-        client.set_pending_project(request.project_name)
-        success = await client.change_project(request.project_name)
+        success = await clients[name].change_project(request.project_name)
         results[name] = {"status": "ok" if success else "error"}
     return {"results": results}
 
@@ -335,16 +325,11 @@ async def get_tracker_stats_endpoint():
         if not s.downloader:
             continue
 
-        slug = ""
-        if s.project_slug:
-            slug = s.project_slug.lower().replace(" ", "")
-        elif s.current_project:
-            slug = s.current_project.lower()
-            for ch in [" ", ".", ",", "'", '"', "!", "?", ":", ";", "-", "the", "archiving", "sets", "of", "discovered", "outlinks"]:
-                slug = slug.replace(ch, "")
-            slug = slug.strip()
+        slug = s.project_slug
+        if not slug:
+            continue
 
-        if slug and slug not in seen:
+        if slug not in seen:
             seen[slug] = s.downloader
             logger.debug("Tracker pair: slug=%s downloader=%s (from %s)", slug, s.downloader, s.name)
 

@@ -56,7 +56,6 @@ class WarriorStatus(BaseModel):
     reconnect_attempts: int = 0
     current_project: str = ""
     project_slug: str = ""
-    pending_project: str = ""
     downloader: str = ""
     concurrent_items: int = 0
     items: list[ItemStatus] = []

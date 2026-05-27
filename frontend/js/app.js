@@ -203,10 +203,6 @@
             if (projectDisplay) {
                 projectBadgeHtml = '<span class="project-badge" title="' + escapeHtml(inst.current_project || projectDisplay) + '">' + escapeHtml(projectDisplay) + '</span>';
             }
-            if (inst.pending_project) {
-                projectBadgeHtml += '<span class="project-pending pending-pulse" title="Switching to ' + escapeHtml(inst.pending_project) + '">' +
-                    '&#x21bb; ' + escapeHtml(inst.pending_project) + '</span>';
-            }
         }
 
         // Bandwidth

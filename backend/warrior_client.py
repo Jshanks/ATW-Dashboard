@@ -46,8 +46,6 @@ STAGE_MAP = {
     "integrity": ItemState.PROCESSING,
 }
 
-# Items in active states that haven't been updated in this many seconds
-# get demoted to WAITING to prevent stale "active" counts
 STALE_ITEM_TIMEOUT = 120
 
 
@@ -59,41 +57,6 @@ def classify_stage(text):
     if lower == "" or "idle" in lower:
         return ItemState.WAITING
     return ItemState.UNKNOWN
-
-
-def _normalize_slug(text):
-    """Normalize a project name to a comparable slug: lowercase, no spaces."""
-    if not text:
-        return ""
-    return text.lower().replace(" ", "").replace(".", "").replace(",", "")
-
-
-def _extract_project_name(project_html):
-    """Extract project name from the project_html blob sent by seesaw."""
-    if not project_html:
-        return ""
-    soup = BeautifulSoup(project_html, "lxml")
-    h2 = soup.find("h2")
-    if h2:
-        parts = []
-        for child in h2.children:
-            if isinstance(child, str):
-                t = child.strip().strip("\u00b7").strip()
-                if t:
-                    parts.append(t)
-        if parts:
-            return parts[0]
-        text = h2.get_text(strip=True)
-        for suffix in ["\u00b7Leaderboard", "Leaderboard", "\u00b7 Leaderboard"]:
-            text = text.replace(suffix, "").strip().rstrip("\u00b7").strip()
-        if text:
-            return text
-    text = soup.get_text(" ", strip=True)
-    for suffix in ["\u00b7Leaderboard", "Leaderboard"]:
-        text = text.replace(suffix, "").strip()
-    if text:
-        return text.split("\n")[0].strip()[:80]
-    return ""
 
 
 class WarriorClient:
@@ -125,9 +88,8 @@ class WarriorClient:
 
         # Item tracking
         self._items = {}
-        self._item_updated = {}  # item_id -> monotonic timestamp
+        self._item_updated = {}
         self._completed_count = 0
-        self._pending_project = ""
 
     def _build_url(self):
         return "http://" + self.config.host + ":" + str(self.config.port)
@@ -168,8 +130,8 @@ class WarriorClient:
             try:
                 if not self._sockjs_connected:
                     self._sockjs_connected = await self._sockjs_open()
-                    if self._sockjs_connected and not self._status.downloader:
-                        await self._fetch_downloader()
+                    if self._sockjs_connected:
+                        await self._fetch_settings_and_project()
 
                 if self._sockjs_connected:
                     success = await self._sockjs_poll()
@@ -208,10 +170,15 @@ class WarriorClient:
         await asyncio.sleep(delay)
 
     # ------------------------------------------------------------------
-    # Fetch downloader nickname from settings page
+    # Fetch settings (downloader) and selected project from warrior API
     # ------------------------------------------------------------------
+    async def _fetch_settings_and_project(self):
+        """Fetch downloader name and selected project on connect."""
+        await self._fetch_downloader()
+        await self._fetch_selected_project()
+
     async def _fetch_downloader(self):
-        """Fetch the downloader nickname from the warrior's settings page."""
+        """Fetch the downloader nickname from /api/settings."""
         try:
             resp = await self._http_client.get(
                 self._build_url() + "/api/settings",
@@ -227,6 +194,69 @@ class WarriorClient:
                 logger.info("[%s] Downloader: %s", self.config.name, self._status.downloader)
         except Exception as e:
             logger.debug("[%s] Could not fetch downloader: %s", self.config.name, e)
+
+    async def _fetch_selected_project(self):
+        """Fetch the selected project from /api/all-projects.
+
+        The HTML contains <li id="project-{slug}"> elements.
+        The selected project has a 'selected' class or a 'Selected' button.
+        """
+        try:
+            resp = await self._http_client.get(
+                self._build_url() + "/api/all-projects",
+                auth=self._get_auth(),
+                timeout=10.0,
+            )
+            if resp.status_code != 200:
+                logger.debug("[%s] /api/all-projects returned %d", self.config.name, resp.status_code)
+                return
+
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            # Strategy 1: look for <li> with class containing "selected"
+            selected_li = soup.find("li", class_=lambda c: c and "selected" in c)
+
+            # Strategy 2: look for a submit/button with value "Selected"
+            if not selected_li:
+                selected_btn = soup.find("input", {"value": "Selected"})
+                if not selected_btn:
+                    selected_btn = soup.find("button", string=lambda s: s and "Selected" in s)
+                if not selected_btn:
+                    selected_btn = soup.find("a", string=lambda s: s and "Selected" in s)
+                if selected_btn:
+                    selected_li = selected_btn.find_parent("li")
+
+            # Strategy 3: look for any element with "selected" in text within a <li>
+            if not selected_li:
+                for li in soup.find_all("li"):
+                    li_id = li.get("id", "")
+                    if li_id.startswith("project-"):
+                        # Check for "selected" class on any child
+                        if li.find(class_=lambda c: c and "selected" in c.lower()):
+                            selected_li = li
+                            break
+
+            if not selected_li:
+                logger.debug("[%s] Could not find selected project in /api/all-projects", self.config.name)
+                return
+
+            # Extract slug from id="project-{slug}"
+            li_id = selected_li.get("id", "")
+            if li_id.startswith("project-"):
+                slug = li_id[len("project-"):]
+                self._status.project_slug = slug
+                logger.info("[%s] Project slug: %s", self.config.name, slug)
+
+            # Extract display name from heading or first strong/bold text
+            name_el = selected_li.find(["h3", "h4", "strong", "b"])
+            if name_el:
+                name = name_el.get_text(strip=True)
+                if name:
+                    self._status.current_project = name
+                    logger.info("[%s] Project name: %s", self.config.name, name)
+
+        except Exception as e:
+            logger.debug("[%s] Could not fetch selected project: %s", self.config.name, e)
 
     # ------------------------------------------------------------------
     # SockJS xhr-polling — connects to root (/) per seesaw-kit
@@ -341,21 +371,28 @@ class WarriorClient:
         elif event == "warrior.projects_loaded":
             pass
         elif event == "warrior.project_selected":
-            pass
+            self._on_project_selected(msg)
         elif event == "warrior.settings_update":
             pass
+
+    def _on_project_selected(self, msg):
+        """Handle warrior.project_selected — re-fetch project from API."""
+        asyncio.create_task(self._fetch_selected_project())
 
     def _on_project_refresh(self, msg):
         """Handle project.refresh — full state dump on connect."""
         if not isinstance(msg, dict):
             return
 
-        project = msg.get("project", {})
-        if isinstance(project, dict):
-            html = project.get("project_html", "")
-            name = _extract_project_name(html)
-            if name:
-                self._status.current_project = name
+        # Don't overwrite project name from project_html if we already
+        # have a clean name from /api/all-projects. Only use as fallback.
+        if not self._status.current_project:
+            project = msg.get("project", {})
+            if isinstance(project, dict):
+                html = project.get("project_html", "")
+                name = self._extract_project_name(html)
+                if name:
+                    self._status.current_project = name
 
         items_raw = msg.get("items", [])
         self._items.clear()
@@ -371,8 +408,36 @@ class WarriorClient:
 
         self._sync_items_to_status()
 
+    @staticmethod
+    def _extract_project_name(project_html):
+        """Extract project name from project_html as a fallback."""
+        if not project_html:
+            return ""
+        soup = BeautifulSoup(project_html, "lxml")
+        h2 = soup.find("h2")
+        if h2:
+            parts = []
+            for child in h2.children:
+                if isinstance(child, str):
+                    t = child.strip().strip("\u00b7").strip()
+                    if t:
+                        parts.append(t)
+            if parts:
+                return parts[0]
+            text = h2.get_text(strip=True)
+            for suffix in ["\u00b7Leaderboard", "Leaderboard", "\u00b7 Leaderboard"]:
+                text = text.replace(suffix, "").strip().rstrip("\u00b7").strip()
+            if text:
+                return text
+        text = soup.get_text(" ", strip=True)
+        for suffix in ["\u00b7Leaderboard", "Leaderboard"]:
+            text = text.replace(suffix, "").strip()
+        if text:
+            return text.split("\n")[0].strip()[:80]
+        return ""
+
     def _on_bandwidth(self, msg):
-        """Handle bandwidth event: {received, receiving, sent, sending}."""
+        """Handle bandwidth event."""
         if not isinstance(msg, dict):
             return
         self._status.bytes_uploaded = int(msg.get("sent", 0))
@@ -381,19 +446,16 @@ class WarriorClient:
         self._status.bandwidth_down = float(msg.get("receiving", 0))
 
     def _on_warrior_status(self, msg):
-        """Handle warrior.status."""
         if not isinstance(msg, dict):
             return
 
     def _on_item_new(self, msg):
-        """Handle project.item.new — a new item was started."""
         if not isinstance(msg, dict):
             return
         self._ingest_item(msg)
         self._sync_items_to_status()
 
     def _on_item_task(self, msg):
-        """Handle project.item.task — a task within an item changed status."""
         if not isinstance(msg, dict):
             return
         item_id = str(msg.get("id", ""))
@@ -408,7 +470,6 @@ class WarriorClient:
                 self._sync_items_to_status()
 
     def _on_item_completed(self, msg, final_state):
-        """Handle project.item.completed or project.item.failed."""
         if not isinstance(msg, dict):
             return
         item_id = str(msg.get("id", ""))
@@ -421,30 +482,10 @@ class WarriorClient:
             self._sync_items_to_status()
 
     def _ingest_item(self, item):
-        """Parse a raw item dict and store in our tracking dict."""
         item_id = str(item.get("id", ""))
         if not item_id:
             return
         name = item.get("name", "Item " + item_id)
-        project = item.get("project", "")
-
-        if project:
-            self._status.project_slug = project
-            if not self._status.current_project or self._status.current_project == "Unknown":
-                self._status.current_project = project
-
-            # Check if pending project change has taken effect
-            # Compare normalized slugs: "usgovernment" == "usgovernment"
-            if self._pending_project:
-                pending_norm = _normalize_slug(self._pending_project)
-                project_norm = _normalize_slug(project)
-                if pending_norm == project_norm:
-                    logger.info(
-                        "[%s] Pending project change confirmed: %s",
-                        self._status.name, project,
-                    )
-                    self._pending_project = ""
-                    self._status.pending_project = ""
 
         tasks = item.get("tasks", [])
         current_task_name = ""
@@ -471,12 +512,8 @@ class WarriorClient:
         self._item_updated[item_id] = time.monotonic()
 
     def _sync_items_to_status(self):
-        """Push the current items dict to the status model, demoting stale items."""
         now = time.monotonic()
 
-        # Demote stale active items to WAITING
-        # If an item has been in a non-idle, non-terminal state for too long
-        # without any update, it's likely a missed completion event
         idle_states = (ItemState.WAITING, ItemState.GETTING_TASK, ItemState.UNKNOWN)
         terminal_states = (ItemState.DONE, ItemState.ERROR)
         for item_id, item in self._items.items():
@@ -495,7 +532,6 @@ class WarriorClient:
         done = [i for i in self._items.values() if i.state in terminal_states]
         self._status.items = active + done[-2:]
 
-        # Clean up old completed items
         if len(self._items) > 50:
             completed_ids = [k for k, v in self._items.items() if v.state in terminal_states]
             for cid in completed_ids[:-5]:
@@ -503,13 +539,8 @@ class WarriorClient:
                 self._item_updated.pop(cid, None)
 
     # ------------------------------------------------------------------
-    # Push settings / change project / pending
+    # Push settings / change project
     # ------------------------------------------------------------------
-    def set_pending_project(self, slug):
-        """Mark a project change as pending until the warrior confirms it."""
-        self._pending_project = slug
-        self._status.pending_project = slug
-
     async def update_settings(self, settings):
         config_data = {}
         if settings.downloader is not None:
@@ -527,11 +558,9 @@ class WarriorClient:
         return await self._post_settings(config_data)
 
     async def change_project(self, project_name):
-        """Change the selected project via POST /api/settings."""
         return await self._post_settings({"selected_project": project_name})
 
     async def _post_settings(self, data):
-        """POST form data to /api/settings."""
         try:
             resp = await self._http_client.post(
                 self._build_url() + "/api/settings",
