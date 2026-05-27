@@ -102,7 +102,8 @@ async def _broadcast_loop():
             for client in clients.values():
                 s = client.status
                 if s.connection_state == ConnectionState.ONLINE:
-                    history.record(s.name, s.bandwidth_down, s.bandwidth_up)
+                    total_bytes = s.bytes_downloaded + s.bytes_uploaded
+                    history.record(s.name, total_bytes, s.completed_items)
 
             if not ws_connections:
                 continue

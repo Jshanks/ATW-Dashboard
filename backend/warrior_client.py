@@ -42,6 +42,10 @@ STAGE_MAP = {
     "movefiles": ItemState.PROCESSING,
     "deduplicate": ItemState.PROCESSING,
     "waiting": ItemState.WAITING,
+    "checkintegrity": ItemState.PROCESSING,
+    "check": ItemState.PROCESSING,
+    "setbadurls": ItemState.PROCESSING,
+    "integrity": ItemState.PROCESSING,
 }
 
 
@@ -118,6 +122,9 @@ class WarriorClient:
 
         # Item tracking (id -> ItemStatus)
         self._items: dict[str, ItemStatus] = {}
+  
+        # Completed items counter
+        self._completed_count = 0
 
     def _build_url(self) -> str:
         return "http://" + self.config.host + ":" + str(self.config.port)
@@ -318,6 +325,27 @@ class WarriorClient:
         if not isinstance(msg, dict):
             return
 
+        project = msg.get("project", {})
+        if isinstance(project, dict):
+            html = project.get("project_html", "")
+            name = _extract_project_name(html)
+            if name:
+                self._status.current_project = name
+
+        items_raw = msg.get("items", [])
+        self._items.clear()
+        for item in items_raw:
+            if isinstance(item, dict):
+                self._ingest_item(item)
+
+        # Count already-completed items from the refresh payload
+        for item in items_raw:
+            if isinstance(item, dict) and item.get("status") == "completed":
+                self._completed_count += 1
+        self._status.completed_items = self._completed_count
+
+        self._sync_items_to_status()
+
         # Project name from project_html
         project = msg.get("project", {})
         if isinstance(project, dict):
@@ -384,6 +412,9 @@ class WarriorClient:
         item_id = str(msg.get("id", ""))
         if item_id in self._items:
             self._items[item_id].state = final_state
+            if final_state == ItemState.DONE:
+                self._completed_count += 1
+                self._status.completed_items = self._completed_count
             self._sync_items_to_status()
 
     def _ingest_item(self, item: dict):

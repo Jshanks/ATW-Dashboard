@@ -1,5 +1,5 @@
 /**
- * ATW Dashboard -- Frontend Application v2.1
+ * ATW Dashboard -- Frontend Application v2.2
  */
 (function () {
     "use strict";
@@ -9,11 +9,13 @@
     var MAX_WS_RECONNECT = 30000;
     var dashboardState = { instances: [], total_online: 0, total_offline: 0, total_items_active: 0 };
     var knownInstances = new Set();
+
+    // Items in these states are "idle" — everything else is "active"
     var IDLE_STATES = { "getting_task": true, "waiting": true, "unknown": true };
 
     // Chart state
     var bwChart = null;
-    var chartMode = "download"; // "download" or "upload"
+    var chartMode = "data"; // "data" or "items"
     var chartColors = [
         "#06b6d4","#f97316","#a855f7","#22c55e","#ef4444","#eab308",
         "#ec4899","#14b8a6","#6366f1","#f43f5e","#84cc16","#0ea5e9"
@@ -50,8 +52,8 @@
     var projectStatus = document.getElementById("project-status");
     var trackerBar = document.getElementById("tracker-bar");
     var trackerContent = document.getElementById("tracker-stats-content");
-    var chartDlBtn = document.getElementById("chart-dl-btn");
-    var chartUlBtn = document.getElementById("chart-ul-btn");
+    var chartDataBtn = document.getElementById("chart-data-btn");
+    var chartItemsBtn = document.getElementById("chart-items-btn");
 
     // ---- Utility ----
     function escapeHtml(str) {
@@ -92,6 +94,13 @@
         if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
         if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + " MB";
         return (bytes / 1073741824).toFixed(2) + " GB";
+    }
+    function fmtNum(n) {
+        if (n === null || n === undefined) return "0";
+        if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+        if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+        if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+        return String(n);
     }
 
     // ---- WebSocket ----
@@ -200,6 +209,7 @@
                     : '<span class="w-2.5 h-2.5 rounded-full bg-red-500"></span>';
         var stateLabel = inst.connection_state.replace("_", " ").toUpperCase();
 
+        // Bandwidth
         var bwHtml = "";
         if (isOnline && (inst.bandwidth_down > 0 || inst.bandwidth_up > 0 || inst.bytes_downloaded > 0)) {
             bwHtml = '<p><span class="text-gray-500">BW:</span> ' +
@@ -212,36 +222,31 @@
             }
         }
 
-        var idleItems = [], activeItems = [];
+        // Item summary — count idle vs active
+        var idleCount = 0, activeCount = 0;
         if (inst.items) {
             for (var i = 0; i < inst.items.length; i++) {
-                if (IDLE_STATES[inst.items[i].state]) idleItems.push(inst.items[i]);
-                else activeItems.push(inst.items[i]);
+                if (IDLE_STATES[inst.items[i].state]) idleCount++;
+                else activeCount++;
             }
         }
-        var totalCount = (inst.items && inst.items.length) ? inst.items.length : 0;
+        var totalCount = idleCount + activeCount;
 
-        var itemsHtml = "";
+        var itemsLine = "";
         if (totalCount > 0) {
-            itemsHtml = '<div class="items-container mt-3">';
-            for (var a = 0; a < activeItems.length; a++) {
-                var item = activeItems[a];
-                var badgeClass = "badge-" + item.state;
-                var taskDesc = item.task_description || "";
-                var itemName = item.item_name || "";
-                var fullDesc = itemName;
-                if (taskDesc && taskDesc !== itemName) fullDesc = itemName + " \u2014 " + taskDesc;
-                itemsHtml += '<div class="item-row">' +
-                    '<span class="item-badge ' + badgeClass + '">' + escapeHtml(item.state) + '</span>' +
-                    '<span class="item-desc" title="' + escapeHtml(fullDesc) + '">' + escapeHtml(fullDesc) + '</span></div>';
-            }
-            if (idleItems.length > 0) {
-                itemsHtml += '<div class="idle-summary"><span class="idle-dot"></span><span>' +
-                    idleItems.length + ' item' + (idleItems.length !== 1 ? 's' : '') + ' waiting for tasks</span></div>';
-            }
-            itemsHtml += '</div>';
-        } else if (isOnline) {
-            itemsHtml = '<p class="text-xs text-gray-500 mt-3">No active items</p>';
+            var parts = [];
+            if (activeCount > 0) parts.push('<span class="text-green-400">' + activeCount + " active</span>");
+            if (idleCount > 0) parts.push('<span class="text-gray-500">' + idleCount + " idle</span>");
+            itemsLine = parts.join(' <span class="text-gray-600">&middot;</span> ');
+        } else {
+            itemsLine = '<span class="text-gray-500">0</span>';
+        }
+
+        // Completed items this session
+        var doneHtml = "";
+        if (isOnline && inst.completed_items > 0) {
+            doneHtml = '<p><span class="text-gray-500">Done:</span> <span class="text-green-300">' +
+                fmtNum(inst.completed_items) + ' items</span></p>';
         }
 
         var errorMsg = inst.error_message
@@ -254,12 +259,6 @@
         var removeBtn = '<button data-remove-instance="' + escapeHtml(inst.name) + '" class="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Remove">' +
             '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>';
 
-        var itemsLine = "";
-        if (totalCount > 0) {
-            if (activeItems.length > 0) itemsLine = '<span class="text-green-400">' + activeItems.length + ' working</span> / ' + totalCount;
-            else itemsLine = totalCount + ' <span class="text-gray-500">idle</span>';
-        } else { itemsLine = "0"; }
-
         return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group">' +
             '<div class="absolute top-2 right-2 flex items-center gap-1">' + editBtn + removeBtn + '</div>' +
             '<div class="flex items-center gap-2 mb-2">' + statusDot +
@@ -268,13 +267,14 @@
             '<div class="text-xs text-gray-400 space-y-0.5">' +
             '<p><span class="text-gray-500">URL:</span> ' + escapeHtml(inst.url) + '</p>' +
             (isOnline ? '<p><span class="text-gray-500">Project:</span> <span class="text-white font-medium">' + escapeHtml(inst.current_project || "N/A") + '</span></p>' +
-            '<p><span class="text-gray-500">Items:</span> ' + itemsLine + '</p>' + bwHtml : "") +
-            '</div>' + errorMsg + itemsHtml +
+            '<p><span class="text-gray-500">Items:</span> ' + itemsLine + '</p>' +
+            doneHtml + bwHtml : "") +
+            '</div>' + errorMsg +
             (inst.last_seen ? '<p class="text-xs text-gray-600 mt-2">Last seen: ' + formatTime(inst.last_seen) + '</p>' : "") +
             '</div>';
     }
 
-    // ---- 24h Chart ----
+    // ---- 24h Chart — Total Data / Completed Items ----
     function initChart() {
         var ctx = document.getElementById("bw-chart").getContext("2d");
         bwChart = new Chart(ctx, {
@@ -293,7 +293,10 @@
                         borderColor: "#374151",
                         borderWidth: 1,
                         callbacks: {
-                            label: function(ctx) { return ctx.dataset.label + ": " + fmtBytes(ctx.parsed.y); }
+                            label: function(ctx) {
+                                if (chartMode === "data") return ctx.dataset.label + ": " + fmtTotal(ctx.parsed.y);
+                                return ctx.dataset.label + ": " + fmtNum(ctx.parsed.y) + " items";
+                            }
                         }
                     }
                 },
@@ -310,7 +313,10 @@
                         ticks: {
                             color: "#6b7280",
                             font: { size: 10 },
-                            callback: function(val) { return fmtBytes(val); }
+                            callback: function(val) {
+                                if (chartMode === "data") return fmtTotal(val);
+                                return fmtNum(val);
+                            }
                         }
                     }
                 },
@@ -332,7 +338,8 @@
                 var samples = data[name];
                 var points = [];
                 for (var j = 0; j < samples.length; j++) {
-                    var val = chartMode === "download" ? samples[j][1] : samples[j][2];
+                    // samples[j] = [timestamp, total_bytes, completed_items]
+                    var val = chartMode === "data" ? samples[j][1] : samples[j][2];
                     points.push({ x: samples[j][0] * 1000, y: val });
                 }
                 bwChart.data.datasets.push({
@@ -353,11 +360,11 @@
         if (!bwChart || !dashboardState.instances) return;
         chartLastUpdate = now;
 
-        var ts = now;
         var state = dashboardState;
         for (var i = 0; i < state.instances.length; i++) {
             var inst = state.instances[i];
             if (inst.connection_state !== "online") continue;
+
             var ds = null;
             for (var d = 0; d < bwChart.data.datasets.length; d++) {
                 if (bwChart.data.datasets[d].label === inst.name) { ds = bwChart.data.datasets[d]; break; }
@@ -372,10 +379,12 @@
                 };
                 bwChart.data.datasets.push(ds);
             }
-            var val = chartMode === "download" ? (inst.bandwidth_down || 0) : (inst.bandwidth_up || 0);
-            ds.data.push({ x: ts, y: val });
-            // Trim to 24h
-            var cutoff = ts - 86400000;
+
+            var totalBytes = (inst.bytes_downloaded || 0) + (inst.bytes_uploaded || 0);
+            var val = chartMode === "data" ? totalBytes : (inst.completed_items || 0);
+            ds.data.push({ x: now, y: val });
+
+            var cutoff = now - 86400000;
             while (ds.data.length > 0 && ds.data[0].x < cutoff) ds.data.shift();
         }
         bwChart.update("none");
@@ -383,17 +392,17 @@
 
     function setChartMode(mode) {
         chartMode = mode;
-        if (mode === "download") {
-            chartDlBtn.className = "text-xs px-3 py-1 rounded bg-cyan-900/50 text-cyan-400 border border-cyan-800";
-            chartUlBtn.className = "text-xs px-3 py-1 rounded bg-gray-800 text-gray-400 border border-gray-700";
+        if (mode === "data") {
+            chartDataBtn.className = "text-xs px-3 py-1 rounded bg-cyan-900/50 text-cyan-400 border border-cyan-800";
+            chartItemsBtn.className = "text-xs px-3 py-1 rounded bg-gray-800 text-gray-400 border border-gray-700";
         } else {
-            chartDlBtn.className = "text-xs px-3 py-1 rounded bg-gray-800 text-gray-400 border border-gray-700";
-            chartUlBtn.className = "text-xs px-3 py-1 rounded bg-orange-900/50 text-orange-400 border border-orange-800";
+            chartDataBtn.className = "text-xs px-3 py-1 rounded bg-gray-800 text-gray-400 border border-gray-700";
+            chartItemsBtn.className = "text-xs px-3 py-1 rounded bg-green-900/50 text-green-400 border border-green-800";
         }
         loadHistory();
     }
-    chartDlBtn.addEventListener("click", function() { setChartMode("download"); });
-    chartUlBtn.addEventListener("click", function() { setChartMode("upload"); });
+    chartDataBtn.addEventListener("click", function() { setChartMode("data"); });
+    chartItemsBtn.addEventListener("click", function() { setChartMode("items"); });
 
     // ---- Tracker Stats ----
     function loadTrackerStats() {
@@ -409,7 +418,6 @@
             for (var i = 0; i < data.tracker_stats.length; i++) {
                 var s = data.tracker_stats[i];
                 var sep = i > 0 ? '<span class="text-gray-700 mx-2">|</span>' : "";
-
                 var userLine = "";
                 if (s.user_items_done > 0 || s.user_bytes > 0) {
                     userLine = '<span class="text-cyan-400">You: ' +
@@ -417,7 +425,6 @@
                 } else {
                     userLine = '<span class="text-gray-500">You: no data yet</span>';
                 }
-
                 html += sep + '<div class="flex items-center gap-2 flex-wrap">' +
                     '<span class="text-white font-medium">\uD83C\uDFDB\uFE0F ' + escapeHtml(s.project) + '</span>' +
                     '<span class="text-gray-600">\u2014</span>' +

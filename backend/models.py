@@ -64,6 +64,7 @@ class WarriorStatus(BaseModel):
     bandwidth_up: float = 0.0
     bytes_downloaded: int = 0
     bytes_uploaded: int = 0
+    completed_items: int = 0
 
 
 class BulkSettingsRequest(BaseModel):
