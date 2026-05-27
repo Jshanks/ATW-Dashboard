@@ -8,7 +8,7 @@ SAMPLE_INTERVAL = 30
 MAX_SAMPLES = 2880
 
 _lock = threading.Lock()
-_history: dict[str, deque] = {}  # name -> deque of (timestamp, total_bytes, completed_items)
+_history: dict[str, deque] = {}
 _last_sample: dict[str, float] = {}
 
 

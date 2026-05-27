@@ -64,29 +64,23 @@ def _extract_project_name(project_html: str) -> str:
     if not project_html:
         return ""
     soup = BeautifulSoup(project_html, "lxml")
-    # The project_html typically has an h2 with the project title,
-    # sometimes followed by links like "·Leaderboard" — grab only
-    # the first text node or the h2 contents before any anchors.
     h2 = soup.find("h2")
     if h2:
-        # Get direct text children only (skip child tags like <a>)
         parts = []
         for child in h2.children:
             if isinstance(child, str):
-                t = child.strip().strip("·").strip()
+                t = child.strip().strip("\u00b7").strip()
                 if t:
                     parts.append(t)
         if parts:
             return parts[0]
-        # Fallback: full h2 text, strip common suffixes
         text = h2.get_text(strip=True)
-        for suffix in ["·Leaderboard", "Leaderboard", "· Leaderboard"]:
-            text = text.replace(suffix, "").strip().rstrip("·").strip()
+        for suffix in ["\u00b7Leaderboard", "Leaderboard", "\u00b7 Leaderboard"]:
+            text = text.replace(suffix, "").strip().rstrip("\u00b7").strip()
         if text:
             return text
-    # Fallback: first meaningful text on the page
     text = soup.get_text(" ", strip=True)
-    for suffix in ["·Leaderboard", "Leaderboard"]:
+    for suffix in ["\u00b7Leaderboard", "Leaderboard"]:
         text = text.replace(suffix, "").strip()
     if text:
         return text.split("\n")[0].strip()[:80]
@@ -120,11 +114,10 @@ class WarriorClient:
         self._sockjs_base: Optional[str] = None
         self._sockjs_connected = False
 
-        # Item tracking (id -> ItemStatus)
+        # Item tracking
         self._items: dict[str, ItemStatus] = {}
-  
-        # Completed items counter
         self._completed_count = 0
+        self._pending_project: str = ""
 
     def _build_url(self) -> str:
         return "http://" + self.config.host + ":" + str(self.config.port)
@@ -178,7 +171,6 @@ class WarriorClient:
                         self._sockjs_connected = False
                         logger.debug("[%s] SockJS dropped, retrying", self.config.name)
 
-                # SockJS failed — wait before retry
                 await self._handle_disconnect()
 
             except asyncio.CancelledError:
@@ -251,7 +243,7 @@ class WarriorClient:
                     self._dispatch_event(msg)
                 return True
             elif frame == "h":
-                return True  # heartbeat
+                return True
             elif frame.startswith("c"):
                 logger.info("[%s] SockJS closed by server", self.config.name)
                 return False
@@ -259,7 +251,7 @@ class WarriorClient:
                 return True
 
         except httpx.TimeoutException:
-            return True  # timeout is normal for long-poll
+            return True
         except Exception as e:
             logger.warning("[%s] SockJS poll error: %s", self.config.name, e)
             return False
@@ -282,7 +274,7 @@ class WarriorClient:
             return []
 
     # ------------------------------------------------------------------
-    # Event dispatch — mirrors the warrior's script.js registerEvent()
+    # Event dispatch
     # ------------------------------------------------------------------
     def _dispatch_event(self, raw: dict):
         """Route a {event_name, message} envelope to the right handler."""
@@ -302,7 +294,7 @@ class WarriorClient:
         elif event == "project.item.task":
             self._on_item_task(msg)
         elif event == "project.item.output":
-            pass  # log output — we don't need this
+            pass
         elif event == "project.item.completed":
             self._on_item_completed(msg, ItemState.DONE)
         elif event == "project.item.failed":
@@ -310,7 +302,7 @@ class WarriorClient:
         elif event == "warrior.status":
             self._on_warrior_status(msg)
         elif event == "runner.status":
-            pass  # runner status — handled via warrior.status
+            pass
         elif event == "instance_id":
             pass
         elif event == "warrior.projects_loaded":
@@ -338,7 +330,6 @@ class WarriorClient:
             if isinstance(item, dict):
                 self._ingest_item(item)
 
-        # Count already-completed items from the refresh payload
         for item in items_raw:
             if isinstance(item, dict) and item.get("status") == "completed":
                 self._completed_count += 1
@@ -346,43 +337,19 @@ class WarriorClient:
 
         self._sync_items_to_status()
 
-        # Project name from project_html
-        project = msg.get("project", {})
-        if isinstance(project, dict):
-            html = project.get("project_html", "")
-            name = _extract_project_name(html)
-            if name:
-                self._status.current_project = name
-
-        # Runner status
-        status = msg.get("status", "")
-        if status:
-            logger.debug("[%s] Runner status: %s", self.config.name, status)
-
-        # Items — full list
-        items_raw = msg.get("items", [])
-        self._items.clear()
-        for item in items_raw:
-            if isinstance(item, dict):
-                self._ingest_item(item)
-        self._sync_items_to_status()
-
     def _on_bandwidth(self, msg):
         """Handle bandwidth event: {received, receiving, sent, sending}."""
         if not isinstance(msg, dict):
             return
-        # sent/sending = upload, received/receiving = download
         self._status.bytes_uploaded = int(msg.get("sent", 0))
         self._status.bytes_downloaded = int(msg.get("received", 0))
         self._status.bandwidth_up = float(msg.get("sending", 0))
         self._status.bandwidth_down = float(msg.get("receiving", 0))
 
     def _on_warrior_status(self, msg):
-        """Handle warrior.status — extract downloader if available."""
+        """Handle warrior.status."""
         if not isinstance(msg, dict):
             return
-        # The warrior status doesn't directly include downloader,
-        # but we can read it from settings if needed later.
 
     def _on_item_new(self, msg):
         """Handle project.item.new — a new item was started."""
@@ -425,11 +392,14 @@ class WarriorClient:
         name = item.get("name", "Item " + item_id)
         project = item.get("project", "")
 
-        # Update project name from item if we don't have one yet
-        if project and (not self._status.current_project or self._status.current_project == "Unknown"):
-            self._status.current_project = project
+        if project:
+            self._status.project_slug = project
+            if not self._status.current_project or self._status.current_project == "Unknown":
+                self._status.current_project = project
+            if self._pending_project and project.lower() == self._pending_project.lower():
+                self._pending_project = ""
+                self._status.pending_project = ""
 
-        # Determine current task from tasks list
         tasks = item.get("tasks", [])
         current_task_name = ""
         current_state = ItemState.WAITING
@@ -454,21 +424,24 @@ class WarriorClient:
         )
 
     def _sync_items_to_status(self):
-        """Push the current items dict to the status model, filtering out completed."""
-        # Show active items first, then recently completed (keep last 2)
+        """Push the current items dict to the status model."""
         active = [i for i in self._items.values() if i.state not in (ItemState.DONE, ItemState.ERROR)]
         done = [i for i in self._items.values() if i.state in (ItemState.DONE, ItemState.ERROR)]
         self._status.items = active + done[-2:]
 
-        # Clean up old completed items (keep tracking dict manageable)
         if len(self._items) > 50:
             completed_ids = [k for k, v in self._items.items() if v.state in (ItemState.DONE, ItemState.ERROR)]
             for cid in completed_ids[:-5]:
                 del self._items[cid]
 
     # ------------------------------------------------------------------
-    # Push settings / change project via API
+    # Push settings / change project / pending
     # ------------------------------------------------------------------
+    def set_pending_project(self, slug: str):
+        """Mark a project change as pending until the warrior confirms it."""
+        self._pending_project = slug
+        self._status.pending_project = slug
+
     async def update_settings(self, settings: WarriorSettings) -> bool:
         config_data = {}
         if settings.downloader is not None:
@@ -490,7 +463,7 @@ class WarriorClient:
         return await self._post_settings({"selected_project": project_name})
 
     async def _post_settings(self, data: dict) -> bool:
-        """POST form data to /api/settings (the confirmed seesaw endpoint)."""
+        """POST form data to /api/settings."""
         try:
             resp = await self._http_client.post(
                 self._build_url() + "/api/settings",

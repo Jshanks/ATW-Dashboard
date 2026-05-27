@@ -85,7 +85,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ATW Dashboard",
     description="Monitoring & control dashboard for ArchiveTeam Warrior instances",
-    version="2.1.0",
+    version="2.3.0",
     lifespan=lifespan,
 )
 
@@ -98,7 +98,7 @@ async def _broadcast_loop():
         try:
             await asyncio.sleep(2)
 
-            # Record bandwidth history for each online instance
+            # Record history for each online instance
             for client in clients.values():
                 s = client.status
                 if s.connection_state == ConnectionState.ONLINE:
@@ -265,58 +265,44 @@ async def bulk_change_project(request: BulkProjectRequest):
         if name not in clients:
             results[name] = {"status": "error", "detail": "Not found"}
             continue
-        success = await clients[name].change_project(request.project_name)
+        client = clients[name]
+        client.set_pending_project(request.project_name)
+        success = await client.change_project(request.project_name)
         results[name] = {"status": "ok" if success else "error"}
     return {"results": results}
 
 
 # -- Tracker stats --
 @app.get("/api/tracker")
-async def get_tracker_stats():
+async def get_tracker_stats_endpoint():
     """Get tracker leaderboard stats for the user across active projects."""
-    # Collect unique (project, downloader) pairs from online instances
-    pairs = set()
+    seen = {}
     for client in clients.values():
         s = client.status
-        if s.connection_state == ConnectionState.ONLINE and s.current_project and s.downloader:
-            # Normalize project name to URL slug
-            slug = s.current_project.lower().replace(" ", "").replace(".", "")
-            pairs.add((slug, s.downloader))
-            # Also try the raw project field from items if available
-            for item in s.items:
-                if item.item_name and ":" in item.item_name:
-                    pass  # item names are like "identifier:number"
+        if s.connection_state != ConnectionState.ONLINE:
+            continue
+        if not s.downloader:
+            continue
 
-    if not pairs:
+        slug = ""
+        if s.current_project:
+            slug = s.current_project.lower()
+            for ch in [" ", ".", ",", "'", '"', "!", "?", ":", ";", "-", "the", "archiving"]:
+                slug = slug.replace(ch, "")
+            slug = slug.strip()
+
+        if slug and slug not in seen:
+            seen[slug] = s.downloader
+
+    if not seen:
         return {"tracker_stats": [], "message": "No active project/downloader pairs found"}
 
     results = []
-    seen_projects = set()
-    for slug, downloader in pairs:
-        if slug in seen_projects:
-            continue
-        seen_projects.add(slug)
-
-        stats = await tracker.get_tracker_stats(slug)
+    for slug, downloader in seen.items():
+        stats = await tracker.get_project_data(slug)
         if not stats:
             continue
-
-        user_stats = tracker.find_downloader_stats(stats, downloader)
-
-        entry = {
-            "project": slug,
-            "downloader": downloader,
-            "user_items_done": 0,
-            "user_bytes": 0,
-            "total_items_done": stats.get("items_done", stats.get("total_items_done", 0)),
-            "total_items_out": stats.get("items_out", 0),
-            "downloader_count": stats.get("downloader_count", len(stats.get("downloaders", []))),
-        }
-
-        if user_stats:
-            entry["user_items_done"] = user_stats.get("items_done", user_stats.get("count", 0))
-            entry["user_bytes"] = user_stats.get("bytes", user_stats.get("data", 0))
-
+        entry = tracker.build_user_stats(stats, downloader, slug)
         results.append(entry)
 
     return {"tracker_stats": results}
@@ -325,7 +311,7 @@ async def get_tracker_stats():
 # -- History --
 @app.get("/api/history")
 async def get_history():
-    """Return 24h bandwidth history for all instances."""
+    """Return 24h activity history for all instances."""
     return history.get_all()
 
 

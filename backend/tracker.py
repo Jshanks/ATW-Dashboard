@@ -17,7 +17,7 @@ _cache_times: dict[str, float] = {}
 _lock = asyncio.Lock()
 
 
-async def get_project_data(project_slug: str) -> Optional:
+async def get_project_data(project_slug: str) -> Optional[dict]:
     """Fetch stats.json for a project, with caching."""
     now = time.monotonic()
 
@@ -44,7 +44,7 @@ async def get_project_data(project_slug: str) -> Optional:
 
 
 def build_user_stats(stats: dict, username: str, project_slug: str) -> dict:
-    """Build a stats dict from stats.json, skipping the active downloaders list."""
+    """Build a stats dict from stats.json."""
     result = {
         "project": project_slug,
         "downloader": username,
@@ -72,7 +72,7 @@ def build_user_stats(stats: dict, username: str, project_slug: str) -> dict:
     if isinstance(domain_bytes, dict):
         result["total_data_bytes"] = int(sum(domain_bytes.values()))
 
-    # -- Per-user items --
+    # -- Per-user items (downloader_count dict) --
     dl_count = stats.get("downloader_count", {})
     if isinstance(dl_count, dict):
         for key, val in dl_count.items():
@@ -80,7 +80,7 @@ def build_user_stats(stats: dict, username: str, project_slug: str) -> dict:
                 result["user_items_done"] = int(val)
                 break
 
-    # -- Per-user bytes --
+    # -- Per-user bytes (downloader_bytes dict) --
     dl_bytes = stats.get("downloader_bytes", {})
     if isinstance(dl_bytes, dict):
         for key, val in dl_bytes.items():

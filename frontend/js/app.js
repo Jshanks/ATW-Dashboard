@@ -1,5 +1,5 @@
 /**
- * ATW Dashboard -- Frontend Application v2.2
+ * ATW Dashboard -- Frontend Application v2.3
  */
 (function () {
     "use strict";
@@ -9,13 +9,10 @@
     var MAX_WS_RECONNECT = 30000;
     var dashboardState = { instances: [], total_online: 0, total_offline: 0, total_items_active: 0 };
     var knownInstances = new Set();
-
-    // Items in these states are "idle" — everything else is "active"
     var IDLE_STATES = { "getting_task": true, "waiting": true, "unknown": true };
 
-    // Chart state
     var bwChart = null;
-    var chartMode = "data"; // "data" or "items"
+    var chartMode = "data";
     var chartColors = [
         "#06b6d4","#f97316","#a855f7","#22c55e","#ef4444","#eab308",
         "#ec4899","#14b8a6","#6366f1","#f43f5e","#84cc16","#0ea5e9"
@@ -23,7 +20,6 @@
     var chartLastUpdate = 0;
     var CHART_UPDATE_THROTTLE = 10000;
 
-    // DOM refs
     var grid = document.getElementById("instance-grid");
     var totalOnlineEl = document.getElementById("total-online");
     var totalOfflineEl = document.getElementById("total-offline");
@@ -152,7 +148,7 @@
         totalOnlineEl.textContent = state.total_online || 0;
         totalOfflineEl.textContent = state.total_offline || 0;
 
-        var aggDl = 0, aggUl = 0, totalItems = 0, workingItems = 0;
+        var aggDl = 0, aggUl = 0, workingItems = 0;
         if (state.instances) {
             for (var i = 0; i < state.instances.length; i++) {
                 var inst = state.instances[i];
@@ -160,13 +156,12 @@
                 aggUl += inst.bandwidth_up || 0;
                 if (inst.items) {
                     for (var j = 0; j < inst.items.length; j++) {
-                        totalItems++;
                         if (!IDLE_STATES[inst.items[j].state]) workingItems++;
                     }
                 }
             }
         }
-        totalItemsEl.textContent = workingItems + "/" + totalItems;
+        totalItemsEl.textContent = workingItems;
         totalDlEl.textContent = fmtBytes(aggDl);
         totalUlEl.textContent = fmtBytes(aggUl);
 
@@ -209,6 +204,20 @@
                     : '<span class="w-2.5 h-2.5 rounded-full bg-red-500"></span>';
         var stateLabel = inst.connection_state.replace("_", " ").toUpperCase();
 
+        // Project badge (top-right, uses slug)
+        var projectBadgeHtml = "";
+        if (isOnline) {
+            var projectDisplay = inst.project_slug || inst.current_project || "";
+            if (projectDisplay) {
+                projectBadgeHtml = '<span class="project-badge" title="' + escapeHtml(inst.current_project || projectDisplay) + '">' + escapeHtml(projectDisplay) + '</span>';
+            }
+            // Pending project change indicator
+            if (inst.pending_project) {
+                projectBadgeHtml += '<span class="project-pending pending-pulse" title="Switching to ' + escapeHtml(inst.pending_project) + '">' +
+                    '&#x21bb; ' + escapeHtml(inst.pending_project) + '</span>';
+            }
+        }
+
         // Bandwidth
         var bwHtml = "";
         if (isOnline && (inst.bandwidth_down > 0 || inst.bandwidth_up > 0 || inst.bytes_downloaded > 0)) {
@@ -222,7 +231,7 @@
             }
         }
 
-        // Item summary — count idle vs active
+        // Item summary
         var idleCount = 0, activeCount = 0;
         if (inst.items) {
             for (var i = 0; i < inst.items.length; i++) {
@@ -231,7 +240,6 @@
             }
         }
         var totalCount = idleCount + activeCount;
-
         var itemsLine = "";
         if (totalCount > 0) {
             var parts = [];
@@ -260,21 +268,26 @@
             '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>';
 
         return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group">' +
-            '<div class="absolute top-2 right-2 flex items-center gap-1">' + editBtn + removeBtn + '</div>' +
+            // Top row: edit/remove buttons (far right, hover only) + project badge
+            '<div class="absolute top-2 right-2 flex items-center gap-1.5">' +
+                projectBadgeHtml +
+                editBtn + removeBtn +
+            '</div>' +
+            // Name + status
             '<div class="flex items-center gap-2 mb-2">' + statusDot +
             '<h3 class="font-semibold text-sm">' + escapeHtml(inst.name) + '</h3>' +
             '<span class="text-xs text-gray-500">' + stateLabel + reconnectInfo + '</span></div>' +
+            // Data lines
             '<div class="text-xs text-gray-400 space-y-0.5">' +
             '<p><span class="text-gray-500">URL:</span> ' + escapeHtml(inst.url) + '</p>' +
-            (isOnline ? '<p><span class="text-gray-500">Project:</span> <span class="text-white font-medium">' + escapeHtml(inst.current_project || "N/A") + '</span></p>' +
-            '<p><span class="text-gray-500">Items:</span> ' + itemsLine + '</p>' +
+            (isOnline ? '<p><span class="text-gray-500">Items:</span> ' + itemsLine + '</p>' +
             doneHtml + bwHtml : "") +
             '</div>' + errorMsg +
             (inst.last_seen ? '<p class="text-xs text-gray-600 mt-2">Last seen: ' + formatTime(inst.last_seen) + '</p>' : "") +
             '</div>';
     }
 
-    // ---- 24h Chart — Total Data / Completed Items ----
+    // ---- 24h Chart ----
     function initChart() {
         var ctx = document.getElementById("bw-chart").getContext("2d");
         bwChart = new Chart(ctx, {
@@ -338,7 +351,6 @@
                 var samples = data[name];
                 var points = [];
                 for (var j = 0; j < samples.length; j++) {
-                    // samples[j] = [timestamp, total_bytes, completed_items]
                     var val = chartMode === "data" ? samples[j][1] : samples[j][2];
                     points.push({ x: samples[j][0] * 1000, y: val });
                 }
@@ -364,26 +376,22 @@
         for (var i = 0; i < state.instances.length; i++) {
             var inst = state.instances[i];
             if (inst.connection_state !== "online") continue;
-
             var ds = null;
             for (var d = 0; d < bwChart.data.datasets.length; d++) {
                 if (bwChart.data.datasets[d].label === inst.name) { ds = bwChart.data.datasets[d]; break; }
             }
             if (!ds) {
                 ds = {
-                    label: inst.name,
-                    data: [],
+                    label: inst.name, data: [],
                     borderColor: chartColors[bwChart.data.datasets.length % chartColors.length],
                     backgroundColor: chartColors[bwChart.data.datasets.length % chartColors.length] + "20",
                     fill: false
                 };
                 bwChart.data.datasets.push(ds);
             }
-
             var totalBytes = (inst.bytes_downloaded || 0) + (inst.bytes_uploaded || 0);
             var val = chartMode === "data" ? totalBytes : (inst.completed_items || 0);
             ds.data.push({ x: now, y: val });
-
             var cutoff = now - 86400000;
             while (ds.data.length > 0 && ds.data[0].x < cutoff) ds.data.shift();
         }
