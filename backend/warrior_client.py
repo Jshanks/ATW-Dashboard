@@ -1,62 +1,461 @@
-"""Fetch and cache the active project list from WarriorHQ."""
+"""Async client for communicating with ArchiveTeam Warrior instances."""
 
 import asyncio
+import json
 import logging
+import random
+import re
+import string
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
+from bs4 import BeautifulSoup
+
+from backend.models import (
+    ConnectionState,
+    ItemState,
+    ItemStatus,
+    WarriorInstanceConfig,
+    WarriorSettings,
+    WarriorStatus,
+)
 
 logger = logging.getLogger(__name__)
 
-PROJECTS_URL = "https://warriorhq.archiveteam.org/projects.json"
-CACHE_TTL = 1800  # 30 minutes
+STAGE_MAP = {
+    "getitemfromtracker": ItemState.GETTING_TASK,
+    "get_item": ItemState.GETTING_TASK,
+    "preparedirectories": ItemState.PROCESSING,
+    "prepare": ItemState.PROCESSING,
+    "wgetdownload": ItemState.DOWNLOADING,
+    "wget": ItemState.DOWNLOADING,
+    "download": ItemState.DOWNLOADING,
+    "preparestatsfortracker": ItemState.PROCESSING,
+    "stats": ItemState.PROCESSING,
+    "uploadwithtracker": ItemState.UPLOADING,
+    "upload": ItemState.UPLOADING,
+    "rsync": ItemState.UPLOADING,
+    "senddonetotracker": ItemState.UPLOADING,
+    "done": ItemState.DONE,
+    "movefiles": ItemState.PROCESSING,
+    "deduplicate": ItemState.PROCESSING,
+    "waiting": ItemState.WAITING,
+}
 
-_cache: list[dict] = []
-_cache_time: float = 0
-_lock = asyncio.Lock()
+
+def classify_stage(text: str) -> ItemState:
+    lower = text.lower().strip()
+    for keyword, state in STAGE_MAP.items():
+        if keyword in lower:
+            return state
+    if lower == "" or "idle" in lower:
+        return ItemState.WAITING
+    return ItemState.UNKNOWN
 
 
-async def get_projects(force: bool = False) -> list[dict]:
-    """Return cached project list, refreshing if stale."""
-    global _cache, _cache_time
+def _extract_project_name(project_html: str) -> str:
+    """Extract project name from the project_html blob sent by seesaw."""
+    if not project_html:
+        return ""
+    soup = BeautifulSoup(project_html, "lxml")
+    # Look for h2, title text, or first significant text node
+    h2 = soup.find("h2")
+    if h2:
+        text = h2.get_text(strip=True)
+        if text:
+            return text
+    # Fallback: get all text and take the first non-empty line
+    text = soup.get_text(" ", strip=True)
+    if text:
+        return text.split("\n")[0].strip()[:80]
+    return ""
 
-    if not force and _cache and (time.monotonic() - _cache_time) < CACHE_TTL:
-        return _cache
 
-    async with _lock:
-        # Double-check after acquiring lock
-        if not force and _cache and (time.monotonic() - _cache_time) < CACHE_TTL:
-            return _cache
+class WarriorClient:
+    def __init__(
+        self,
+        instance_config: WarriorInstanceConfig,
+        reconnect_base: int = 5,
+        reconnect_max: int = 60,
+    ):
+        self.config = instance_config
+        self.reconnect_base = reconnect_base
+        self.reconnect_max = reconnect_max
+        self._reconnect_attempts = 0
+        self._status = WarriorStatus(
+            name=instance_config.name,
+            host=instance_config.host,
+            port=instance_config.port,
+            url=self._build_url(),
+            connection_state=ConnectionState.OFFLINE,
+        )
+        self._running = False
+        self._poll_interval = 5
+        self._poll_task: Optional[asyncio.Task] = None
+        self._http_client: Optional[httpx.AsyncClient] = None
 
+        # SockJS state
+        self._sockjs_base: Optional[str] = None
+        self._sockjs_connected = False
+
+        # Item tracking (id -> ItemStatus)
+        self._items: dict[str, ItemStatus] = {}
+
+    def _build_url(self) -> str:
+        return "http://" + self.config.host + ":" + str(self.config.port)
+
+    def _get_auth(self) -> Optional[tuple[str, str]]:
+        if self.config.http_username and self.config.http_password:
+            return (self.config.http_username, self.config.http_password)
+        return None
+
+    @property
+    def status(self) -> WarriorStatus:
+        return self._status
+
+    async def start(self, poll_interval: int = 5):
+        self._running = True
+        self._poll_interval = poll_interval
+        self._http_client = httpx.AsyncClient(timeout=10.0)
+        self._poll_task = asyncio.create_task(self._poll_loop(poll_interval))
+        logger.info("[%s] Started polling %s", self.config.name, self._build_url())
+
+    async def stop(self):
+        self._running = False
+        if self._poll_task:
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+        if self._http_client:
+            await self._http_client.aclose()
+        logger.info("[%s] Stopped polling", self.config.name)
+
+    # ------------------------------------------------------------------
+    # Main poll loop
+    # ------------------------------------------------------------------
+    async def _poll_loop(self, interval: int):
+        while self._running:
+            try:
+                if not self._sockjs_connected:
+                    self._sockjs_connected = await self._sockjs_open()
+
+                if self._sockjs_connected:
+                    success = await self._sockjs_poll()
+                    if success:
+                        self._reconnect_attempts = 0
+                        self._status.connection_state = ConnectionState.ONLINE
+                        self._status.error_message = ""
+                        self._status.last_seen = datetime.now(timezone.utc).isoformat()
+                        continue
+                    else:
+                        self._sockjs_connected = False
+                        logger.debug("[%s] SockJS dropped, retrying", self.config.name)
+
+                # SockJS failed — wait before retry
+                await self._handle_disconnect()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("[%s] Unexpected error: %s", self.config.name, e)
+                self._status.error_message = str(e)
+                self._sockjs_connected = False
+                await self._handle_disconnect()
+
+    async def _handle_disconnect(self):
+        self._status.connection_state = ConnectionState.OFFLINE
+        self._reconnect_attempts += 1
+        self._status.reconnect_attempts = self._reconnect_attempts
+        delay = min(
+            self.reconnect_base * (2 ** (self._reconnect_attempts - 1)),
+            self.reconnect_max,
+        )
+        logger.warning(
+            "[%s] Offline — reconnect attempt %d in %ds",
+            self.config.name, self._reconnect_attempts, delay,
+        )
+        await asyncio.sleep(delay)
+
+    # ------------------------------------------------------------------
+    # SockJS xhr-polling — connects to root (/) per seesaw-kit
+    # ------------------------------------------------------------------
+    async def _sockjs_open(self) -> bool:
+        """Open a SockJS xhr-polling session at the root endpoint."""
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(PROJECTS_URL)
-                resp.raise_for_status()
-                data = resp.json()
+            server_id = str(random.randint(0, 999)).zfill(3)
+            session_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+            self._sockjs_base = self._build_url() + "/" + server_id + "/" + session_id
 
-                projects = []
-                if isinstance(data, list):
-                    projects = data
-                elif isinstance(data, dict):
-                    # Some versions wrap in {"projects": [...]}
-                    projects = data.get("projects", list(data.values()))
+            resp = await self._http_client.post(
+                self._sockjs_base + "/xhr",
+                auth=self._get_auth(),
+                timeout=10.0,
+            )
+            if resp.status_code == 200 and resp.text.strip().startswith("o"):
+                logger.info("[%s] SockJS session opened at /", self.config.name)
+                return True
 
-                cleaned = []
-                for p in projects:
-                    if isinstance(p, dict) and p.get("name"):
-                        cleaned.append({
-                            "name": p.get("name", ""),
-                            "title": p.get("title", p.get("name", "")),
-                            "description": p.get("description", ""),
-                            "logo": p.get("logo", ""),
-                        })
+            logger.debug(
+                "[%s] SockJS open failed: HTTP %d body=%s",
+                self.config.name, resp.status_code, resp.text[:100],
+            )
+            return False
 
-                _cache = cleaned
-                _cache_time = time.monotonic()
-                logger.info("Refreshed project list: %d projects", len(cleaned))
-                return _cache
+        except Exception as e:
+            logger.debug("[%s] SockJS connect error: %s", self.config.name, e)
+            return False
 
-        except Exception as exc:
-            logger.warning("Failed to fetch projects from WarriorHQ: %s", exc)
-            return _cache  # Return stale cache on error
+    async def _sockjs_poll(self) -> bool:
+        """Long-poll for the next SockJS frame."""
+        try:
+            resp = await self._http_client.post(
+                self._sockjs_base + "/xhr",
+                auth=self._get_auth(),
+                timeout=35.0,
+            )
+            if resp.status_code != 200:
+                return False
+
+            frame = resp.text.strip()
+
+            if frame.startswith("a"):
+                messages = self._parse_sockjs_frame(frame)
+                for msg in messages:
+                    self._dispatch_event(msg)
+                return True
+            elif frame == "h":
+                return True  # heartbeat
+            elif frame.startswith("c"):
+                logger.info("[%s] SockJS closed by server", self.config.name)
+                return False
+            else:
+                return True
+
+        except httpx.TimeoutException:
+            return True  # timeout is normal for long-poll
+        except Exception as e:
+            logger.warning("[%s] SockJS poll error: %s", self.config.name, e)
+            return False
+
+    def _parse_sockjs_frame(self, frame: str) -> list:
+        """Parse a SockJS 'a' frame into a list of dicts."""
+        try:
+            arr = json.loads(frame[1:])
+            results = []
+            for item in arr:
+                if isinstance(item, str):
+                    try:
+                        results.append(json.loads(item))
+                    except json.JSONDecodeError:
+                        pass
+                elif isinstance(item, dict):
+                    results.append(item)
+            return results
+        except json.JSONDecodeError:
+            return []
+
+    # ------------------------------------------------------------------
+    # Event dispatch — mirrors the warrior's script.js registerEvent()
+    # ------------------------------------------------------------------
+    def _dispatch_event(self, raw: dict):
+        """Route a {event_name, message} envelope to the right handler."""
+        if not isinstance(raw, dict):
+            return
+        event = raw.get("event_name", "")
+        msg = raw.get("message")
+
+        logger.debug("[%s] event: %s", self.config.name, event)
+
+        if event == "project.refresh":
+            self._on_project_refresh(msg)
+        elif event == "bandwidth":
+            self._on_bandwidth(msg)
+        elif event == "project.item.new":
+            self._on_item_new(msg)
+        elif event == "project.item.task":
+            self._on_item_task(msg)
+        elif event == "project.item.output":
+            pass  # log output — we don't need this
+        elif event == "project.item.completed":
+            self._on_item_completed(msg, ItemState.DONE)
+        elif event == "project.item.failed":
+            self._on_item_completed(msg, ItemState.ERROR)
+        elif event == "warrior.status":
+            self._on_warrior_status(msg)
+        elif event == "runner.status":
+            pass  # runner status — handled via warrior.status
+        elif event == "instance_id":
+            pass
+        elif event == "warrior.projects_loaded":
+            pass
+        elif event == "warrior.project_selected":
+            pass
+        elif event == "warrior.settings_update":
+            pass
+
+    def _on_project_refresh(self, msg):
+        """Handle project.refresh — full state dump on connect."""
+        if not isinstance(msg, dict):
+            return
+
+        # Project name from project_html
+        project = msg.get("project", {})
+        if isinstance(project, dict):
+            html = project.get("project_html", "")
+            name = _extract_project_name(html)
+            if name:
+                self._status.current_project = name
+
+        # Runner status
+        status = msg.get("status", "")
+        if status:
+            logger.debug("[%s] Runner status: %s", self.config.name, status)
+
+        # Items — full list
+        items_raw = msg.get("items", [])
+        self._items.clear()
+        for item in items_raw:
+            if isinstance(item, dict):
+                self._ingest_item(item)
+        self._sync_items_to_status()
+
+    def _on_bandwidth(self, msg):
+        """Handle bandwidth event: {received, receiving, sent, sending}."""
+        if not isinstance(msg, dict):
+            return
+        # sent/sending = upload, received/receiving = download
+        self._status.bytes_uploaded = int(msg.get("sent", 0))
+        self._status.bytes_downloaded = int(msg.get("received", 0))
+        self._status.bandwidth_up = float(msg.get("sending", 0))
+        self._status.bandwidth_down = float(msg.get("receiving", 0))
+
+    def _on_warrior_status(self, msg):
+        """Handle warrior.status — extract downloader if available."""
+        if not isinstance(msg, dict):
+            return
+        # The warrior status doesn't directly include downloader,
+        # but we can read it from settings if needed later.
+
+    def _on_item_new(self, msg):
+        """Handle project.item.new — a new item was started."""
+        if not isinstance(msg, dict):
+            return
+        self._ingest_item(msg)
+        self._sync_items_to_status()
+
+    def _on_item_task(self, msg):
+        """Handle project.item.task — a task within an item changed status."""
+        if not isinstance(msg, dict):
+            return
+        item_id = str(msg.get("id", ""))
+        task = msg.get("task", {})
+        if item_id in self._items and isinstance(task, dict):
+            task_name = task.get("name", "")
+            task_status = task.get("status", "")
+            if task_status == "running":
+                self._items[item_id].state = classify_stage(task_name)
+                self._items[item_id].task_description = task_name
+                self._sync_items_to_status()
+
+    def _on_item_completed(self, msg, final_state: ItemState):
+        """Handle project.item.completed or project.item.failed."""
+        if not isinstance(msg, dict):
+            return
+        item_id = str(msg.get("id", ""))
+        if item_id in self._items:
+            self._items[item_id].state = final_state
+            self._sync_items_to_status()
+
+    def _ingest_item(self, item: dict):
+        """Parse a raw item dict and store in our tracking dict."""
+        item_id = str(item.get("id", ""))
+        if not item_id:
+            return
+        name = item.get("name", "Item " + item_id)
+        project = item.get("project", "")
+
+        # Update project name from item if we don't have one yet
+        if project and (not self._status.current_project or self._status.current_project == "Unknown"):
+            self._status.current_project = project
+
+        # Determine current task from tasks list
+        tasks = item.get("tasks", [])
+        current_task_name = ""
+        current_state = ItemState.WAITING
+        for task in tasks:
+            if isinstance(task, dict):
+                if task.get("status") == "running":
+                    current_task_name = task.get("name", "")
+                    current_state = classify_stage(current_task_name)
+                    break
+
+        status = item.get("status", "")
+        if status == "completed":
+            current_state = ItemState.DONE
+        elif status == "failed":
+            current_state = ItemState.ERROR
+
+        self._items[item_id] = ItemStatus(
+            item_id=item_id,
+            item_name=str(name),
+            state=current_state,
+            task_description=current_task_name,
+        )
+
+    def _sync_items_to_status(self):
+        """Push the current items dict to the status model, filtering out completed."""
+        # Show active items first, then recently completed (keep last 2)
+        active = [i for i in self._items.values() if i.state not in (ItemState.DONE, ItemState.ERROR)]
+        done = [i for i in self._items.values() if i.state in (ItemState.DONE, ItemState.ERROR)]
+        self._status.items = active + done[-2:]
+
+        # Clean up old completed items (keep tracking dict manageable)
+        if len(self._items) > 50:
+            completed_ids = [k for k, v in self._items.items() if v.state in (ItemState.DONE, ItemState.ERROR)]
+            for cid in completed_ids[:-5]:
+                del self._items[cid]
+
+    # ------------------------------------------------------------------
+    # Push settings / change project via API
+    # ------------------------------------------------------------------
+    async def update_settings(self, settings: WarriorSettings) -> bool:
+        config_data = {}
+        if settings.downloader is not None:
+            config_data["downloader"] = settings.downloader
+        if settings.concurrent_items is not None:
+            config_data["concurrent_items"] = str(settings.concurrent_items)
+        if settings.http_username is not None:
+            config_data["http_username"] = settings.http_username
+        if settings.http_password is not None:
+            config_data["http_password"] = settings.http_password
+        if settings.shared_rsync_threads is not None:
+            config_data["shared:rsync_threads"] = str(settings.shared_rsync_threads)
+        if not config_data:
+            return True
+        return await self._post_settings(config_data)
+
+    async def change_project(self, project_name: str) -> bool:
+        """Change the selected project via POST /api/settings."""
+        return await self._post_settings({"selected_project": project_name})
+
+    async def _post_settings(self, data: dict) -> bool:
+        """POST form data to /api/settings (the confirmed seesaw endpoint)."""
+        try:
+            resp = await self._http_client.post(
+                self._build_url() + "/api/settings",
+                data=data,
+                auth=self._get_auth(),
+                timeout=10.0,
+            )
+            if resp.status_code in (200, 302):
+                logger.info("[%s] Settings pushed via /api/settings", self.config.name)
+                return True
+            logger.warning("[%s] Settings push got HTTP %d", self.config.name, resp.status_code)
+            return False
+        except Exception as e:
+            logger.error("[%s] Settings push error: %s", self.config.name, e)
+            return False
