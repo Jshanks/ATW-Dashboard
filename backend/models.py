@@ -1,6 +1,26 @@
 """Pydantic models for the ATW Dashboard."""
 
-from __ = "connecting"from __future__ import annotations
+from __future__ import annotations
+from enum import Enum
+from typing import Optional
+from pydantic import BaseModel, Field
+
+
+class ItemState(str, Enum):
+    UNKNOWN = "unknown"
+    WAITING = "waiting"
+    GETTING_TASK = "getting_task"
+    DOWNLOADING = "downloading"
+    PROCESSING = "processing"
+    UPLOADING = "uploading"
+    DONE = "done"
+    ERROR = "error"
+
+
+class ConnectionState(str, Enum):
+    ONLINE = "online"
+    OFFLINE = "offline"
+    CONNECTING = "connecting"
     AUTH_FAILED = "auth_failed"
 
 
@@ -79,22 +99,3 @@ class DashboardState(BaseModel):
     total_online: int = 0
     total_offline: int = 0
     total_items_active: int = 0
-from enum import Enum
-from typing import Optional
-from pydantic import BaseModel, Field
-
-
-class ItemState(str, Enum):
-    UNKNOWN = "unknown"
-    WAITING = "waiting"
-    GETTING_TASK = "getting_task"
-    DOWNLOADING = "downloading"
-    PROCESSING = "processing"
-    UPLOADING = "uploading"
-    DONE = "done"
-    ERROR = "error"
-
-
-class ConnectionState(str, Enum):
-    ONLINE = "online"
-    OFFLINE = "offline"
