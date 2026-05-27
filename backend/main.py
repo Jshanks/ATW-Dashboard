@@ -5,7 +5,6 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -36,14 +35,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("atw-dashboard")
 
-config: Optional[DashboardConfig] = None
-clients: dict[str, WarriorClient] = {}
-ws_connections: list[WebSocket] = []
-broadcast_task: Optional[asyncio.Task] = None
+config = None
+clients = {}
+ws_connections = []
+broadcast_task = None
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app):
     global config, broadcast_task
 
     config = DashboardConfig.load()
@@ -85,7 +84,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ATW Dashboard",
     description="Monitoring & control dashboard for ArchiveTeam Warrior instances",
-    version="2.3.0",
+    version="2.4.0",
     lifespan=lifespan,
 )
 
@@ -98,7 +97,6 @@ async def _broadcast_loop():
         try:
             await asyncio.sleep(2)
 
-            # Record history for each online instance
             for client in clients.values():
                 s = client.status
                 if s.connection_state == ConnectionState.ONLINE:
@@ -124,7 +122,7 @@ async def _broadcast_loop():
             await asyncio.sleep(5)
 
 
-def _build_dashboard_state() -> DashboardState:
+def _build_dashboard_state():
     instances = []
     total_online = 0
     total_offline = 0
@@ -175,7 +173,7 @@ async def list_instances():
 
 
 @app.get("/api/instances/{name}")
-async def get_instance(name: str):
+async def get_instance(name):
     if name not in clients:
         raise HTTPException(status_code=404, detail="Instance not found: " + name)
     return clients[name].status.model_dump()
@@ -197,7 +195,7 @@ async def add_instance(request: AddInstanceRequest):
 
 
 @app.put("/api/instances/{name}")
-async def edit_instance(name: str, request: EditInstanceRequest):
+async def edit_instance(name, request: EditInstanceRequest):
     if name not in clients:
         raise HTTPException(status_code=404, detail="Instance not found: " + name)
     old = clients[name]
@@ -220,7 +218,7 @@ async def edit_instance(name: str, request: EditInstanceRequest):
 
 
 @app.delete("/api/instances/{name}")
-async def remove_instance(name: str):
+async def remove_instance(name):
     if name not in clients:
         raise HTTPException(status_code=404, detail="Instance not found: " + name)
     await clients[name].stop()
@@ -231,7 +229,7 @@ async def remove_instance(name: str):
 
 
 @app.post("/api/instances/{name}/settings")
-async def update_instance_settings(name: str, settings: WarriorSettings):
+async def update_instance_settings(name, settings: WarriorSettings):
     if name not in clients:
         raise HTTPException(status_code=404, detail="Instance not found: " + name)
     success = await clients[name].update_settings(settings)
@@ -284,15 +282,21 @@ async def get_tracker_stats_endpoint():
         if not s.downloader:
             continue
 
+        # Derive the tracker slug
         slug = ""
-        if s.current_project:
+        if s.project_slug:
+            # "US Government" -> "usgovernment"
+            slug = s.project_slug.lower().replace(" ", "")
+        elif s.current_project:
+            # "Archiving the US government." -> "usgovernment"
             slug = s.current_project.lower()
-            for ch in [" ", ".", ",", "'", '"', "!", "?", ":", ";", "-", "the", "archiving"]:
+            for ch in [" ", ".", ",", "'", '"', "!", "?", ":", ";", "-", "the", "archiving", "sets", "of", "discovered", "outlinks"]:
                 slug = slug.replace(ch, "")
             slug = slug.strip()
 
         if slug and slug not in seen:
             seen[slug] = s.downloader
+            logger.debug("Tracker pair: slug=%s downloader=%s (from %s)", slug, s.downloader, s.name)
 
     if not seen:
         return {"tracker_stats": [], "message": "No active project/downloader pairs found"}
@@ -301,6 +305,7 @@ async def get_tracker_stats_endpoint():
     for slug, downloader in seen.items():
         stats = await tracker.get_project_data(slug)
         if not stats:
+            logger.warning("Tracker returned no data for slug: %s", slug)
             continue
         entry = tracker.build_user_stats(stats, downloader, slug)
         results.append(entry)

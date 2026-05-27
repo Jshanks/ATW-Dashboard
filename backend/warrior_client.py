@@ -49,7 +49,7 @@ STAGE_MAP = {
 }
 
 
-def classify_stage(text: str) -> ItemState:
+def classify_stage(text):
     lower = text.lower().strip()
     for keyword, state in STAGE_MAP.items():
         if keyword in lower:
@@ -59,7 +59,7 @@ def classify_stage(text: str) -> ItemState:
     return ItemState.UNKNOWN
 
 
-def _extract_project_name(project_html: str) -> str:
+def _extract_project_name(project_html):
     """Extract project name from the project_html blob sent by seesaw."""
     if not project_html:
         return ""
@@ -90,9 +90,9 @@ def _extract_project_name(project_html: str) -> str:
 class WarriorClient:
     def __init__(
         self,
-        instance_config: WarriorInstanceConfig,
-        reconnect_base: int = 5,
-        reconnect_max: int = 60,
+        instance_config,
+        reconnect_base=5,
+        reconnect_max=60,
     ):
         self.config = instance_config
         self.reconnect_base = reconnect_base
@@ -107,31 +107,31 @@ class WarriorClient:
         )
         self._running = False
         self._poll_interval = 5
-        self._poll_task: Optional[asyncio.Task] = None
-        self._http_client: Optional[httpx.AsyncClient] = None
+        self._poll_task = None
+        self._http_client = None
 
         # SockJS state
-        self._sockjs_base: Optional[str] = None
+        self._sockjs_base = None
         self._sockjs_connected = False
 
         # Item tracking
-        self._items: dict[str, ItemStatus] = {}
+        self._items = {}
         self._completed_count = 0
-        self._pending_project: str = ""
+        self._pending_project = ""
 
-    def _build_url(self) -> str:
+    def _build_url(self):
         return "http://" + self.config.host + ":" + str(self.config.port)
 
-    def _get_auth(self) -> Optional[tuple[str, str]]:
+    def _get_auth(self):
         if self.config.http_username and self.config.http_password:
             return (self.config.http_username, self.config.http_password)
         return None
 
     @property
-    def status(self) -> WarriorStatus:
+    def status(self):
         return self._status
 
-    async def start(self, poll_interval: int = 5):
+    async def start(self, poll_interval=5):
         self._running = True
         self._poll_interval = poll_interval
         self._http_client = httpx.AsyncClient(timeout=10.0)
@@ -153,11 +153,13 @@ class WarriorClient:
     # ------------------------------------------------------------------
     # Main poll loop
     # ------------------------------------------------------------------
-    async def _poll_loop(self, interval: int):
+    async def _poll_loop(self, interval):
         while self._running:
             try:
                 if not self._sockjs_connected:
                     self._sockjs_connected = await self._sockjs_open()
+                    if self._sockjs_connected and not self._status.downloader:
+                        await self._fetch_downloader()
 
                 if self._sockjs_connected:
                     success = await self._sockjs_poll()
@@ -196,9 +198,30 @@ class WarriorClient:
         await asyncio.sleep(delay)
 
     # ------------------------------------------------------------------
+    # Fetch downloader nickname from settings page
+    # ------------------------------------------------------------------
+    async def _fetch_downloader(self):
+        """Fetch the downloader nickname from the warrior's settings page."""
+        try:
+            resp = await self._http_client.get(
+                self._build_url() + "/api/settings",
+                auth=self._get_auth(),
+                timeout=10.0,
+            )
+            if resp.status_code != 200:
+                return
+            soup = BeautifulSoup(resp.text, "lxml")
+            dl_input = soup.find("input", {"name": "downloader"})
+            if dl_input and dl_input.get("value"):
+                self._status.downloader = dl_input["value"].strip()
+                logger.info("[%s] Downloader: %s", self.config.name, self._status.downloader)
+        except Exception as e:
+            logger.debug("[%s] Could not fetch downloader: %s", self.config.name, e)
+
+    # ------------------------------------------------------------------
     # SockJS xhr-polling — connects to root (/) per seesaw-kit
     # ------------------------------------------------------------------
-    async def _sockjs_open(self) -> bool:
+    async def _sockjs_open(self):
         """Open a SockJS xhr-polling session at the root endpoint."""
         try:
             server_id = str(random.randint(0, 999)).zfill(3)
@@ -224,7 +247,7 @@ class WarriorClient:
             logger.debug("[%s] SockJS connect error: %s", self.config.name, e)
             return False
 
-    async def _sockjs_poll(self) -> bool:
+    async def _sockjs_poll(self):
         """Long-poll for the next SockJS frame."""
         try:
             resp = await self._http_client.post(
@@ -256,7 +279,7 @@ class WarriorClient:
             logger.warning("[%s] SockJS poll error: %s", self.config.name, e)
             return False
 
-    def _parse_sockjs_frame(self, frame: str) -> list:
+    def _parse_sockjs_frame(self, frame):
         """Parse a SockJS 'a' frame into a list of dicts."""
         try:
             arr = json.loads(frame[1:])
@@ -276,7 +299,7 @@ class WarriorClient:
     # ------------------------------------------------------------------
     # Event dispatch
     # ------------------------------------------------------------------
-    def _dispatch_event(self, raw: dict):
+    def _dispatch_event(self, raw):
         """Route a {event_name, message} envelope to the right handler."""
         if not isinstance(raw, dict):
             return
@@ -372,7 +395,7 @@ class WarriorClient:
                 self._items[item_id].task_description = task_name
                 self._sync_items_to_status()
 
-    def _on_item_completed(self, msg, final_state: ItemState):
+    def _on_item_completed(self, msg, final_state):
         """Handle project.item.completed or project.item.failed."""
         if not isinstance(msg, dict):
             return
@@ -384,7 +407,7 @@ class WarriorClient:
                 self._status.completed_items = self._completed_count
             self._sync_items_to_status()
 
-    def _ingest_item(self, item: dict):
+    def _ingest_item(self, item):
         """Parse a raw item dict and store in our tracking dict."""
         item_id = str(item.get("id", ""))
         if not item_id:
@@ -437,12 +460,12 @@ class WarriorClient:
     # ------------------------------------------------------------------
     # Push settings / change project / pending
     # ------------------------------------------------------------------
-    def set_pending_project(self, slug: str):
+    def set_pending_project(self, slug):
         """Mark a project change as pending until the warrior confirms it."""
         self._pending_project = slug
         self._status.pending_project = slug
 
-    async def update_settings(self, settings: WarriorSettings) -> bool:
+    async def update_settings(self, settings):
         config_data = {}
         if settings.downloader is not None:
             config_data["downloader"] = settings.downloader
@@ -458,11 +481,11 @@ class WarriorClient:
             return True
         return await self._post_settings(config_data)
 
-    async def change_project(self, project_name: str) -> bool:
+    async def change_project(self, project_name):
         """Change the selected project via POST /api/settings."""
         return await self._post_settings({"selected_project": project_name})
 
-    async def _post_settings(self, data: dict) -> bool:
+    async def _post_settings(self, data):
         """POST form data to /api/settings."""
         try:
             resp = await self._http_client.post(
