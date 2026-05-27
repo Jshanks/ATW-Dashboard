@@ -311,8 +311,8 @@ async def get_tracker_stats_endpoint():
 # -- History --
 @app.get("/api/history")
 async def get_history():
-    """Return 24h activity history for all instances."""
-    return history.get_all()
+    """Return 24h activity history, bucketed and aggregated."""
+    return history.get_bucketed()
 
 
 # -- WebSocket --

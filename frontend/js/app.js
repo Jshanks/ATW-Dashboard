@@ -1,5 +1,5 @@
 /**
- * ATW Dashboard -- Frontend Application v2.3
+ * ATW Dashboard -- Frontend Application v2.4
  */
 (function () {
     "use strict";
@@ -11,15 +11,11 @@
     var knownInstances = new Set();
     var IDLE_STATES = { "getting_task": true, "waiting": true, "unknown": true };
 
-    var bwChart = null;
-    var chartMode = "data";
-    var chartColors = [
-        "#06b6d4","#f97316","#a855f7","#22c55e","#ef4444","#eab308",
-        "#ec4899","#14b8a6","#6366f1","#f43f5e","#84cc16","#0ea5e9"
-    ];
-    var chartLastUpdate = 0;
-    var CHART_UPDATE_THROTTLE = 10000;
+    // Chart
+    var activityChart = null;
+    var CHART_REFRESH_INTERVAL = 30000;
 
+    // DOM refs
     var grid = document.getElementById("instance-grid");
     var totalOnlineEl = document.getElementById("total-online");
     var totalOfflineEl = document.getElementById("total-offline");
@@ -48,8 +44,6 @@
     var projectStatus = document.getElementById("project-status");
     var trackerBar = document.getElementById("tracker-bar");
     var trackerContent = document.getElementById("tracker-stats-content");
-    var chartDataBtn = document.getElementById("chart-data-btn");
-    var chartItemsBtn = document.getElementById("chart-items-btn");
 
     // ---- Utility ----
     function escapeHtml(str) {
@@ -115,7 +109,6 @@
                 if (data.type === "pong") return;
                 dashboardState = data;
                 render();
-                updateChartLive();
             } catch (e) { console.error("WS parse error:", e); }
         };
         ws.onclose = function () {
@@ -204,14 +197,13 @@
                     : '<span class="w-2.5 h-2.5 rounded-full bg-red-500"></span>';
         var stateLabel = inst.connection_state.replace("_", " ").toUpperCase();
 
-        // Project badge (top-right, uses slug)
+        // Project badge
         var projectBadgeHtml = "";
         if (isOnline) {
             var projectDisplay = inst.project_slug || inst.current_project || "";
             if (projectDisplay) {
                 projectBadgeHtml = '<span class="project-badge" title="' + escapeHtml(inst.current_project || projectDisplay) + '">' + escapeHtml(projectDisplay) + '</span>';
             }
-            // Pending project change indicator
             if (inst.pending_project) {
                 projectBadgeHtml += '<span class="project-pending pending-pulse" title="Switching to ' + escapeHtml(inst.pending_project) + '">' +
                     '&#x21bb; ' + escapeHtml(inst.pending_project) + '</span>';
@@ -250,7 +242,7 @@
             itemsLine = '<span class="text-gray-500">0</span>';
         }
 
-        // Completed items this session
+        // Completed
         var doneHtml = "";
         if (isOnline && inst.completed_items > 0) {
             doneHtml = '<p><span class="text-gray-500">Done:</span> <span class="text-green-300">' +
@@ -268,16 +260,12 @@
             '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>';
 
         return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group">' +
-            // Top row: edit/remove buttons (far right, hover only) + project badge
             '<div class="absolute top-2 right-2 flex items-center gap-1.5">' +
-                projectBadgeHtml +
-                editBtn + removeBtn +
+                projectBadgeHtml + editBtn + removeBtn +
             '</div>' +
-            // Name + status
             '<div class="flex items-center gap-2 mb-2">' + statusDot +
             '<h3 class="font-semibold text-sm">' + escapeHtml(inst.name) + '</h3>' +
             '<span class="text-xs text-gray-500">' + stateLabel + reconnectInfo + '</span></div>' +
-            // Data lines
             '<div class="text-xs text-gray-400 space-y-0.5">' +
             '<p><span class="text-gray-500">URL:</span> ' + escapeHtml(inst.url) + '</p>' +
             (isOnline ? '<p><span class="text-gray-500">Items:</span> ' + itemsLine + '</p>' +
@@ -287,18 +275,46 @@
             '</div>';
     }
 
-    // ---- 24h Chart ----
+    // ---- 24h Activity Chart (combined bar + line) ----
     function initChart() {
-        var ctx = document.getElementById("bw-chart").getContext("2d");
-        bwChart = new Chart(ctx, {
-            type: "line",
-            data: { datasets: [] },
+        var ctx = document.getElementById("activity-chart").getContext("2d");
+        activityChart = new Chart(ctx, {
+            type: "bar",
+            data: {
+                datasets: [
+                    {
+                        type: "bar",
+                        label: "Data Used",
+                        data: [],
+                        backgroundColor: "#06b6d480",
+                        borderColor: "#06b6d4",
+                        borderWidth: 1,
+                        yAxisID: "yData",
+                        order: 2
+                    },
+                    {
+                        type: "line",
+                        label: "Items Done",
+                        data: [],
+                        borderColor: "#22c55e",
+                        backgroundColor: "#22c55e20",
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        tension: 0.3,
+                        fill: false,
+                        yAxisID: "yItems",
+                        order: 1
+                    }
+                ]
+            },
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
                 interaction: { mode: "index", intersect: false },
                 plugins: {
-                    legend: { labels: { color: "#9ca3af", boxWidth: 12, padding: 12, font: { size: 11 } } },
+                    legend: {
+                        labels: { color: "#9ca3af", boxWidth: 12, padding: 16, font: { size: 11 } }
+                    },
                     tooltip: {
                         backgroundColor: "#1f2937",
                         titleColor: "#e5e7eb",
@@ -306,9 +322,18 @@
                         borderColor: "#374151",
                         borderWidth: 1,
                         callbacks: {
+                            title: function(items) {
+                                if (items.length > 0) {
+                                    var d = new Date(items[0].parsed.x);
+                                    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                                }
+                                return "";
+                            },
                             label: function(ctx) {
-                                if (chartMode === "data") return ctx.dataset.label + ": " + fmtTotal(ctx.parsed.y);
-                                return ctx.dataset.label + ": " + fmtNum(ctx.parsed.y) + " items";
+                                if (ctx.dataset.yAxisID === "yData") {
+                                    return "Data: " + fmtTotal(ctx.parsed.y);
+                                }
+                                return "Items: " + fmtNum(ctx.parsed.y);
                             }
                         }
                     }
@@ -318,22 +343,44 @@
                         type: "time",
                         time: { unit: "hour", displayFormats: { hour: "HH:mm" } },
                         grid: { color: "#1f2937" },
-                        ticks: { color: "#6b7280", maxTicksLimit: 12, font: { size: 10 } }
+                        ticks: { color: "#6b7280", maxTicksLimit: 12, font: { size: 10 } },
+                        offset: true
                     },
-                    y: {
+                    yData: {
+                        type: "linear",
+                        position: "left",
                         beginAtZero: true,
-                        grid: { color: "#1f2937" },
+                        grid: { color: "#1f293780" },
                         ticks: {
-                            color: "#6b7280",
+                            color: "#06b6d4",
                             font: { size: 10 },
-                            callback: function(val) {
-                                if (chartMode === "data") return fmtTotal(val);
-                                return fmtNum(val);
-                            }
+                            callback: function(val) { return fmtTotal(val); }
+                        },
+                        title: {
+                            display: true,
+                            text: "Data",
+                            color: "#06b6d4",
+                            font: { size: 10 }
+                        }
+                    },
+                    yItems: {
+                        type: "linear",
+                        position: "right",
+                        beginAtZero: true,
+                        grid: { drawOnChartArea: false },
+                        ticks: {
+                            color: "#22c55e",
+                            font: { size: 10 },
+                            callback: function(val) { return fmtNum(val); }
+                        },
+                        title: {
+                            display: true,
+                            text: "Items",
+                            color: "#22c55e",
+                            font: { size: 10 }
                         }
                     }
-                },
-                elements: { point: { radius: 0 }, line: { tension: 0.3, borderWidth: 1.5 } }
+                }
             }
         });
     }
@@ -343,74 +390,29 @@
             if (!res.ok) return;
             return res.json();
         }).then(function(data) {
-            if (!data) return;
-            var names = Object.keys(data).sort();
-            bwChart.data.datasets = [];
-            for (var i = 0; i < names.length; i++) {
-                var name = names[i];
-                var samples = data[name];
-                var points = [];
-                for (var j = 0; j < samples.length; j++) {
-                    var val = chartMode === "data" ? samples[j][1] : samples[j][2];
-                    points.push({ x: samples[j][0] * 1000, y: val });
-                }
-                bwChart.data.datasets.push({
-                    label: name,
-                    data: points,
-                    borderColor: chartColors[i % chartColors.length],
-                    backgroundColor: chartColors[i % chartColors.length] + "20",
-                    fill: false
-                });
+            if (!data || !data.buckets) return;
+
+            var buckets = data.buckets;
+            var intervalMs = (data.interval_minutes || 30) * 60 * 1000;
+
+            var dataPoints = [];
+            var itemPoints = [];
+            for (var i = 0; i < buckets.length; i++) {
+                var ts = buckets[i].t * 1000;
+                dataPoints.push({ x: ts, y: buckets[i].bytes });
+                itemPoints.push({ x: ts, y: buckets[i].items });
             }
-            bwChart.update("none");
+
+            activityChart.data.datasets[0].data = dataPoints;
+            activityChart.data.datasets[1].data = itemPoints;
+
+            // Set bar width to match interval
+            activityChart.data.datasets[0].barThickness = "flex";
+            activityChart.data.datasets[0].maxBarThickness = Math.max(4, Math.min(20, Math.floor(800 / Math.max(buckets.length, 1))));
+
+            activityChart.update("none");
         }).catch(function(e) { console.error("History load error:", e); });
     }
-
-    function updateChartLive() {
-        var now = Date.now();
-        if (now - chartLastUpdate < CHART_UPDATE_THROTTLE) return;
-        if (!bwChart || !dashboardState.instances) return;
-        chartLastUpdate = now;
-
-        var state = dashboardState;
-        for (var i = 0; i < state.instances.length; i++) {
-            var inst = state.instances[i];
-            if (inst.connection_state !== "online") continue;
-            var ds = null;
-            for (var d = 0; d < bwChart.data.datasets.length; d++) {
-                if (bwChart.data.datasets[d].label === inst.name) { ds = bwChart.data.datasets[d]; break; }
-            }
-            if (!ds) {
-                ds = {
-                    label: inst.name, data: [],
-                    borderColor: chartColors[bwChart.data.datasets.length % chartColors.length],
-                    backgroundColor: chartColors[bwChart.data.datasets.length % chartColors.length] + "20",
-                    fill: false
-                };
-                bwChart.data.datasets.push(ds);
-            }
-            var totalBytes = (inst.bytes_downloaded || 0) + (inst.bytes_uploaded || 0);
-            var val = chartMode === "data" ? totalBytes : (inst.completed_items || 0);
-            ds.data.push({ x: now, y: val });
-            var cutoff = now - 86400000;
-            while (ds.data.length > 0 && ds.data[0].x < cutoff) ds.data.shift();
-        }
-        bwChart.update("none");
-    }
-
-    function setChartMode(mode) {
-        chartMode = mode;
-        if (mode === "data") {
-            chartDataBtn.className = "text-xs px-3 py-1 rounded bg-cyan-900/50 text-cyan-400 border border-cyan-800";
-            chartItemsBtn.className = "text-xs px-3 py-1 rounded bg-gray-800 text-gray-400 border border-gray-700";
-        } else {
-            chartDataBtn.className = "text-xs px-3 py-1 rounded bg-gray-800 text-gray-400 border border-gray-700";
-            chartItemsBtn.className = "text-xs px-3 py-1 rounded bg-green-900/50 text-green-400 border border-green-800";
-        }
-        loadHistory();
-    }
-    chartDataBtn.addEventListener("click", function() { setChartMode("data"); });
-    chartItemsBtn.addEventListener("click", function() { setChartMode("items"); });
 
     // ---- Tracker Stats ----
     function loadTrackerStats() {
@@ -626,6 +628,7 @@
     loadProjects();
     initChart();
     loadHistory();
+    setInterval(loadHistory, CHART_REFRESH_INTERVAL);
     loadTrackerStats();
     setInterval(loadTrackerStats, 60000);
 })();
