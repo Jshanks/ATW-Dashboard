@@ -408,15 +408,26 @@
             var html = "";
             for (var i = 0; i < data.tracker_stats.length; i++) {
                 var s = data.tracker_stats[i];
-                var sep = i > 0 ? '<span class="text-gray-700">|</span>' : "";
-                html += sep + '<div class="flex items-center gap-2">' +
+                var sep = i > 0 ? '<span class="text-gray-700 mx-2">|</span>' : "";
+
+                var userLine = "";
+                if (s.user_items_done > 0 || s.user_bytes > 0) {
+                    userLine = '<span class="text-cyan-400">You: ' +
+                        fmtNum(s.user_items_done) + ' items (' + fmtTotal(s.user_bytes) + ')</span>';
+                } else {
+                    userLine = '<span class="text-gray-500">You: no data yet</span>';
+                }
+
+                html += sep + '<div class="flex items-center gap-2 flex-wrap">' +
                     '<span class="text-white font-medium">\uD83C\uDFDB\uFE0F ' + escapeHtml(s.project) + '</span>' +
-                    '<span class="text-gray-500">\u2014</span>' +
-                    '<span class="text-cyan-400">You: ' + (s.user_items_done || 0) + ' items (' + fmtTotal(s.user_bytes || 0) + ')</span>' +
+                    '<span class="text-gray-600">\u2014</span>' +
+                    userLine +
                     '<span class="text-gray-600">\u00B7</span>' +
-                    '<span class="text-gray-400">Project: ' + (s.total_items_done || 0) + ' done</span>' +
+                    '<span class="text-gray-400">' + fmtNum(s.items_done) + ' done + ' +
+                        fmtNum(s.items_out) + ' out + ' +
+                        fmtNum(s.items_todo) + ' todo</span>' +
                     '<span class="text-gray-600">\u00B7</span>' +
-                    '<span class="text-gray-400">' + (s.downloader_count || 0) + ' warriors</span>' +
+                    '<span class="text-gray-400">' + fmtTotal(s.total_data_bytes) + ' total</span>' +
                     '</div>';
             }
             trackerContent.innerHTML = html;

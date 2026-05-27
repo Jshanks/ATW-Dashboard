@@ -9,71 +9,83 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-TRACKER_API_TEMPLATE = "https://v1.api.tracker.archiveteam.org/{project}/stats.json"
-CACHE_TTL = 60  # refresh every 60 seconds
+STATS_URL = "https://v1.api.tracker.archiveteam.org/{project}/stats.json"
+CACHE_TTL = 60
 
-_cache: dict[str, dict] = {}  # project -> response
+_cache: dict[str, dict] = {}
 _cache_times: dict[str, float] = {}
 _lock = asyncio.Lock()
 
 
-async def get_tracker_stats(project: str) -> Optional[dict]:
+async def get_project_data(project_slug: str) -> Optional:
     """Fetch stats.json for a project, with caching."""
     now = time.monotonic()
-    if project in _cache and (now - _cache_times.get(project, 0)) < CACHE_TTL:
-        return _cache[project]
+
+    if project_slug in _cache and (now - _cache_times.get(project_slug, 0)) < CACHE_TTL:
+        return _cache[project_slug]
 
     async with _lock:
-        # Double-check after lock
-        if project in _cache and (time.monotonic() - _cache_times.get(project, 0)) < CACHE_TTL:
-            return _cache[project]
+        if project_slug in _cache and (time.monotonic() - _cache_times.get(project_slug, 0)) < CACHE_TTL:
+            return _cache[project_slug]
 
-        url = TRACKER_API_TEMPLATE.format(project=project)
+        url = STATS_URL.format(project=project_slug)
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 data = resp.json()
-                _cache[project] = data
-                _cache_times[project] = time.monotonic()
-                logger.debug("Refreshed tracker stats for %s", project)
+                _cache[project_slug] = data
+                _cache_times[project_slug] = time.monotonic()
+                logger.debug("Refreshed tracker stats for %s", project_slug)
                 return data
         except Exception as exc:
-            logger.warning("Failed to fetch tracker stats for %s: %s", project, exc)
-            return _cache.get(project)
+            logger.warning("Failed to fetch tracker stats for %s: %s", project_slug, exc)
+            return _cache.get(project_slug)
 
 
-def find_downloader_stats(stats: dict, username: str) -> Optional[dict]:
-    """Search the stats response for a specific downloader's entry."""
-    if not stats or not username:
-        return None
+def build_user_stats(stats: dict, username: str, project_slug: str) -> dict:
+    """Build a stats dict from stats.json, skipping the active downloaders list."""
+    result = {
+        "project": project_slug,
+        "downloader": username,
+        "user_items_done": 0,
+        "user_bytes": 0,
+        "items_done": 0,
+        "items_out": 0,
+        "items_todo": 0,
+        "total_items": 0,
+        "total_data_bytes": 0,
+    }
 
-    # Try the "downloaders" list (most common format)
-    downloaders = stats.get("downloaders", [])
-    if isinstance(downloaders, list):
-        for entry in downloaders:
-            if isinstance(entry, dict):
-                name = entry.get("downloader", entry.get("name", ""))
-                if name.lower() == username.lower():
-                    return entry
+    if not stats:
+        return result
 
-    # Try "downloader_bytes" / "downloader_count" dicts (alternative format)
-    items_dict = stats.get("downloader_count", {})
-    bytes_dict = stats.get("downloader_bytes", {})
-    if isinstance(items_dict, dict) and username in items_dict:
-        return {
-            "downloader": username,
-            "items_done": items_dict.get(username, 0),
-            "bytes": bytes_dict.get(username, 0),
-        }
-    # Case-insensitive fallback
-    if isinstance(items_dict, dict):
-        for key in items_dict:
+    # -- Project-level counts --
+    counts = stats.get("counts", {})
+    result["items_done"] = counts.get("done", stats.get("total_items_done", 0))
+    result["items_out"] = counts.get("out", stats.get("total_items_out", 0))
+    result["items_todo"] = counts.get("todo", stats.get("total_items_todo", 0))
+    result["total_items"] = stats.get("total_items", 0)
+
+    # Total project data bytes
+    domain_bytes = stats.get("domain_bytes", {})
+    if isinstance(domain_bytes, dict):
+        result["total_data_bytes"] = int(sum(domain_bytes.values()))
+
+    # -- Per-user items --
+    dl_count = stats.get("downloader_count", {})
+    if isinstance(dl_count, dict):
+        for key, val in dl_count.items():
             if key.lower() == username.lower():
-                return {
-                    "downloader": key,
-                    "items_done": items_dict.get(key, 0),
-                    "bytes": bytes_dict.get(key, 0),
-                }
+                result["user_items_done"] = int(val)
+                break
 
-    return None
+    # -- Per-user bytes --
+    dl_bytes = stats.get("downloader_bytes", {})
+    if isinstance(dl_bytes, dict):
+        for key, val in dl_bytes.items():
+            if key.lower() == username.lower():
+                result["user_bytes"] = int(val)
+                break
+
+    return result
