@@ -33,10 +33,10 @@ class ItemStatus(BaseModel):
 
 class WarriorSettings(BaseModel):
     downloader: Optional[str] = Field(None, description="Nickname / downloader name")
-    concurrent_items: Optional[int] = Field(None, ge=1, le=6, description="Concurrent items (1-6)")
-    http_username: Optional[str] = Field(None, description="HTTP basic auth username")
-    http_password: Optional[str] = Field(None, description="HTTP basic auth password")
-    shared_rsync_threads: Optional[int] = Field(None, ge=1, le=40, description="Shared rsync upload threads")
+    concurrent_items: Optional[int] = Field(None, ge=1, le=6)
+    http_username: Optional[str] = None
+    http_password: Optional[str] = None
+    shared_rsync_threads: Optional[int] = Field(None, ge=1, le=40)
 
 
 class WarriorInstanceConfig(BaseModel):
@@ -60,11 +60,20 @@ class WarriorStatus(BaseModel):
     items: list[ItemStatus] = []
     last_seen: Optional[str] = None
     error_message: str = ""
+    bandwidth_down: float = 0.0
+    bandwidth_up: float = 0.0
+    bytes_downloaded: int = 0
+    bytes_uploaded: int = 0
 
 
 class BulkSettingsRequest(BaseModel):
     instance_names: list[str] = Field(..., description="List of instance names to update")
     settings: WarriorSettings
+
+
+class BulkProjectRequest(BaseModel):
+    instance_names: list[str] = Field(..., description="List of instance names to update")
+    project_name: str = Field(..., description="Project slug to select")
 
 
 class AddInstanceRequest(BaseModel):
@@ -76,7 +85,6 @@ class AddInstanceRequest(BaseModel):
 
 
 class EditInstanceRequest(BaseModel):
-    """Request to edit an existing warrior instance connection details."""
     host: Optional[str] = None
     port: Optional[int] = None
     http_username: Optional[str] = None

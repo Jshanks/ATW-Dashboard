@@ -44,8 +44,16 @@
                     <span id="total-offline" class="text-red-400 font-bold">0</span>
                 </div>
                 <div class="flex items-center gap-2">
-                    <span class="text-gray-400">Active Items:</span>
+                    <span class="text-gray-400">Active:</span>
                     <span id="total-items" class="text-blue-400 font-bold">0</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="text-gray-400">&#x2193;</span>
+                    <span id="total-dl" class="text-cyan-400 font-bold">0 B/s</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="text-gray-400">&#x2191;</span>
+                    <span id="total-ul" class="text-orange-400 font-bold">0 B/s</span>
                 </div>
                 <button id="btn-settings-panel" class="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg transition-colors flex items-center gap-2">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
@@ -59,7 +67,7 @@
         </div>
     </header>
 
-    <!-- Settings Panel (hidden by default) -->
+    <!-- Settings Panel -->
     <div id="settings-panel" class="hidden bg-gray-900 border-b border-gray-800 px-6 py-6">
         <div class="max-w-7xl mx-auto">
             <div class="flex items-center justify-between mb-4">
@@ -70,6 +78,19 @@
                 </label>
             </div>
             <div id="instance-checkboxes" class="flex flex-wrap gap-3 mb-6"></div>
+
+            <!-- Project selector -->
+            <div class="mb-4 flex items-center gap-3">
+                <label class="text-sm text-gray-400">Change Project:</label>
+                <select id="project-select" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none min-w-[200px]">
+                    <option value="">-- Select Project --</option>
+                </select>
+                <button id="btn-apply-project" class="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg transition-colors text-sm font-medium">
+                    Apply Project
+                </button>
+                <span id="project-status" class="text-sm ml-2"></span>
+            </div>
+
             <form id="settings-form" class="grid grid-cols-1 md:grid-cols-5 gap-4">
                 <div>
                     <label class="block text-sm text-gray-400 mb-1">Nickname</label>
@@ -97,7 +118,7 @@
                 </div>
             </form>
             <div class="mt-4 flex gap-3">
-                <button id="btn-apply-settings" class="bg-green-600 hover:bg-green-700 px-6 py-2 rounded-lg transition-colors text-sm font-medium">Apply to Selected</button>
+                <button id="btn-apply-settings" class="bg-green-600 hover:bg-green-700 px-6 py-2 rounded-lg transition-colors text-sm font-medium">Apply Settings</button>
                 <button id="btn-close-settings" class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded-lg transition-colors text-sm font-medium">Close</button>
                 <span id="settings-status" class="text-sm self-center ml-4"></span>
             </div>
@@ -109,26 +130,11 @@
         <div class="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-md">
             <h2 class="text-lg font-semibold mb-4">Add Warrior Instance</h2>
             <form id="add-instance-form" class="space-y-3">
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">Name</label>
-                    <input type="text" name="name" required placeholder="warrior-1" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">Host</label>
-                    <input type="text" name="host" required placeholder="192.168.1.100" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">Port</label>
-                    <input type="number" name="port" value="8001" required class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">HTTP Username (optional)</label>
-                    <input type="text" name="http_username" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">HTTP Password (optional)</label>
-                    <input type="password" name="http_password" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                </div>
+                <div><label class="block text-sm text-gray-400 mb-1">Name</label><input type="text" name="name" required placeholder="warrior-1" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                <div><label class="block text-sm text-gray-400 mb-1">Host</label><input type="text" name="host" required placeholder="192.168.1.100" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                <div><label class="block text-sm text-gray-400 mb-1">Port</label><input type="number" name="port" value="8001" required class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                <div><label class="block text-sm text-gray-400 mb-1">HTTP Username (optional)</label><input type="text" name="http_username" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                <div><label class="block text-sm text-gray-400 mb-1">HTTP Password (optional)</label><input type="password" name="http_password" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
                 <div class="flex gap-3 pt-2">
                     <button type="submit" class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded-lg text-sm font-medium transition-colors">Add</button>
                     <button type="button" id="btn-cancel-add" class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded-lg text-sm font-medium transition-colors">Cancel</button>
@@ -142,26 +148,11 @@
         <div class="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-md">
             <h2 class="text-lg font-semibold mb-4">Edit Warrior Instance</h2>
             <form id="edit-instance-form" class="space-y-3">
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">Name</label>
-                    <input type="text" name="name" readonly class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-400 cursor-not-allowed outline-none">
-                </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">Host</label>
-                    <input type="text" name="host" required class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">Port</label>
-                    <input type="number" name="port" required class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">HTTP Username</label>
-                    <input type="text" name="http_username" placeholder="Leave blank to clear" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">HTTP Password</label>
-                    <input type="password" name="http_password" placeholder="Leave blank to clear" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                </div>
+                <div><label class="block text-sm text-gray-400 mb-1">Name</label><input type="text" name="name" readonly class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-400 cursor-not-allowed outline-none"></div>
+                <div><label class="block text-sm text-gray-400 mb-1">Host</label><input type="text" name="host" required class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                <div><label class="block text-sm text-gray-400 mb-1">Port</label><input type="number" name="port" required class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                <div><label class="block text-sm text-gray-400 mb-1">HTTP Username</label><input type="text" name="http_username" placeholder="Leave blank to clear" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                <div><label class="block text-sm text-gray-400 mb-1">HTTP Password</label><input type="password" name="http_password" placeholder="Leave blank to clear" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
                 <div class="flex gap-3 pt-2">
                     <button type="submit" class="bg-green-600 hover:bg-green-700 px-6 py-2 rounded-lg text-sm font-medium transition-colors">Save</button>
                     <button type="button" id="btn-cancel-edit" class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded-lg text-sm font-medium transition-colors">Cancel</button>
