@@ -60,14 +60,30 @@ def _extract_project_name(project_html: str) -> str:
     if not project_html:
         return ""
     soup = BeautifulSoup(project_html, "lxml")
-    # Look for h2, title text, or first significant text node
+    # The project_html typically has an h2 with the project title,
+    # sometimes followed by links like "·Leaderboard" — grab only
+    # the first text node or the h2 contents before any anchors.
     h2 = soup.find("h2")
     if h2:
+        # Get direct text children only (skip child tags like <a>)
+        parts = []
+        for child in h2.children:
+            if isinstance(child, str):
+                t = child.strip().strip("·").strip()
+                if t:
+                    parts.append(t)
+        if parts:
+            return parts[0]
+        # Fallback: full h2 text, strip common suffixes
         text = h2.get_text(strip=True)
+        for suffix in ["·Leaderboard", "Leaderboard", "· Leaderboard"]:
+            text = text.replace(suffix, "").strip().rstrip("·").strip()
         if text:
             return text
-    # Fallback: get all text and take the first non-empty line
+    # Fallback: first meaningful text on the page
     text = soup.get_text(" ", strip=True)
+    for suffix in ["·Leaderboard", "Leaderboard"]:
+        text = text.replace(suffix, "").strip()
     if text:
         return text.split("\n")[0].strip()[:80]
     return ""

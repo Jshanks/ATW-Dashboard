@@ -191,19 +191,27 @@
             }
         }
 
+        // Item count
+        var itemCount = (inst.items && inst.items.length) ? inst.items.length : 0;
+
+        // Items — compact horizontal layout
         var itemsHtml = "";
         if (inst.items && inst.items.length > 0) {
-            itemsHtml = '<div class="items-container mt-3 space-y-1.5">';
+            itemsHtml = '<div class="items-container mt-3">';
             for (var i = 0; i < inst.items.length; i++) {
                 var item = inst.items[i];
                 var badgeClass = "badge-" + item.state;
-                var desc = item.task_description
-                    ? " \u2014 " + escapeHtml(item.task_description.substring(0, 80))
-                    : "";
-                itemsHtml += '<div class="flex items-center gap-2">' +
+                var taskDesc = item.task_description || "";
+                var itemName = item.item_name || "";
+                // Build a full description: "ItemName — TaskDescription"
+                var fullDesc = itemName;
+                if (taskDesc && taskDesc !== itemName) {
+                    fullDesc = itemName + " \u2014 " + taskDesc;
+                }
+                itemsHtml += '<div class="item-row">' +
                     '<span class="item-badge ' + badgeClass + '">' + escapeHtml(item.state) + '</span>' +
-                    '<span class="text-xs text-gray-400 truncate" title="' + escapeHtml(item.item_name + desc) + '">' +
-                    escapeHtml(item.item_name) + desc + '</span></div>';
+                    '<span class="item-desc" title="' + escapeHtml(fullDesc) + '">' + escapeHtml(fullDesc) + '</span>' +
+                    '</div>';
             }
             itemsHtml += '</div>';
         } else if (isOnline) {
@@ -231,10 +239,9 @@
             '<h3 class="font-semibold text-sm">' + escapeHtml(inst.name) + '</h3>' +
             '<span class="text-xs text-gray-500">' + stateLabel + reconnectInfo + '</span></div>' +
             '<div class="text-xs text-gray-400 space-y-0.5">' +
-            '<p><span class="text-gray-500">URL:</span> <a href="' + escapeHtml(inst.url) + '" target="_blank" class="text-blue-400 hover:underline">' + escapeHtml(inst.host) + ':' + inst.port + '</a></p>' +
+            '<p><span class="text-gray-500">URL:</span> ' + escapeHtml(inst.url) + '</p>' +
             (isOnline ? '<p><span class="text-gray-500">Project:</span> <span class="text-white font-medium">' + escapeHtml(inst.current_project || "N/A") + '</span></p>' +
-            '<p><span class="text-gray-500">Downloader:</span> ' + escapeHtml(inst.downloader || "N/A") + '</p>' +
-            '<p><span class="text-gray-500">Concurrent:</span> ' + (inst.concurrent_items || "N/A") + '</p>' +
+            '<p><span class="text-gray-500">Items:</span> ' + itemCount + '</p>' +
             bwHtml : "") +
             '</div>' + errorMsg + itemsHtml +
             (inst.last_seen ? '<p class="text-xs text-gray-600 mt-2">Last seen: ' + formatTime(inst.last_seen) + '</p>' : "") +
