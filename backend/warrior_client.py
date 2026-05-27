@@ -4,11 +4,9 @@ import asyncio
 import json
 import logging
 import random
-import re
 import string
 import time
 from datetime import datetime, timezone
-from typing import Optional
 
 import httpx
 from bs4 import BeautifulSoup
@@ -48,6 +46,10 @@ STAGE_MAP = {
     "integrity": ItemState.PROCESSING,
 }
 
+# Items in active states that haven't been updated in this many seconds
+# get demoted to WAITING to prevent stale "active" counts
+STALE_ITEM_TIMEOUT = 120
+
 
 def classify_stage(text):
     lower = text.lower().strip()
@@ -57,6 +59,13 @@ def classify_stage(text):
     if lower == "" or "idle" in lower:
         return ItemState.WAITING
     return ItemState.UNKNOWN
+
+
+def _normalize_slug(text):
+    """Normalize a project name to a comparable slug: lowercase, no spaces."""
+    if not text:
+        return ""
+    return text.lower().replace(" ", "").replace(".", "").replace(",", "")
 
 
 def _extract_project_name(project_html):
@@ -116,6 +125,7 @@ class WarriorClient:
 
         # Item tracking
         self._items = {}
+        self._item_updated = {}  # item_id -> monotonic timestamp
         self._completed_count = 0
         self._pending_project = ""
 
@@ -349,6 +359,7 @@ class WarriorClient:
 
         items_raw = msg.get("items", [])
         self._items.clear()
+        self._item_updated.clear()
         for item in items_raw:
             if isinstance(item, dict):
                 self._ingest_item(item)
@@ -393,6 +404,7 @@ class WarriorClient:
             if task_status == "running":
                 self._items[item_id].state = classify_stage(task_name)
                 self._items[item_id].task_description = task_name
+                self._item_updated[item_id] = time.monotonic()
                 self._sync_items_to_status()
 
     def _on_item_completed(self, msg, final_state):
@@ -402,6 +414,7 @@ class WarriorClient:
         item_id = str(msg.get("id", ""))
         if item_id in self._items:
             self._items[item_id].state = final_state
+            self._item_updated[item_id] = time.monotonic()
             if final_state == ItemState.DONE:
                 self._completed_count += 1
                 self._status.completed_items = self._completed_count
@@ -419,9 +432,19 @@ class WarriorClient:
             self._status.project_slug = project
             if not self._status.current_project or self._status.current_project == "Unknown":
                 self._status.current_project = project
-            if self._pending_project and project.lower() == self._pending_project.lower():
-                self._pending_project = ""
-                self._status.pending_project = ""
+
+            # Check if pending project change has taken effect
+            # Compare normalized slugs: "usgovernment" == "usgovernment"
+            if self._pending_project:
+                pending_norm = _normalize_slug(self._pending_project)
+                project_norm = _normalize_slug(project)
+                if pending_norm == project_norm:
+                    logger.info(
+                        "[%s] Pending project change confirmed: %s",
+                        self._status.name, project,
+                    )
+                    self._pending_project = ""
+                    self._status.pending_project = ""
 
         tasks = item.get("tasks", [])
         current_task_name = ""
@@ -445,17 +468,39 @@ class WarriorClient:
             state=current_state,
             task_description=current_task_name,
         )
+        self._item_updated[item_id] = time.monotonic()
 
     def _sync_items_to_status(self):
-        """Push the current items dict to the status model."""
-        active = [i for i in self._items.values() if i.state not in (ItemState.DONE, ItemState.ERROR)]
-        done = [i for i in self._items.values() if i.state in (ItemState.DONE, ItemState.ERROR)]
+        """Push the current items dict to the status model, demoting stale items."""
+        now = time.monotonic()
+
+        # Demote stale active items to WAITING
+        # If an item has been in a non-idle, non-terminal state for too long
+        # without any update, it's likely a missed completion event
+        idle_states = (ItemState.WAITING, ItemState.GETTING_TASK, ItemState.UNKNOWN)
+        terminal_states = (ItemState.DONE, ItemState.ERROR)
+        for item_id, item in self._items.items():
+            if item.state in idle_states or item.state in terminal_states:
+                continue
+            last_update = self._item_updated.get(item_id, now)
+            if now - last_update > STALE_ITEM_TIMEOUT:
+                logger.debug(
+                    "[%s] Demoting stale item %s from %s to WAITING",
+                    self._status.name, item_id, item.state,
+                )
+                item.state = ItemState.WAITING
+                item.task_description = ""
+
+        active = [i for i in self._items.values() if i.state not in terminal_states]
+        done = [i for i in self._items.values() if i.state in terminal_states]
         self._status.items = active + done[-2:]
 
+        # Clean up old completed items
         if len(self._items) > 50:
-            completed_ids = [k for k, v in self._items.items() if v.state in (ItemState.DONE, ItemState.ERROR)]
+            completed_ids = [k for k, v in self._items.items() if v.state in terminal_states]
             for cid in completed_ids[:-5]:
                 del self._items[cid]
+                self._item_updated.pop(cid, None)
 
     # ------------------------------------------------------------------
     # Push settings / change project / pending
