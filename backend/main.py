@@ -26,6 +26,8 @@ from backend.models import (
 from backend.warrior_client import WarriorClient
 from backend import store
 from backend import projects
+from backend import tracker
+from backend import history
 
 log_level = os.environ.get("LOG_LEVEL", "info").upper()
 logging.basicConfig(
@@ -62,7 +64,6 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Skipping invalid saved instance %s: %s", inst_dict, exc)
 
-    # Pre-warm project list cache
     asyncio.create_task(projects.get_projects(force=True))
 
     broadcast_task = asyncio.create_task(_broadcast_loop())
@@ -84,7 +85,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ATW Dashboard",
     description="Monitoring & control dashboard for ArchiveTeam Warrior instances",
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -96,6 +97,13 @@ async def _broadcast_loop():
     while True:
         try:
             await asyncio.sleep(2)
+
+            # Record bandwidth history for each online instance
+            for client in clients.values():
+                s = client.status
+                if s.connection_state == ConnectionState.ONLINE:
+                    history.record(s.name, s.bandwidth_down, s.bandwidth_up)
+
             if not ws_connections:
                 continue
             state = _build_dashboard_state()
@@ -217,6 +225,7 @@ async def remove_instance(name: str):
     await clients[name].stop()
     del clients[name]
     store.remove(name)
+    history.remove(name)
     return {"status": "ok", "instance": name}
 
 
@@ -258,6 +267,65 @@ async def bulk_change_project(request: BulkProjectRequest):
         success = await clients[name].change_project(request.project_name)
         results[name] = {"status": "ok" if success else "error"}
     return {"results": results}
+
+
+# -- Tracker stats --
+@app.get("/api/tracker")
+async def get_tracker_stats():
+    """Get tracker leaderboard stats for the user across active projects."""
+    # Collect unique (project, downloader) pairs from online instances
+    pairs = set()
+    for client in clients.values():
+        s = client.status
+        if s.connection_state == ConnectionState.ONLINE and s.current_project and s.downloader:
+            # Normalize project name to URL slug
+            slug = s.current_project.lower().replace(" ", "").replace(".", "")
+            pairs.add((slug, s.downloader))
+            # Also try the raw project field from items if available
+            for item in s.items:
+                if item.item_name and ":" in item.item_name:
+                    pass  # item names are like "identifier:number"
+
+    if not pairs:
+        return {"tracker_stats": [], "message": "No active project/downloader pairs found"}
+
+    results = []
+    seen_projects = set()
+    for slug, downloader in pairs:
+        if slug in seen_projects:
+            continue
+        seen_projects.add(slug)
+
+        stats = await tracker.get_tracker_stats(slug)
+        if not stats:
+            continue
+
+        user_stats = tracker.find_downloader_stats(stats, downloader)
+
+        entry = {
+            "project": slug,
+            "downloader": downloader,
+            "user_items_done": 0,
+            "user_bytes": 0,
+            "total_items_done": stats.get("items_done", stats.get("total_items_done", 0)),
+            "total_items_out": stats.get("items_out", 0),
+            "downloader_count": stats.get("downloader_count", len(stats.get("downloaders", []))),
+        }
+
+        if user_stats:
+            entry["user_items_done"] = user_stats.get("items_done", user_stats.get("count", 0))
+            entry["user_bytes"] = user_stats.get("bytes", user_stats.get("data", 0))
+
+        results.append(entry)
+
+    return {"tracker_stats": results}
+
+
+# -- History --
+@app.get("/api/history")
+async def get_history():
+    """Return 24h bandwidth history for all instances."""
+    return history.get_all()
 
 
 # -- WebSocket --

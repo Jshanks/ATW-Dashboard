@@ -5,18 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ATW Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
     <link rel="stylesheet" href="/static/css/style.css">
     <script>
         tailwind.config = {
             darkMode: 'class',
-            theme: {
-                extend: {
-                    colors: {
-                        surface: { DEFAULT: '#1a1a2e', light: '#16213e', lighter: '#0f3460' },
-                        accent: { DEFAULT: '#e94560', light: '#ff6b6b' },
-                    }
-                }
-            }
+            theme: { extend: { colors: {
+                surface: { DEFAULT: '#1a1a2e', light: '#16213e', lighter: '#0f3460' },
+                accent: { DEFAULT: '#e94560', light: '#ff6b6b' },
+            }}}
         }
     </script>
 </head>
@@ -45,7 +42,7 @@
                 </div>
                 <div class="flex items-center gap-2">
                     <span class="text-gray-400">Active:</span>
-                    <span id="total-items" class="text-blue-400 font-bold">0</span>
+                    <span id="total-items" class="text-blue-400 font-bold">0/0</span>
                 </div>
                 <div class="flex items-center gap-2">
                     <span class="text-gray-400">&#x2193;</span>
@@ -67,6 +64,25 @@
         </div>
     </header>
 
+    <!-- Tracker Stats Bar -->
+    <div id="tracker-bar" class="hidden bg-gray-900/50 border-b border-gray-800 px-6 py-3">
+        <div class="max-w-7xl mx-auto flex items-center gap-6 text-sm flex-wrap" id="tracker-stats-content"></div>
+    </div>
+
+    <!-- 24h Bandwidth Chart -->
+    <div class="bg-gray-900/30 border-b border-gray-800 px-6 py-4">
+        <div class="max-w-7xl mx-auto">
+            <div class="flex items-center justify-between mb-2">
+                <h2 class="text-sm font-medium text-gray-400">Bandwidth — Last 24 Hours</h2>
+                <div class="flex gap-2">
+                    <button id="chart-dl-btn" class="text-xs px-3 py-1 rounded bg-cyan-900/50 text-cyan-400 border border-cyan-800">&#x2193; Download</button>
+                    <button id="chart-ul-btn" class="text-xs px-3 py-1 rounded bg-gray-800 text-gray-400 border border-gray-700">&#x2191; Upload</button>
+                </div>
+            </div>
+            <canvas id="bw-chart" height="120"></canvas>
+        </div>
+    </div>
+
     <!-- Settings Panel -->
     <div id="settings-panel" class="hidden bg-gray-900 border-b border-gray-800 px-6 py-6">
         <div class="max-w-7xl mx-auto">
@@ -78,44 +94,24 @@
                 </label>
             </div>
             <div id="instance-checkboxes" class="flex flex-wrap gap-3 mb-6"></div>
-
-            <!-- Project selector -->
             <div class="mb-4 flex items-center gap-3">
                 <label class="text-sm text-gray-400">Change Project:</label>
                 <select id="project-select" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none min-w-[200px]">
                     <option value="">-- Select Project --</option>
                 </select>
-                <button id="btn-apply-project" class="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg transition-colors text-sm font-medium">
-                    Apply Project
-                </button>
+                <button id="btn-apply-project" class="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg transition-colors text-sm font-medium">Apply Project</button>
                 <span id="project-status" class="text-sm ml-2"></span>
             </div>
-
             <form id="settings-form" class="grid grid-cols-1 md:grid-cols-5 gap-4">
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">Nickname</label>
-                    <input type="text" name="downloader" placeholder="Leave blank to skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">Concurrent Items</label>
+                <div><label class="block text-sm text-gray-400 mb-1">Nickname</label><input type="text" name="downloader" placeholder="Leave blank to skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                <div><label class="block text-sm text-gray-400 mb-1">Concurrent Items</label>
                     <select name="concurrent_items" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                        <option value="">Skip</option>
-                        <option value="1">1</option><option value="2">2</option><option value="3">3</option>
-                        <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+                        <option value="">Skip</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option>
                     </select>
                 </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">HTTP Username</label>
-                    <input type="text" name="http_username" placeholder="Leave blank to skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">HTTP Password</label>
-                    <input type="password" name="http_password" placeholder="Leave blank to skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">Rsync Threads</label>
-                    <input type="number" name="shared_rsync_threads" min="1" max="40" placeholder="Skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                </div>
+                <div><label class="block text-sm text-gray-400 mb-1">HTTP Username</label><input type="text" name="http_username" placeholder="Leave blank to skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                <div><label class="block text-sm text-gray-400 mb-1">HTTP Password</label><input type="password" name="http_password" placeholder="Leave blank to skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                <div><label class="block text-sm text-gray-400 mb-1">Rsync Threads</label><input type="number" name="shared_rsync_threads" min="1" max="40" placeholder="Skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
             </form>
             <div class="mt-4 flex gap-3">
                 <button id="btn-apply-settings" class="bg-green-600 hover:bg-green-700 px-6 py-2 rounded-lg transition-colors text-sm font-medium">Apply Settings</button>

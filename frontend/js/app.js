@@ -1,5 +1,5 @@
 /**
- * ATW Dashboard -- Frontend Application
+ * ATW Dashboard -- Frontend Application v2.1
  */
 (function () {
     "use strict";
@@ -9,10 +9,19 @@
     var MAX_WS_RECONNECT = 30000;
     var dashboardState = { instances: [], total_online: 0, total_offline: 0, total_items_active: 0 };
     var knownInstances = new Set();
-
-    // Idle states — items in these states get collapsed into a summary line
     var IDLE_STATES = { "getting_task": true, "waiting": true, "unknown": true };
 
+    // Chart state
+    var bwChart = null;
+    var chartMode = "download"; // "download" or "upload"
+    var chartColors = [
+        "#06b6d4","#f97316","#a855f7","#22c55e","#ef4444","#eab308",
+        "#ec4899","#14b8a6","#6366f1","#f43f5e","#84cc16","#0ea5e9"
+    ];
+    var chartLastUpdate = 0;
+    var CHART_UPDATE_THROTTLE = 10000;
+
+    // DOM refs
     var grid = document.getElementById("instance-grid");
     var totalOnlineEl = document.getElementById("total-online");
     var totalOfflineEl = document.getElementById("total-offline");
@@ -39,6 +48,10 @@
     var projectSelect = document.getElementById("project-select");
     var btnApplyProject = document.getElementById("btn-apply-project");
     var projectStatus = document.getElementById("project-status");
+    var trackerBar = document.getElementById("tracker-bar");
+    var trackerContent = document.getElementById("tracker-stats-content");
+    var chartDlBtn = document.getElementById("chart-dl-btn");
+    var chartUlBtn = document.getElementById("chart-ul-btn");
 
     // ---- Utility ----
     function escapeHtml(str) {
@@ -97,6 +110,7 @@
                 if (data.type === "pong") return;
                 dashboardState = data;
                 render();
+                updateChartLive();
             } catch (e) { console.error("WS parse error:", e); }
         };
         ws.onclose = function () {
@@ -129,9 +143,7 @@
         totalOnlineEl.textContent = state.total_online || 0;
         totalOfflineEl.textContent = state.total_offline || 0;
 
-        // Count total items and working (non-idle) items across all instances
-        var aggDl = 0, aggUl = 0;
-        var totalItems = 0, workingItems = 0;
+        var aggDl = 0, aggUl = 0, totalItems = 0, workingItems = 0;
         if (state.instances) {
             for (var i = 0; i < state.instances.length; i++) {
                 var inst = state.instances[i];
@@ -140,9 +152,7 @@
                 if (inst.items) {
                     for (var j = 0; j < inst.items.length; j++) {
                         totalItems++;
-                        if (!IDLE_STATES[inst.items[j].state]) {
-                            workingItems++;
-                        }
+                        if (!IDLE_STATES[inst.items[j].state]) workingItems++;
                     }
                 }
             }
@@ -188,10 +198,8 @@
                 : inst.connection_state === "auth_failed"
                     ? '<span class="w-2.5 h-2.5 rounded-full bg-purple-500"></span>'
                     : '<span class="w-2.5 h-2.5 rounded-full bg-red-500"></span>';
-
         var stateLabel = inst.connection_state.replace("_", " ").toUpperCase();
 
-        // Bandwidth
         var bwHtml = "";
         if (isOnline && (inst.bandwidth_down > 0 || inst.bandwidth_up > 0 || inst.bytes_downloaded > 0)) {
             bwHtml = '<p><span class="text-gray-500">BW:</span> ' +
@@ -204,81 +212,53 @@
             }
         }
 
-        // Split items into idle (getting_task/waiting) and active (everything else)
-        var idleItems = [];
-        var activeItems = [];
+        var idleItems = [], activeItems = [];
         if (inst.items) {
             for (var i = 0; i < inst.items.length; i++) {
-                if (IDLE_STATES[inst.items[i].state]) {
-                    idleItems.push(inst.items[i]);
-                } else {
-                    activeItems.push(inst.items[i]);
-                }
+                if (IDLE_STATES[inst.items[i].state]) idleItems.push(inst.items[i]);
+                else activeItems.push(inst.items[i]);
             }
         }
-
         var totalCount = (inst.items && inst.items.length) ? inst.items.length : 0;
 
-        // Build items HTML — active items shown in full, idle collapsed to one line
         var itemsHtml = "";
         if (totalCount > 0) {
             itemsHtml = '<div class="items-container mt-3">';
-
-            // Active items — full detail
             for (var a = 0; a < activeItems.length; a++) {
                 var item = activeItems[a];
                 var badgeClass = "badge-" + item.state;
                 var taskDesc = item.task_description || "";
                 var itemName = item.item_name || "";
                 var fullDesc = itemName;
-                if (taskDesc && taskDesc !== itemName) {
-                    fullDesc = itemName + " \u2014 " + taskDesc;
-                }
+                if (taskDesc && taskDesc !== itemName) fullDesc = itemName + " \u2014 " + taskDesc;
                 itemsHtml += '<div class="item-row">' +
                     '<span class="item-badge ' + badgeClass + '">' + escapeHtml(item.state) + '</span>' +
-                    '<span class="item-desc" title="' + escapeHtml(fullDesc) + '">' + escapeHtml(fullDesc) + '</span>' +
-                    '</div>';
+                    '<span class="item-desc" title="' + escapeHtml(fullDesc) + '">' + escapeHtml(fullDesc) + '</span></div>';
             }
-
-            // Idle items — collapsed summary
             if (idleItems.length > 0) {
-                itemsHtml += '<div class="idle-summary">' +
-                    '<span class="idle-dot"></span>' +
-                    '<span>' + idleItems.length + ' item' + (idleItems.length !== 1 ? 's' : '') + ' waiting for tasks</span>' +
-                    '</div>';
+                itemsHtml += '<div class="idle-summary"><span class="idle-dot"></span><span>' +
+                    idleItems.length + ' item' + (idleItems.length !== 1 ? 's' : '') + ' waiting for tasks</span></div>';
             }
-
             itemsHtml += '</div>';
         } else if (isOnline) {
             itemsHtml = '<p class="text-xs text-gray-500 mt-3">No active items</p>';
         }
 
         var errorMsg = inst.error_message
-            ? '<p class="text-xs text-red-400 mt-2 truncate" title="' + escapeHtml(inst.error_message) + '">' + escapeHtml(inst.error_message) + '</p>'
-            : "";
-
+            ? '<p class="text-xs text-red-400 mt-2 truncate" title="' + escapeHtml(inst.error_message) + '">' + escapeHtml(inst.error_message) + '</p>' : "";
         var reconnectInfo = !isOnline && inst.reconnect_attempts > 0
-            ? '<span class="text-xs text-gray-500 ml-2">(attempt ' + inst.reconnect_attempts + ')</span>'
-            : "";
+            ? '<span class="text-xs text-gray-500 ml-2">(attempt ' + inst.reconnect_attempts + ')</span>' : "";
 
-        var editBtn = '<button data-edit-instance="' + escapeHtml(inst.name) + '"' +
-            ' class="text-gray-600 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Edit instance">' +
+        var editBtn = '<button data-edit-instance="' + escapeHtml(inst.name) + '" class="text-gray-600 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Edit">' +
             '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg></button>';
-        var removeBtn = '<button data-remove-instance="' + escapeHtml(inst.name) + '"' +
-            ' class="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Remove instance">' +
+        var removeBtn = '<button data-remove-instance="' + escapeHtml(inst.name) + '" class="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Remove">' +
             '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>';
 
-        // Items line: "Items: 2 working / 6" or "Items: 6 idle" or "Items: 6"
         var itemsLine = "";
         if (totalCount > 0) {
-            if (activeItems.length > 0) {
-                itemsLine = '<span class="text-green-400">' + activeItems.length + ' working</span> / ' + totalCount;
-            } else {
-                itemsLine = totalCount + ' <span class="text-gray-500">idle</span>';
-            }
-        } else {
-            itemsLine = "0";
-        }
+            if (activeItems.length > 0) itemsLine = '<span class="text-green-400">' + activeItems.length + ' working</span> / ' + totalCount;
+            else itemsLine = totalCount + ' <span class="text-gray-500">idle</span>';
+        } else { itemsLine = "0"; }
 
         return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group">' +
             '<div class="absolute top-2 right-2 flex items-center gap-1">' + editBtn + removeBtn + '</div>' +
@@ -288,11 +268,162 @@
             '<div class="text-xs text-gray-400 space-y-0.5">' +
             '<p><span class="text-gray-500">URL:</span> ' + escapeHtml(inst.url) + '</p>' +
             (isOnline ? '<p><span class="text-gray-500">Project:</span> <span class="text-white font-medium">' + escapeHtml(inst.current_project || "N/A") + '</span></p>' +
-            '<p><span class="text-gray-500">Items:</span> ' + itemsLine + '</p>' +
-            bwHtml : "") +
+            '<p><span class="text-gray-500">Items:</span> ' + itemsLine + '</p>' + bwHtml : "") +
             '</div>' + errorMsg + itemsHtml +
             (inst.last_seen ? '<p class="text-xs text-gray-600 mt-2">Last seen: ' + formatTime(inst.last_seen) + '</p>' : "") +
             '</div>';
+    }
+
+    // ---- 24h Chart ----
+    function initChart() {
+        var ctx = document.getElementById("bw-chart").getContext("2d");
+        bwChart = new Chart(ctx, {
+            type: "line",
+            data: { datasets: [] },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: "index", intersect: false },
+                plugins: {
+                    legend: { labels: { color: "#9ca3af", boxWidth: 12, padding: 12, font: { size: 11 } } },
+                    tooltip: {
+                        backgroundColor: "#1f2937",
+                        titleColor: "#e5e7eb",
+                        bodyColor: "#d1d5db",
+                        borderColor: "#374151",
+                        borderWidth: 1,
+                        callbacks: {
+                            label: function(ctx) { return ctx.dataset.label + ": " + fmtBytes(ctx.parsed.y); }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        type: "time",
+                        time: { unit: "hour", displayFormats: { hour: "HH:mm" } },
+                        grid: { color: "#1f2937" },
+                        ticks: { color: "#6b7280", maxTicksLimit: 12, font: { size: 10 } }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        grid: { color: "#1f2937" },
+                        ticks: {
+                            color: "#6b7280",
+                            font: { size: 10 },
+                            callback: function(val) { return fmtBytes(val); }
+                        }
+                    }
+                },
+                elements: { point: { radius: 0 }, line: { tension: 0.3, borderWidth: 1.5 } }
+            }
+        });
+    }
+
+    function loadHistory() {
+        fetch("/api/history").then(function(res) {
+            if (!res.ok) return;
+            return res.json();
+        }).then(function(data) {
+            if (!data) return;
+            var names = Object.keys(data).sort();
+            bwChart.data.datasets = [];
+            for (var i = 0; i < names.length; i++) {
+                var name = names[i];
+                var samples = data[name];
+                var points = [];
+                for (var j = 0; j < samples.length; j++) {
+                    var val = chartMode === "download" ? samples[j][1] : samples[j][2];
+                    points.push({ x: samples[j][0] * 1000, y: val });
+                }
+                bwChart.data.datasets.push({
+                    label: name,
+                    data: points,
+                    borderColor: chartColors[i % chartColors.length],
+                    backgroundColor: chartColors[i % chartColors.length] + "20",
+                    fill: false
+                });
+            }
+            bwChart.update("none");
+        }).catch(function(e) { console.error("History load error:", e); });
+    }
+
+    function updateChartLive() {
+        var now = Date.now();
+        if (now - chartLastUpdate < CHART_UPDATE_THROTTLE) return;
+        if (!bwChart || !dashboardState.instances) return;
+        chartLastUpdate = now;
+
+        var ts = now;
+        var state = dashboardState;
+        for (var i = 0; i < state.instances.length; i++) {
+            var inst = state.instances[i];
+            if (inst.connection_state !== "online") continue;
+            var ds = null;
+            for (var d = 0; d < bwChart.data.datasets.length; d++) {
+                if (bwChart.data.datasets[d].label === inst.name) { ds = bwChart.data.datasets[d]; break; }
+            }
+            if (!ds) {
+                ds = {
+                    label: inst.name,
+                    data: [],
+                    borderColor: chartColors[bwChart.data.datasets.length % chartColors.length],
+                    backgroundColor: chartColors[bwChart.data.datasets.length % chartColors.length] + "20",
+                    fill: false
+                };
+                bwChart.data.datasets.push(ds);
+            }
+            var val = chartMode === "download" ? (inst.bandwidth_down || 0) : (inst.bandwidth_up || 0);
+            ds.data.push({ x: ts, y: val });
+            // Trim to 24h
+            var cutoff = ts - 86400000;
+            while (ds.data.length > 0 && ds.data[0].x < cutoff) ds.data.shift();
+        }
+        bwChart.update("none");
+    }
+
+    function setChartMode(mode) {
+        chartMode = mode;
+        if (mode === "download") {
+            chartDlBtn.className = "text-xs px-3 py-1 rounded bg-cyan-900/50 text-cyan-400 border border-cyan-800";
+            chartUlBtn.className = "text-xs px-3 py-1 rounded bg-gray-800 text-gray-400 border border-gray-700";
+        } else {
+            chartDlBtn.className = "text-xs px-3 py-1 rounded bg-gray-800 text-gray-400 border border-gray-700";
+            chartUlBtn.className = "text-xs px-3 py-1 rounded bg-orange-900/50 text-orange-400 border border-orange-800";
+        }
+        loadHistory();
+    }
+    chartDlBtn.addEventListener("click", function() { setChartMode("download"); });
+    chartUlBtn.addEventListener("click", function() { setChartMode("upload"); });
+
+    // ---- Tracker Stats ----
+    function loadTrackerStats() {
+        fetch("/api/tracker").then(function(res) {
+            if (!res.ok) return;
+            return res.json();
+        }).then(function(data) {
+            if (!data || !data.tracker_stats || data.tracker_stats.length === 0) {
+                trackerBar.classList.add("hidden");
+                return;
+            }
+            var html = "";
+            for (var i = 0; i < data.tracker_stats.length; i++) {
+                var s = data.tracker_stats[i];
+                var sep = i > 0 ? '<span class="text-gray-700">|</span>' : "";
+                html += sep + '<div class="flex items-center gap-2">' +
+                    '<span class="text-white font-medium">\uD83C\uDFDB\uFE0F ' + escapeHtml(s.project) + '</span>' +
+                    '<span class="text-gray-500">\u2014</span>' +
+                    '<span class="text-cyan-400">You: ' + (s.user_items_done || 0) + ' items (' + fmtTotal(s.user_bytes || 0) + ')</span>' +
+                    '<span class="text-gray-600">\u00B7</span>' +
+                    '<span class="text-gray-400">Project: ' + (s.total_items_done || 0) + ' done</span>' +
+                    '<span class="text-gray-600">\u00B7</span>' +
+                    '<span class="text-gray-400">' + (s.downloader_count || 0) + ' warriors</span>' +
+                    '</div>';
+            }
+            trackerContent.innerHTML = html;
+            trackerBar.classList.remove("hidden");
+        }).catch(function(e) {
+            console.error("Tracker stats error:", e);
+        });
     }
 
     // ---- Settings Panel ----
@@ -302,12 +433,10 @@
         var checked = selectAllCheckbox.checked;
         document.querySelectorAll(".instance-checkbox").forEach(function (cb) { cb.checked = checked; });
     });
-
     btnApplySettings.addEventListener("click", async function () {
         var selected = [];
         document.querySelectorAll(".instance-checkbox:checked").forEach(function (cb) { selected.push(cb.value); });
         if (selected.length === 0) { showToast("No instances selected", "error"); return; }
-
         var formData = new FormData(settingsForm);
         var settings = {};
         var d = formData.get("downloader"), c = formData.get("concurrent_items");
@@ -319,7 +448,6 @@
         if (p) settings.http_password = p;
         if (r) settings.shared_rsync_threads = parseInt(r);
         if (Object.keys(settings).length === 0) { showToast("No settings specified", "error"); return; }
-
         settingsStatus.textContent = "Applying...";
         settingsStatus.className = "text-sm self-center ml-4 text-yellow-400";
         try {
@@ -365,18 +493,14 @@
                     escapeHtml(projects[i].title || projects[i].name) + '</option>';
             }
             projectSelect.innerHTML = html;
-        } catch (e) {
-            console.error("Failed to load projects:", e);
-        }
+        } catch (e) { console.error("Failed to load projects:", e); }
     }
-
     btnApplyProject.addEventListener("click", async function () {
         var proj = projectSelect.value;
         if (!proj) { showToast("Select a project first", "error"); return; }
         var selected = [];
         document.querySelectorAll(".instance-checkbox:checked").forEach(function (cb) { selected.push(cb.value); });
         if (selected.length === 0) { showToast("No instances selected", "error"); return; }
-
         projectStatus.textContent = "Applying...";
         projectStatus.className = "text-sm ml-2 text-yellow-400";
         try {
@@ -474,4 +598,8 @@
     // ---- Init ----
     connectWebSocket();
     loadProjects();
+    initChart();
+    loadHistory();
+    loadTrackerStats();
+    setInterval(loadTrackerStats, 60000);
 })();
