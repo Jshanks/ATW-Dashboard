@@ -321,20 +321,20 @@
                         borderColor: "#374151",
                         borderWidth: 1,
                         callbacks: {
-                            title: function(items) {
-                                if (items.length > 0) {
-                                    var d = new Date(items[0].parsed.x);
-                                    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-                                }
-                                return "";
-                            },
-                            label: function(ctx) {
-                                if (ctx.dataset.yAxisID === "yData") {
-                                    return "Data: " + fmtTotal(ctx.parsed.y);
-                                }
-                                return "Items: " + fmtNum(ctx.parsed.y);
+                        title: function(items) {
+                            if (items.length > 0) {
+                                var d = new Date(items[0].parsed.x);
+                                return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
                             }
+                            return "";
+                        },
+                        label: function(ctx) {
+                            if (ctx.dataset.yAxisID === "yData") {
+                                return "Data: " + fmtTotal(ctx.parsed.y);
+                            }
+                            return "Items: " + fmtNum(ctx.parsed.y) + " (from tracker)";
                         }
+                    }
                     }
                 },
                 scales: {

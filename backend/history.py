@@ -1,4 +1,4 @@
-"""In-memory ring buffer for 24h history per instance."""
+"""In-memory ring buffer for 24h history per instance + tracker items."""
 
 import time
 import threading
@@ -6,14 +6,21 @@ from collections import deque
 
 SAMPLE_INTERVAL = 30
 MAX_SAMPLES = 2880
+TRACKER_SAMPLE_INTERVAL = 60
 
 _lock = threading.Lock()
+
+# Per-instance bytes history
 _history = {}
 _last_sample = {}
 
+# Global tracker items history (single timeline)
+_tracker_history = deque(maxlen=MAX_SAMPLES)
+_tracker_last_sample = 0
 
-def record(instance_name, total_bytes, completed_items):
-    """Record a data/items sample if enough time has passed."""
+
+def record(instance_name, total_bytes):
+    """Record a bytes sample for an instance."""
     now = time.time()
     mono = time.monotonic()
 
@@ -25,34 +32,42 @@ def record(instance_name, total_bytes, completed_items):
         if instance_name not in _history:
             _history[instance_name] = deque(maxlen=MAX_SAMPLES)
 
-        _history[instance_name].append((now, total_bytes, completed_items))
+        _history[instance_name].append((now, total_bytes))
         _last_sample[instance_name] = mono
 
 
-def get_all():
-    """Return raw history."""
+def record_tracker(items_done):
+    """Record a tracker items snapshot (called ~every 60s from broadcast loop)."""
+    global _tracker_last_sample
+    now = time.time()
+    mono = time.monotonic()
+
     with _lock:
-        result = {}
-        for name, samples in _history.items():
-            result[name] = list(samples)
-        return result
+        if mono - _tracker_last_sample < TRACKER_SAMPLE_INTERVAL:
+            return
+        _tracker_history.append((now, items_done))
+        _tracker_last_sample = mono
 
 
 def get_bucketed():
-    """Return deltas aggregated across all instances, bucketed by auto-selected interval."""
+    """Return deltas bucketed by auto-selected interval."""
     with _lock:
         now = time.time()
         cutoff = now - 86400
 
-        # Find earliest sample within 24h window
+        # Find earliest sample
         earliest = now
         for samples in _history.values():
             for s in samples:
                 if s[0] >= cutoff and s[0] < earliest:
                     earliest = s[0]
                     break
+        for s in _tracker_history:
+            if s[0] >= cutoff and s[0] < earliest:
+                earliest = s[0]
+                break
 
-        # Auto-select interval based on data span
+        # Auto-select interval
         span_hours = (now - earliest) / 3600
         if span_hours <= 1:
             interval_minutes = 5
@@ -65,32 +80,42 @@ def get_bucketed():
 
         interval_secs = interval_minutes * 60
 
-        # Pre-fill buckets from cutoff to now
+        # Pre-fill buckets
         buckets = {}
         bucket_start = int(cutoff // interval_secs) * interval_secs
         t = bucket_start
         while t <= now:
-            buckets[t] = [0, 0]  # [data_bytes, items_done]
+            buckets[t] = [0, 0]  # [data_bytes_delta, items_delta]
             t += interval_secs
 
-        # For each instance, compute deltas and assign to buckets
+        # Per-instance byte deltas
         for name, samples in _history.items():
             prev = None
             for sample in samples:
-                ts, total_bytes, completed = sample
+                ts, total_bytes = sample
                 if ts < cutoff:
                     prev = sample
                     continue
                 if prev is not None:
                     delta_bytes = max(0, total_bytes - prev[1])
-                    delta_items = max(0, completed - prev[2])
-
                     bucket_key = int(ts // interval_secs) * interval_secs
                     if bucket_key in buckets:
                         buckets[bucket_key][0] += delta_bytes
-                        buckets[bucket_key][1] += delta_items
-
                 prev = sample
+
+        # Tracker items deltas
+        prev = None
+        for sample in _tracker_history:
+            ts, items_done = sample
+            if ts < cutoff:
+                prev = sample
+                continue
+            if prev is not None:
+                delta_items = max(0, items_done - prev[1])
+                bucket_key = int(ts // interval_secs) * interval_secs
+                if bucket_key in buckets:
+                    buckets[bucket_key][1] += delta_items
+            prev = sample
 
         # Convert to sorted list
         result = []

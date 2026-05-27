@@ -39,11 +39,56 @@ config = None
 clients = {}
 ws_connections = []
 broadcast_task = None
+tracker_task = None
+
+
+def _get_tracker_pair():
+    """Find the first online instance with a downloader and project slug."""
+    for client in clients.values():
+        s = client.status
+        if s.connection_state != ConnectionState.ONLINE:
+            continue
+        if not s.downloader:
+            continue
+        slug = ""
+        if s.project_slug:
+            slug = s.project_slug.lower().replace(" ", "")
+        elif s.current_project:
+            slug = s.current_project.lower()
+            for ch in [" ", ".", ",", "'", '"', "!", "?", ":", ";", "-", "the", "archiving", "sets", "of", "discovered", "outlinks"]:
+                slug = slug.replace(ch, "")
+            slug = slug.strip()
+        if slug:
+            return slug, s.downloader
+    return None, None
+
+
+async def _tracker_poll_loop():
+    """Poll tracker stats every 60s and record items to history."""
+    while True:
+        try:
+            await asyncio.sleep(60)
+            slug, downloader = _get_tracker_pair()
+            if not slug or not downloader:
+                continue
+            stats = await tracker.get_project_data(slug)
+            if not stats:
+                continue
+            user_stats = tracker.build_user_stats(stats, downloader, slug)
+            items_done = user_stats.get("user_items_done", 0)
+            if items_done > 0:
+                history.record_tracker(items_done)
+                logger.debug("Recorded tracker items: %d for %s", items_done, downloader)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Tracker poll error: %s", e)
+            await asyncio.sleep(30)
 
 
 @asynccontextmanager
 async def lifespan(app):
-    global config, broadcast_task
+    global config, broadcast_task, tracker_task
 
     config = DashboardConfig.load()
     logger.info('Dashboard "%s" starting', config.title)
@@ -66,12 +111,20 @@ async def lifespan(app):
     asyncio.create_task(projects.get_projects(force=True))
 
     broadcast_task = asyncio.create_task(_broadcast_loop())
+    tracker_task = asyncio.create_task(_tracker_poll_loop())
     yield
 
     if broadcast_task:
         broadcast_task.cancel()
         try:
             await broadcast_task
+        except asyncio.CancelledError:
+            pass
+
+    if tracker_task:
+        tracker_task.cancel()
+        try:
+            await tracker_task
         except asyncio.CancelledError:
             pass
 
@@ -84,7 +137,7 @@ async def lifespan(app):
 app = FastAPI(
     title="ATW Dashboard",
     description="Monitoring & control dashboard for ArchiveTeam Warrior instances",
-    version="2.4.0",
+    version="2.5.0",
     lifespan=lifespan,
 )
 
@@ -101,7 +154,7 @@ async def _broadcast_loop():
                 s = client.status
                 if s.connection_state == ConnectionState.ONLINE:
                     total_bytes = s.bytes_downloaded + s.bytes_uploaded
-                    history.record(s.name, total_bytes, s.completed_items)
+                    history.record(s.name, total_bytes)
 
             if not ws_connections:
                 continue
@@ -282,13 +335,10 @@ async def get_tracker_stats_endpoint():
         if not s.downloader:
             continue
 
-        # Derive the tracker slug
         slug = ""
         if s.project_slug:
-            # "US Government" -> "usgovernment"
             slug = s.project_slug.lower().replace(" ", "")
         elif s.current_project:
-            # "Archiving the US government." -> "usgovernment"
             slug = s.current_project.lower()
             for ch in [" ", ".", ",", "'", '"', "!", "?", ":", ";", "-", "the", "archiving", "sets", "of", "discovered", "outlinks"]:
                 slug = slug.replace(ch, "")
