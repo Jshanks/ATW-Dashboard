@@ -189,13 +189,12 @@
         var stateClass = "border-state-" + inst.connection_state;
         var isOnline = inst.connection_state === "online";
         var statusDot = isOnline
-            ? '<span class="w-2.5 h-2.5 rounded-full bg-green-500 pulse-online"></span>'
+            ? '<span class="w-2.5 h-2.5 rounded-full bg-green-500 pulse-online" title="Online"></span>'
             : inst.connection_state === "connecting"
-                ? '<span class="w-2.5 h-2.5 rounded-full bg-yellow-500 pulse-connecting"></span>'
+                ? '<span class="w-2.5 h-2.5 rounded-full bg-yellow-500 pulse-connecting" title="Connecting"></span>'
                 : inst.connection_state === "auth_failed"
-                    ? '<span class="w-2.5 h-2.5 rounded-full bg-purple-500"></span>'
-                    : '<span class="w-2.5 h-2.5 rounded-full bg-red-500"></span>';
-        var stateLabel = inst.connection_state.replace("_", " ").toUpperCase();
+                    ? '<span class="w-2.5 h-2.5 rounded-full bg-purple-500" title="Auth Failed"></span>'
+                    : '<span class="w-2.5 h-2.5 rounded-full bg-red-500" title="Offline"></span>';
 
         // Project badge
         var projectBadgeHtml = "";
@@ -252,7 +251,7 @@
         var errorMsg = inst.error_message
             ? '<p class="text-xs text-red-400 mt-2 truncate" title="' + escapeHtml(inst.error_message) + '">' + escapeHtml(inst.error_message) + '</p>' : "";
         var reconnectInfo = !isOnline && inst.reconnect_attempts > 0
-            ? '<span class="text-xs text-gray-500 ml-2">(attempt ' + inst.reconnect_attempts + ')</span>' : "";
+            ? '<span class="text-xs text-gray-500 ml-1">(attempt ' + inst.reconnect_attempts + ')</span>' : "";
 
         var editBtn = '<button data-edit-instance="' + escapeHtml(inst.name) + '" class="text-gray-600 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Edit">' +
             '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg></button>';
@@ -265,7 +264,7 @@
             '</div>' +
             '<div class="flex items-center gap-2 mb-2">' + statusDot +
             '<h3 class="font-semibold text-sm">' + escapeHtml(inst.name) + '</h3>' +
-            '<span class="text-xs text-gray-500">' + stateLabel + reconnectInfo + '</span></div>' +
+            reconnectInfo + '</div>' +
             '<div class="text-xs text-gray-400 space-y-0.5">' +
             '<p><span class="text-gray-500">URL:</span> ' + escapeHtml(inst.url) + '</p>' +
             (isOnline ? '<p><span class="text-gray-500">Items:</span> ' + itemsLine + '</p>' +
