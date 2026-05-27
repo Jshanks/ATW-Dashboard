@@ -1,0 +1,12 @@
+# ATW Dashboard Configuration
+# Only dashboard-level settings live here.
+# Warrior instances are managed entirely through the web GUI
+# and persisted automatically in data/instances.json.
+
+dashboard:
+  title: "ATW Dashboard"
+  poll_interval: 5        # seconds between status polls per instance
+  reconnect_base: 5       # base reconnect delay in seconds
+  reconnect_max: 60       # max reconnect delay in seconds
+
+# NOTE: No "instances:" section — add warriors via the dashboard UI.

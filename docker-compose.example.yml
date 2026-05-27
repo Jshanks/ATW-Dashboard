@@ -1,0 +1,15 @@
+# Production deployment example
+services:
+  atw-dashboard:
+    image: ghcr.io/yourusername/atw-dashboard:latest
+    container_name: atw-dashboard
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+      - ./data:/app/data
+    environment:
+      - CONFIG_PATH=config.yml
+      - DASHBOARD_PORT=8080
+      - LOG_LEVEL=info
