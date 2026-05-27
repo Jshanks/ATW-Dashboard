@@ -6,9 +6,13 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./config.yml:/app/config.yml:ro
-      - ./data:/app/data
+      - atw-data:/app/data
     environment:
-      - CONFIG_PATH=config.yml
-      - DASHBOARD_PORT=8080
       - LOG_LEVEL=info
+      - DASHBOARD_TITLE=ATW Dashboard
+      - POLL_INTERVAL=5
+      - RECONNECT_BASE=5
+      - RECONNECT_MAX=60
+
+volumes:
+  atw-data:

@@ -9,11 +9,10 @@ COPY backend/ ./backend/
 COPY frontend/ ./frontend/
 COPY config.example.yml ./config.example.yml
 
-# Create data directory for persistent instance storage
-RUN mkdir -p /app/data
+RUN useradd -m -r appuser && \
+    mkdir -p /app/data && \
+    chown -R appuser:appuser /app
 
-# Create non-root user
-RUN useradd -m -r appuser && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 8080
