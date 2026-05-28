@@ -152,10 +152,4 @@ docker restart atw-dashboard
 | GET | `/api/config` | Dashboard configuration |
 | WS | `/ws` | Real-time status WebSocket |
 
-## Contributing
 
-Pull requests welcome! Please open an issue first to discuss major changes.
-
-## License
-
-MIT -- see [LICENSE](LICENSE)
