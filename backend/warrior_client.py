@@ -452,6 +452,7 @@ class WarriorClient:
         self._sync_items_to_status()
 
     def _on_item_task(self, msg):
+        """Handle project.item.task — update state and timestamp."""
         if not isinstance(msg, dict):
             return
         item_id = str(msg.get("id", ""))
@@ -462,8 +463,8 @@ class WarriorClient:
             if task_status == "running":
                 self._items[item_id].state = classify_stage(task_name)
                 self._items[item_id].task_description = task_name
-                self._item_updated[item_id] = time.monotonic()
-                self._sync_items_to_status()
+            self._item_updated[item_id] = time.monotonic()
+            self._sync_items_to_status()
 
     def _on_item_completed(self, msg, final_state):
         if not isinstance(msg, dict):
@@ -579,6 +580,8 @@ class WarriorClient:
         success = await self._post_settings({"selected_project": project_name})
         if success:
             await self._fetch_selected_project()
+            # Force reconnect to get fresh project.refresh with new items
+            self._sockjs_connected = False
         return success
 
     async def deselect_project(self):
