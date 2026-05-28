@@ -140,6 +140,7 @@ class WarriorClient:
                         self._status.connection_state = ConnectionState.ONLINE
                         self._status.error_message = ""
                         self._status.last_seen = datetime.now(timezone.utc).isoformat()
+                        self._check_stale_items()
                         continue
                     else:
                         self._sockjs_connected = False
@@ -532,6 +533,27 @@ class WarriorClient:
             for cid in completed_ids[:-5]:
                 del self._items[cid]
                 self._item_updated.pop(cid, None)
+    
+    def _check_stale_items(self):
+        """Demote stale active items on every poll cycle, not just on events."""
+        now = time.monotonic()
+        idle_states = (ItemState.WAITING, ItemState.GETTING_TASK, ItemState.UNKNOWN)
+        terminal_states = (ItemState.DONE, ItemState.ERROR)
+        changed = False
+        for item_id, item in self._items.items():
+            if item.state in idle_states or item.state in terminal_states:
+                continue
+            last_update = self._item_updated.get(item_id, now)
+            if now - last_update > STALE_ITEM_TIMEOUT:
+                logger.debug(
+                    "[%s] Stale check: demoting %s from %s to WAITING",
+                    self._status.name, item_id, item.state,
+                )
+                item.state = ItemState.WAITING
+                item.task_description = ""
+                changed = True
+        if changed:
+            self._sync_items_to_status()
 
     # ------------------------------------------------------------------
     # Push settings / change project
