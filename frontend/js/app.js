@@ -494,7 +494,10 @@
             if (!Array.isArray(data)) return;
             var html = '<option value="">-- Select Project --</option>';
             for (var i = 0; i < data.length; i++) {
-                html += '<option value="' + escapeHtml(data[i].slug || data[i]) + '">' + escapeHtml(data[i].name || data[i].slug || data[i]) + '</option>';
+                var item = data[i];
+                var slug = typeof item === "string" ? item : (item.slug || item.name || String(item));
+                var name = typeof item === "string" ? item : (item.name || item.slug || String(item));
+                html += '<option value="' + escapeHtml(slug) + '">' + escapeHtml(name) + '</option>';
             }
             projectSelect.innerHTML = html;
         }).catch(function(e) { console.error("Load projects error:", e); });
