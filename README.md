@@ -103,8 +103,7 @@ The backend opens a SockJS session to each warrior (the same protocol the warrio
 > This project is **vibecoded** and intended for **personal use only**. It was built iteratively with AI assistance and has not been formally tested or audited.
 >
 > **No support will be provided. Pull requests will not be reviewed or merged.**
->
-> If it works for you, great. If it doesn't, you get to keep both pieces.
+
 
 ## License
 
