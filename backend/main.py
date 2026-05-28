@@ -47,6 +47,7 @@ ws_connections = []
 broadcast_task = None
 tracker_task = None
 auto_resume_task = None
+_last_tracker_items = 0
 
 # Pause state: {instance_name: {"project_slug": str, "paused_at": float, "resume_at": float|None}}
 _pause_state = {}
@@ -94,6 +95,7 @@ def _get_tracker_pair():
 
 
 async def _tracker_poll_loop():
+    global _last_tracker_items
     while True:
         try:
             await asyncio.sleep(60)
@@ -106,8 +108,12 @@ async def _tracker_poll_loop():
             user_stats = tracker.build_user_stats(stats, downloader, slug)
             items_done = user_stats.get("user_items_done", 0)
             if items_done > 0:
-                history.record_tracker(items_done)
-                logger.debug("Recorded tracker items: %d for %s", items_done, downloader)
+                if _last_tracker_items > 0 and items_done >= _last_tracker_items:
+                    delta = items_done - _last_tracker_items
+                    if delta > 0:
+                        history.record_tracker(delta)
+                        logger.debug("Recorded tracker delta: %d items (total: %d)", delta, items_done)
+                _last_tracker_items = items_done
         except asyncio.CancelledError:
             break
         except Exception as e:
