@@ -198,8 +198,9 @@ class WarriorClient:
     async def _fetch_selected_project(self):
         """Fetch the selected project from /api/all-projects.
 
-        The HTML contains <li id="project-{slug}"> elements.
-        The selected project has a 'selected' class or a 'Selected' button.
+        The selected project is under the <h3>Your current project</h3>
+        section. The slug is in <input name="project_name" value="...">.
+        The display name is in <h4>.
         """
         try:
             resp = await self._http_client.get(
@@ -213,44 +214,38 @@ class WarriorClient:
 
             soup = BeautifulSoup(resp.text, "lxml")
 
-            # Strategy 1: look for <li> with class containing "selected"
-            selected_li = soup.find("li", class_=lambda c: c and "selected" in c)
+            # Find the "Your current project" heading
+            current_h3 = None
+            for h3 in soup.find_all("h3"):
+                if "current project" in h3.get_text(strip=True).lower():
+                    current_h3 = h3
+                    break
 
-            # Strategy 2: look for a submit/button with value "Selected"
-            if not selected_li:
-                selected_btn = soup.find("input", {"value": "Selected"})
-                if not selected_btn:
-                    selected_btn = soup.find("button", string=lambda s: s and "Selected" in s)
-                if not selected_btn:
-                    selected_btn = soup.find("a", string=lambda s: s and "Selected" in s)
-                if selected_btn:
-                    selected_li = selected_btn.find_parent("li")
-
-            # Strategy 3: look for any element with "selected" in text within a <li>
-            if not selected_li:
-                for li in soup.find_all("li"):
-                    li_id = li.get("id", "")
-                    if li_id.startswith("project-"):
-                        # Check for "selected" class on any child
-                        if li.find(class_=lambda c: c and "selected" in c.lower()):
-                            selected_li = li
-                            break
-
-            if not selected_li:
-                logger.debug("[%s] Could not find selected project in /api/all-projects", self.config.name)
+            if not current_h3:
+                logger.debug("[%s] No 'Your current project' heading found", self.config.name)
                 return
 
-            # Extract slug from id="project-{slug}"
-            li_id = selected_li.get("id", "")
-            if li_id.startswith("project-"):
-                slug = li_id[len("project-"):]
-                self._status.project_slug = slug
-                logger.info("[%s] Project slug: %s", self.config.name, slug)
+            # The <ul> immediately after the heading contains the selected project
+            current_ul = current_h3.find_next_sibling("ul")
+            if not current_ul:
+                logger.debug("[%s] No <ul> after current project heading", self.config.name)
+                return
 
-            # Extract display name from heading or first strong/bold text
-            name_el = selected_li.find(["h3", "h4", "strong", "b"])
-            if name_el:
-                name = name_el.get_text(strip=True)
+            current_li = current_ul.find("li")
+            if not current_li:
+                logger.debug("[%s] No <li> in current project list", self.config.name)
+                return
+
+            # Extract slug from <input name="project_name" value="usgovernment">
+            slug_input = current_li.find("input", {"name": "project_name"})
+            if slug_input and slug_input.get("value"):
+                self._status.project_slug = slug_input["value"].strip()
+                logger.info("[%s] Project slug: %s", self.config.name, self._status.project_slug)
+
+            # Extract display name from <h4>
+            h4 = current_li.find("h4")
+            if h4:
+                name = h4.get_text(strip=True)
                 if name:
                     self._status.current_project = name
                     logger.info("[%s] Project name: %s", self.config.name, name)

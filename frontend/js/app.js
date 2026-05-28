@@ -196,13 +196,10 @@
                     ? '<span class="w-2.5 h-2.5 rounded-full bg-purple-500" title="Auth Failed"></span>'
                     : '<span class="w-2.5 h-2.5 rounded-full bg-red-500" title="Offline"></span>';
 
-        // Project badge
+        // Project badge — always use slug
         var projectBadgeHtml = "";
-        if (isOnline) {
-            var projectDisplay = inst.project_slug || inst.current_project || "";
-            if (projectDisplay) {
-                projectBadgeHtml = '<span class="project-badge" title="' + escapeHtml(inst.current_project || projectDisplay) + '">' + escapeHtml(projectDisplay) + '</span>';
-            }
+        if (isOnline && inst.project_slug) {
+            projectBadgeHtml = '<span class="project-badge" title="' + escapeHtml(inst.current_project || inst.project_slug) + '">' + escapeHtml(inst.project_slug) + '</span>';
         }
 
         // Bandwidth
