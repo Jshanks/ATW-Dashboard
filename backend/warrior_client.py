@@ -575,7 +575,11 @@ class WarriorClient:
         return await self._post_settings(config_data)
 
     async def change_project(self, project_name):
-        return await self._post_settings({"selected_project": project_name})
+        """Change the selected project via POST /api/settings."""
+        success = await self._post_settings({"selected_project": project_name})
+        if success:
+            await self._fetch_selected_project()
+        return success
 
     async def _post_settings(self, data):
         try:
