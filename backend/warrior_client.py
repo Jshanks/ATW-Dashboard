@@ -514,7 +514,10 @@ class WarriorClient:
     async def change_project(self, project_name):
         success = await self._post_settings({"selected_project": project_name})
         if success:
-            await self._fetch_selected_project()
+            # Clear stale project info so reconnect picks up the new values
+            self._status.current_project = ""
+            self._status.project_slug = ""
+            # Force reconnect to get fresh project.refresh + re-fetch from API
             self._sockjs_connected = False
         return success
 
