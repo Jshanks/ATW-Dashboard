@@ -323,10 +323,14 @@ async def edit_instance(name, request: EditInstanceRequest):
     new_user = request.http_username if request.http_username is not None else old.config.http_username
     new_pass = request.http_password if request.http_password is not None else old.config.http_password
     update_fields = {}
-    if request.host is not None: update_fields["host"] = request.host
-    if request.port is not None: update_fields["port"] = request.port
-    if request.http_username is not None: update_fields["http_username"] = request.http_username
-    if request.http_password is not None: update_fields["http_password"] = request.http_password
+    if request.host is not None:
+        update_fields["host"] = request.host
+    if request.port is not None:
+        update_fields["port"] = request.port
+    if request.http_username is not None:
+        update_fields["http_username"] = request.http_username
+    if request.http_password is not None:
+        update_fields["http_password"] = request.http_password
     store.update(name, update_fields)
     new_config = WarriorInstanceConfig(name=name, host=new_host, port=new_port, http_username=new_user, http_password=new_pass)
     new_client = WarriorClient(new_config, reconnect_base=config.reconnect_base, reconnect_max=config.reconnect_max)
@@ -447,8 +451,8 @@ async def pause_instances(request: PauseRequest):
                 "resume_at": resume_at,
             }
             results[name] = {"status": "ok"}
-            logger.info("Paused %s (project: %s, resume: %s)",
-                        name, slug, "indefinite" if not resume_at else f"{request.duration_hours}h")
+            dur_str = "indefinite" if not resume_at else str(request.duration_hours) + "h"
+            logger.info("Paused %s (project: %s, resume: %s)", name, slug, dur_str)
         else:
             results[name] = {"status": "error", "detail": "Failed to deselect project"}
 
