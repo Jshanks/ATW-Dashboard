@@ -14,7 +14,7 @@ MAX_SAMPLES = 2880
 TRACKER_SAMPLE_INTERVAL = 60
 SAVE_INTERVAL = 60
 
-DATA_DIR = os.environ.get("DATA_DIR", "/data")
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data"))
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
 
 _lock = threading.Lock()
