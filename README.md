@@ -1,161 +1,113 @@
 # ATW Dashboard
 
-A centralized monitoring and control dashboard for managing multiple [ArchiveTeam Warrior](https://wiki.archiveteam.org/index.php/ArchiveTeam_Warrior) instances.
+A real-time monitoring and control dashboard for [ArchiveTeam Warrior](https://wiki.archiveteam.org/index.php/ArchiveTeam_Warrior) Docker instances.
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![ATW Dashboard](screenshot.png)
 
 ## Features
 
-- **Web-Based Instance Management** -- Add, edit, and remove warrior instances directly from the dashboard UI. No config files to edit.
-- **Persistent Storage** -- Instance configurations are saved to `data/instances.json` inside a Docker named volume and survive container restarts and rebuilds.
-- **Multi-Instance Monitoring** -- Connect to warriors across single-IP:multi-port or multi-IP topologies.
-- **Real-Time Status** -- See per-item pipeline status (waiting, downloading, processing, uploading) and current project for each instance.
-- **Bulk Configuration** -- Change nickname, concurrent items, HTTP credentials, and rsync threads across all (or selected) instances at once.
-- **Auto-Reconnect** -- Automatically reconnects to instances as they go offline and come back up, with exponential backoff.
-- **Docker Deployment** -- Ship as a single Docker container. All configuration via environment variables.
+- **Live Monitoring** — WebSocket-driven real-time updates for all warrior instances
+- **Bulk Settings** — Change nickname, concurrent items, and rsync threads across all warriors at once
+- **Bulk Project Switching** — Switch all warriors to a different project in one click
+- **Pause / Resume** — Pause warriors with optional timed auto-resume (1h, 3h, 6h, 12h, 24h, or indefinite)
+- **24h Activity Chart** — Combined data usage (bar) and tracker items (line) chart with dual y-axes
+- **Tracker Integration** — Live leaderboard stats pulled from ArchiveTeam tracker (items done, out, todo, your contribution)
+- **Instance Management** — Add, edit, and remove warrior instances on the fly
+- **Persistent State** — Config, history, and pause state survive restarts via JSON files in `/app/data`
+- **Dark Theme** — Clean dark UI built with Tailwind CSS
+
+## Tech Stack
+
+| Component | Technology |
+|-----------|-----------|
+| Backend | Python 3.11+, FastAPI, httpx, BeautifulSoup4 |
+| Frontend | Vanilla JS, Tailwind CSS (CDN), Chart.js 4 |
+| Warrior Comms | SockJS xhr-polling (same protocol the warrior UI uses) |
+| Data | JSON file storage (no database required) |
 
 ## Quick Start
 
-### Using Docker Compose (Recommended)
+### Docker Compose (recommended)
+
+```yaml
+version: "3"
+services:
+  atw-dashboard:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - LOG_LEVEL=info
+    restart: unless-stopped
+```
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/atw-dashboard.git
-cd atw-dashboard
-
-# Start the dashboard
 docker compose up -d
-
-# Visit http://localhost:8080
-# Click "Add Instance" to connect your first warrior
 ```
 
-That's it. The named volume `atw-data` is created automatically on first run.
+Then open `http://localhost:8080` and click **Add Instance** to connect your first warrior.
 
-### Using Docker
-
-```bash
-docker volume create atw-data
-
-docker run -d \\
-  --name atw-dashboard \\
-  -p 8080:8080 \\
-  -v atw-data:/app/data \\
-  -e DASHBOARD_TITLE="ATW Dashboard" \\
-  -e POLL_INTERVAL=5 \\
-  ghcr.io/yourusername/atw-dashboard:latest
-```
-
-### Manual (Development)
+### Manual
 
 ```bash
 pip install -r requirements.txt
-uvicorn backend.main:app --host 0.0.0.0 --port 8080 --reload
-# Visit http://localhost:8080
+uvicorn backend.main:app --host 0.0.0.0 --port 8080
 ```
-
-## Managing Instances
-
-All instance management is done through the web UI -- no config files needed:
-
-1. **Add**: Click "Add Instance" in the header. Enter a name, host IP, port (default 8001), and optional HTTP credentials.
-2. **Edit**: Hover over an instance card and click the pencil icon. Change the host, port, or credentials and click Save. The connection restarts automatically.
-3. **Remove**: Hover over an instance card and click the X icon. Confirm the removal.
-
-All changes are persisted to `data/instances.json` automatically.
 
 ## Configuration
 
-All dashboard settings are controlled via **environment variables** in your compose file:
+### config.yml
+
+Place in the project root or `data/` directory:
 
 ```yaml
-environment:
-  - LOG_LEVEL=info
-  - DASHBOARD_TITLE=ATW Dashboard
-  - POLL_INTERVAL=5
-  - RECONNECT_BASE=5
-  - RECONNECT_MAX=60
+title: "ATW Dashboard"
+poll_interval: 5
+reconnect_base: 5
+reconnect_max: 60
 ```
 
-A `config.yml` file is also supported as a fallback but is entirely optional. Environment variables always take precedence.
+### Environment Variables
 
-## Data Persistence
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOG_LEVEL` | `info` | Logging level (debug, info, warning, error) |
+| `DATA_DIR` | `./data` | Directory for persistent state files |
 
-Instance configurations are stored in `data/instances.json` inside the container. A **named volume** keeps this data safe across container restarts and image updates:
+## Data Files
 
-```yaml
-volumes:
-  - atw-data:/app/data
+All persistent state is stored in `DATA_DIR`:
 
-volumes:
-  atw-data:
-```
-
-To back up your instance list:
-
-```bash
-docker cp atw-dashboard:/app/data/instances.json ./instances-backup.json
-```
-
-To restore:
-
-```bash
-docker cp ./instances-backup.json atw-dashboard:/app/data/instances.json
-docker restart atw-dashboard
-```
+| File | Purpose |
+|------|---------|
+| `instances.json` | Saved warrior instance configs |
+| `history.json` | 24h activity data for the chart |
+| `pause.json` | Pause state with auto-resume timers |
 
 ## Architecture
 
 ```
-+---------------------------------------------------+
-|                  ATW Dashboard (:8080)              |
-|                                                    |
-|  +----------+   WebSocket    +------------------+ |
-|  | Frontend  |<------------>|  FastAPI Backend   | |
-|  | (Browser) |              | + Instance Store   | |
-|  +----------+              +--------+---------+ |
-|                                      |           |
-+--------------------------------------+-----------+
-                                       | HTTP Poll
-                   +-------------------+-------------------+
-                   v                   v                   v
-            +-------------+   +-------------+    +-------------+
-            |  ATW :8001  |   |  ATW :8002  |    |  ATW :8001  |
-            | 192.168.1.1 |   | 192.168.1.1 |    |  10.0.0.50  |
-            +-------------+   +-------------+    +-------------+
+Browser ←→ WebSocket ←→ FastAPI ←→ SockJS xhr-polling ←→ Warrior(s)
+                          ↕
+                     JSON files (data/)
 ```
 
-## Environment Variables
+The backend opens a SockJS session to each warrior (the same protocol the warrior's own web UI uses), receives real-time events (`project.refresh`, `bandwidth`, `project.item.task`, etc.), and aggregates them into a dashboard state that's broadcast to all connected browsers via WebSocket every 2 seconds.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DASHBOARD_TITLE` | `ATW Dashboard` | Dashboard title shown in the header |
-| `POLL_INTERVAL` | `5` | Seconds between status polls per instance |
-| `RECONNECT_BASE` | `5` | Base reconnect delay in seconds |
-| `RECONNECT_MAX` | `60` | Maximum reconnect delay in seconds |
-| `DATA_DIR` | `data` | Directory for instances.json persistence |
-| `CONFIG_PATH` | `config.yml` | Optional config file path (env vars take precedence) |
-| `LOG_LEVEL` | `info` | Logging level (debug, info, warning, error) |
+---
 
-## API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/instances` | List all instances and status |
-| GET | `/api/instances/{name}` | Get a specific instance |
-| POST | `/api/instances` | Add a new instance (persisted) |
-| PUT | `/api/instances/{name}` | Edit instance connection details (persisted) |
-| DELETE | `/api/instances/{name}` | Remove an instance (persisted) |
-| POST | `/api/instances/{name}/settings` | Push warrior settings (nickname, concurrent, etc.) |
-| POST | `/api/settings/bulk` | Bulk push warrior settings to multiple instances |
-| GET | `/api/health` | Health check |
-| GET | `/api/config` | Dashboard configuration |
-| WS | `/ws` | Real-time status WebSocket |
-
-## Contributing
-
-Pull requests welcome! Please open an issue first to discuss major changes.
+> **⚠️ Disclaimer**
+>
+> This project is **vibecoded** and intended for **personal use only**. It was built iteratively with AI assistance and has not been formally tested or audited.
+>
+> **No support will be provided. Pull requests will not be reviewed or merged.**
+>
+> If it works for you, great. If it doesn't, you get to keep both pieces.
 
 ## License
 
-MIT -- see [LICENSE](LICENSE)
+This project is licensed under the [Creative Commons Attribution-NonCommercial 4.0 International License](LICENSE) (CC BY-NC 4.0).
+
+You are free to share and adapt this work for non-commercial purposes with attribution. See [LICENSE](LICENSE) for full terms.
