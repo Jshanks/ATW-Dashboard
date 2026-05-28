@@ -311,23 +311,66 @@
                         backgroundColor: "#1f2937",
                         titleColor: "#e5e7eb",
                         bodyColor: "#d1d5db",
+                        borderColorfunction initChart() {
+        var ctx = document.getElementById("activity-chart").getContext("2d");
+        activityChart = new Chart(ctx, {
+            type: "bar",
+            data: {
+                datasets: [
+                    {
+                        type: "bar",
+                        label: "Data Used",
+                        data: [],
+                        backgroundColor: "#f59e0b80",
+                        borderColor: "#f59e0b",
+                        borderWidth: 1,
+                        yAxisID: "yData",
+                        order: 2
+                    },
+                    {
+                        type: "line",
+                        label: "Items Done",
+                        data: [],
+                        borderColor: "#818cf8",
+                        backgroundColor: "#818cf820",
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        tension: 0.3,
+                        fill: false,
+                        yAxisID: "yItems",
+                        order: 1
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: "index", intersect: false },
+                plugins: {
+                    legend: {
+                        labels: { color: "#9ca3af", boxWidth: 12, padding: 16, font: { size: 11 } }
+                    },
+                    tooltip: {
+                        backgroundColor: "#1f2937",
+                        titleColor: "#e5e7eb",
+                        bodyColor: "#d1d5db",
                         borderColor: "#374151",
                         borderWidth: 1,
                         callbacks: {
-                        title: function(items) {
-                            if (items.length > 0) {
-                                var d = new Date(items[0].parsed.x);
-                                return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                            title: function(items) {
+                                if (items.length > 0) {
+                                    var d = new Date(items[0].parsed.x);
+                                    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                                }
+                                return "";
+                            },
+                            label: function(ctx) {
+                                if (ctx.dataset.yAxisID === "yData") {
+                                    return "Data: " + fmtTotal(ctx.parsed.y);
+                                }
+                                return "Items: " + fmtNum(ctx.parsed.y) + " (from tracker)";
                             }
-                            return "";
-                        },
-                        label: function(ctx) {
-                            if (ctx.dataset.yAxisID === "yData") {
-                                return "Data: " + fmtTotal(ctx.parsed.y);
-                            }
-                            return "Items: " + fmtNum(ctx.parsed.y) + " (from tracker)";
                         }
-                    }
                     }
                 },
                 scales: {
@@ -344,14 +387,14 @@
                         beginAtZero: true,
                         grid: { color: "#1f293780" },
                         ticks: {
-                            color: "#06b6d4",
+                            color: "#f59e0b",
                             font: { size: 10 },
                             callback: function(val) { return fmtTotal(val); }
                         },
                         title: {
                             display: true,
                             text: "Data",
-                            color: "#06b6d4",
+                            color: "#f59e0b",
                             font: { size: 10 }
                         }
                     },
@@ -361,14 +404,14 @@
                         beginAtZero: true,
                         grid: { drawOnChartArea: false },
                         ticks: {
-                            color: "#22c55e",
+                            color: "#818cf8",
                             font: { size: 10 },
                             callback: function(val) { return fmtNum(val); }
                         },
                         title: {
                             display: true,
                             text: "Items",
-                            color: "#22c55e",
+                            color: "#818cf8",
                             font: { size: 10 }
                         }
                     }

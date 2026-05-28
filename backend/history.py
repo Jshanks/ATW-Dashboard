@@ -14,20 +14,21 @@ MAX_SAMPLES = 2880
 TRACKER_SAMPLE_INTERVAL = 60
 SAVE_INTERVAL = 60
 
+# Skip deltas where samples are more than this many seconds apart
+# (prevents massive spikes after restart/load)
+MAX_DELTA_GAP = 180
+
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data"))
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
 
 _lock = threading.Lock()
 
-# Per-instance bytes history
 _history = {}
 _last_sample = {}
 
-# Global tracker items history
 _tracker_history = deque(maxlen=MAX_SAMPLES)
 _tracker_last_sample = 0
 
-# Save throttle
 _last_save = 0
 
 
@@ -97,6 +98,7 @@ def get_bucketed():
             buckets[t] = [0, 0]
             t += interval_secs
 
+        # Per-instance byte deltas
         for name, samples in _history.items():
             prev = None
             for sample in samples:
@@ -105,12 +107,15 @@ def get_bucketed():
                     prev = sample
                     continue
                 if prev is not None:
-                    delta_bytes = max(0, total_bytes - prev[1])
-                    bucket_key = int(ts // interval_secs) * interval_secs
-                    if bucket_key in buckets:
-                        buckets[bucket_key][0] += delta_bytes
+                    gap = ts - prev[0]
+                    if gap <= MAX_DELTA_GAP:
+                        delta_bytes = max(0, total_bytes - prev[1])
+                        bucket_key = int(ts // interval_secs) * interval_secs
+                        if bucket_key in buckets:
+                            buckets[bucket_key][0] += delta_bytes
                 prev = sample
 
+        # Tracker items deltas
         prev = None
         for sample in _tracker_history:
             ts, items_done = sample
@@ -118,10 +123,12 @@ def get_bucketed():
                 prev = sample
                 continue
             if prev is not None:
-                delta_items = max(0, items_done - prev[1])
-                bucket_key = int(ts // interval_secs) * interval_secs
-                if bucket_key in buckets:
-                    buckets[bucket_key][1] += delta_items
+                gap = ts - prev[0]
+                if gap <= MAX_DELTA_GAP:
+                    delta_items = max(0, items_done - prev[1])
+                    bucket_key = int(ts // interval_secs) * interval_secs
+                    if bucket_key in buckets:
+                        buckets[bucket_key][1] += delta_items
             prev = sample
 
         result = []
@@ -145,9 +152,6 @@ def remove(instance_name):
         _last_sample.pop(instance_name, None)
 
 
-# ------------------------------------------------------------------
-# Persistence
-# ------------------------------------------------------------------
 def save():
     """Save history to disk, throttled to once per SAVE_INTERVAL."""
     global _last_save
@@ -169,7 +173,6 @@ def force_save():
             "tracker": [],
         }
 
-        # Only save samples within the 24h window
         for name, samples in _history.items():
             data["instances"][name] = [
                 s for s in samples if s[0] >= cutoff
@@ -212,7 +215,6 @@ def load():
     loaded_samples = 0
 
     with _lock:
-        # Load per-instance bytes history
         instances = data.get("instances", {})
         for name, samples in instances.items():
             dq = deque(maxlen=MAX_SAMPLES)
@@ -224,7 +226,6 @@ def load():
                 _history[name] = dq
                 loaded_instances += 1
 
-        # Load tracker history
         tracker_samples = data.get("tracker", [])
         for s in tracker_samples:
             if isinstance(s, (list, tuple)) and len(s) >= 2 and s[0] >= cutoff:
