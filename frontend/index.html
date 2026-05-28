@@ -4,10 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ATW Dashboard</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
-    <link rel="stylesheet" href="/static/css/style.css">
+    https://cdn.tailwindcss.com
+    https://cdn.jsdelivr.net/npm/chart.js@4</script>
+    https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3</script>
+    /static/css/style.css
     <script>
         tailwind.config = {
             darkMode: 'class',
@@ -53,6 +53,10 @@
                     <span class="text-gray-400">&#x2191;</span>
                     <span id="total-ul" class="text-orange-400 font-bold">0 B/s</span>
                 </div>
+                <button id="btn-pause-modal" class="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg transition-colors flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    Pause / Resume
+                </button>
                 <button id="btn-settings-panel" class="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg transition-colors flex items-center gap-2">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
                     Bulk Settings
@@ -64,6 +68,14 @@
             </div>
         </div>
     </header>
+
+    <!-- Pause Banner -->
+    <div id="pause-banner" class="hidden bg-amber-900/30 border-b border-amber-800/50 px-6 py-2">
+        <div class="max-w-7xl mx-auto flex items-center justify-between text-sm">
+            <span id="pause-banner-text" class="text-amber-400"></span>
+            <button id="btn-banner-resume" class="text-amber-400 hover:text-amber-300 text-xs font-medium px-3 py-1 rounded bg-amber-900/50 border border-amber-800/50">Resume All Now</button>
+        </div>
+    </div>
 
     <!-- Tracker Stats Bar -->
     <div id="tracker-bar" class="hidden bg-gray-900/50 border-b border-gray-800 px-6 py-3">
@@ -116,6 +128,44 @@
         </div>
     </div>
 
+    <!-- Pause / Resume Modal -->
+    <div id="pause-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+        <div class="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-lg">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-lg font-semibold">Pause / Resume Instances</h2>
+                <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="checkbox" id="pause-select-all" class="rounded bg-gray-700 border-gray-600" checked>
+                    <span>Select All</span>
+                </label>
+            </div>
+            <div id="pause-instance-list" class="space-y-2 max-h-64 overflow-y-auto mb-4"></div>
+            <div class="flex items-center gap-3 mb-4">
+                <label class="text-sm text-gray-400">Pause Duration:</label>
+                <select id="pause-duration" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
+                    <option value="1">1 hour</option>
+                    <option value="3" selected>3 hours</option>
+                    <option value="6">6 hours</option>
+                    <option value="12">12 hours</option>
+                    <option value="24">24 hours</option>
+                    <option value="">Indefinite</option>
+                </select>
+            </div>
+            <div class="flex gap-3 mb-4">
+                <button id="btn-pause-selected" class="bg-amber-600 hover:bg-amber-700 px-5 py-2 rounded-lg transition-colors text-sm font-medium flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    Pause Selected
+                </button>
+                <button id="btn-resume-selected" class="bg-green-600 hover:bg-green-700 px-5 py-2 rounded-lg transition-colors text-sm font-medium flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    Resume Selected
+                </button>
+                <button id="btn-close-pause" class="bg-gray-700 hover:bg-gray-600 px-5 py-2 rounded-lg transition-colors text-sm font-medium ml-auto">Close</button>
+            </div>
+            <p id="pause-action-status" class="text-sm mb-3"></p>
+            <p class="text-xs text-gray-500 italic">Note: Warriors will finish any in-progress items before fully pausing.</p>
+        </div>
+    </div>
+
     <!-- Add Instance Modal -->
     <div id="add-instance-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
         <div class="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-md">
@@ -163,6 +213,6 @@
     </main>
 
     <div id="toast-container" class="fixed bottom-6 right-6 flex flex-col gap-2 z-50"></div>
-    <script src="/static/js/app.js"></script>
+    /static/js/app.js</script>
 </body>
 </html>

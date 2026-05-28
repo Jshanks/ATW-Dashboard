@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -18,6 +19,8 @@ from backend.models import (
     ConnectionState,
     DashboardState,
     EditInstanceRequest,
+    PauseRequest,
+    ResumeRequest,
     WarriorInstanceConfig,
     WarriorSettings,
     WarriorStatus,
@@ -35,15 +38,50 @@ logging.basicConfig(
 )
 logger = logging.getLogger("atw-dashboard")
 
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data"))
+PAUSE_FILE = os.path.join(DATA_DIR, "pause.json")
+
 config = None
 clients = {}
 ws_connections = []
 broadcast_task = None
 tracker_task = None
+auto_resume_task = None
+
+# Pause state: {instance_name: {"project_slug": str, "paused_at": float, "resume_at": float|None}}
+_pause_state = {}
 
 
+# ------------------------------------------------------------------
+# Pause state persistence
+# ------------------------------------------------------------------
+def _load_pause_state():
+    global _pause_state
+    if not os.path.exists(PAUSE_FILE):
+        return
+    try:
+        with open(PAUSE_FILE, "r") as f:
+            _pause_state = json.load(f)
+        logger.info("Loaded pause state: %d paused instance(s)", len(_pause_state))
+    except Exception as e:
+        logger.warning("Failed to load pause state: %s", e)
+
+
+def _save_pause_state():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = PAUSE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_pause_state, f)
+        os.replace(tmp, PAUSE_FILE)
+    except Exception as e:
+        logger.warning("Failed to save pause state: %s", e)
+
+
+# ------------------------------------------------------------------
+# Background tasks
+# ------------------------------------------------------------------
 def _get_tracker_pair():
-    """Find the first online instance with a downloader and project slug."""
     for client in clients.values():
         s = client.status
         if s.connection_state != ConnectionState.ONLINE:
@@ -56,7 +94,6 @@ def _get_tracker_pair():
 
 
 async def _tracker_poll_loop():
-    """Poll tracker stats every 60s and record items to history."""
     while True:
         try:
             await asyncio.sleep(60)
@@ -78,15 +115,48 @@ async def _tracker_poll_loop():
             await asyncio.sleep(30)
 
 
+async def _auto_resume_loop():
+    """Check every 30s if any paused instances should be auto-resumed."""
+    while True:
+        try:
+            await asyncio.sleep(30)
+            now = time.time()
+            to_resume = []
+            for name, state in list(_pause_state.items()):
+                resume_at = state.get("resume_at")
+                if resume_at and now >= resume_at:
+                    to_resume.append(name)
+
+            for name in to_resume:
+                slug = _pause_state[name].get("project_slug", "")
+                if name in clients and slug:
+                    success = await clients[name].select_project(slug)
+                    if success:
+                        logger.info("Auto-resumed %s with project %s", name, slug)
+                    else:
+                        logger.warning("Auto-resume failed for %s", name)
+                del _pause_state[name]
+
+            if to_resume:
+                _save_pause_state()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Auto-resume error: %s", e)
+
+
+# ------------------------------------------------------------------
+# Lifespan
+# ------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app):
-    global config, broadcast_task, tracker_task
+    global config, broadcast_task, tracker_task, auto_resume_task
 
     config = DashboardConfig.load()
     logger.info('Dashboard "%s" starting', config.title)
 
-    # Load persisted history
     history.load()
+    _load_pause_state()
 
     saved = store.get_all()
     logger.info("Loaded %d saved instance(s) from store", len(saved))
@@ -107,27 +177,22 @@ async def lifespan(app):
 
     broadcast_task = asyncio.create_task(_broadcast_loop())
     tracker_task = asyncio.create_task(_tracker_poll_loop())
+    auto_resume_task = asyncio.create_task(_auto_resume_loop())
     yield
 
-    if broadcast_task:
-        broadcast_task.cancel()
-        try:
-            await broadcast_task
-        except asyncio.CancelledError:
-            pass
-
-    if tracker_task:
-        tracker_task.cancel()
-        try:
-            await tracker_task
-        except asyncio.CancelledError:
-            pass
+    for task in [broadcast_task, tracker_task, auto_resume_task]:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     for client in clients.values():
         await client.stop()
 
-    # Save history on shutdown
     history.force_save()
+    _save_pause_state()
 
     logger.info("Dashboard shut down cleanly.")
 
@@ -135,7 +200,7 @@ async def lifespan(app):
 app = FastAPI(
     title="ATW Dashboard",
     description="Monitoring & control dashboard for ArchiveTeam Warrior instances",
-    version="2.5.1",
+    version="2.8.0",
     lifespan=lifespan,
 )
 
@@ -154,7 +219,6 @@ async def _broadcast_loop():
                     total_bytes = s.bytes_downloaded + s.bytes_uploaded
                     history.record(s.name, total_bytes)
 
-            # Periodically save history to disk (throttled internally to ~60s)
             history.save()
 
             if not ws_connections:
@@ -279,6 +343,8 @@ async def remove_instance(name):
     del clients[name]
     store.remove(name)
     history.remove(name)
+    _pause_state.pop(name, None)
+    _save_pause_state()
     return {"status": "ok", "instance": name}
 
 
@@ -317,15 +383,112 @@ async def bulk_change_project(request: BulkProjectRequest):
         if name not in clients:
             results[name] = {"status": "error", "detail": "Not found"}
             continue
+
+        # If paused, update the saved project instead of sending to warrior
+        if name in _pause_state:
+            _pause_state[name]["project_slug"] = request.project_name
+            _save_pause_state()
+            results[name] = {"status": "ok", "note": "Resume project updated (instance is paused)"}
+            continue
+
         success = await clients[name].change_project(request.project_name)
         results[name] = {"status": "ok" if success else "error"}
+    return {"results": results}
+
+
+# -- Pause / Resume --
+@app.get("/api/pause-status")
+async def get_pause_status():
+    """Return current pause state for all instances."""
+    now = time.time()
+    paused = {}
+    for name, state in _pause_state.items():
+        resume_at = state.get("resume_at")
+        remaining = None
+        if resume_at:
+            remaining = max(0, resume_at - now)
+        paused[name] = {
+            "project_slug": state.get("project_slug", ""),
+            "paused_at": state.get("paused_at", 0),
+            "resume_at": resume_at,
+            "remaining_seconds": remaining,
+        }
+    return {"paused": paused, "count": len(paused)}
+
+
+@app.post("/api/pause")
+async def pause_instances(request: PauseRequest):
+    now = time.time()
+    resume_at = None
+    if request.duration_hours is not None:
+        resume_at = now + (request.duration_hours * 3600)
+
+    results = {}
+    for name in request.instance_names:
+        if name not in clients:
+            results[name] = {"status": "error", "detail": "Not found"}
+            continue
+        if name in _pause_state:
+            results[name] = {"status": "error", "detail": "Already paused"}
+            continue
+
+        client = clients[name]
+        slug = client.status.project_slug
+
+        if not slug:
+            results[name] = {"status": "error", "detail": "No project selected"}
+            continue
+
+        success = await client.deselect_project()
+        if success:
+            _pause_state[name] = {
+                "project_slug": slug,
+                "paused_at": now,
+                "resume_at": resume_at,
+            }
+            results[name] = {"status": "ok"}
+            logger.info("Paused %s (project: %s, resume: %s)",
+                        name, slug, "indefinite" if not resume_at else f"{request.duration_hours}h")
+        else:
+            results[name] = {"status": "error", "detail": "Failed to deselect project"}
+
+    _save_pause_state()
+    return {"results": results}
+
+
+@app.post("/api/resume")
+async def resume_instances(request: ResumeRequest):
+    results = {}
+    for name in request.instance_names:
+        if name not in _pause_state:
+            results[name] = {"status": "error", "detail": "Not paused"}
+            continue
+        if name not in clients:
+            results[name] = {"status": "error", "detail": "Not found"}
+            del _pause_state[name]
+            continue
+
+        slug = _pause_state[name].get("project_slug", "")
+        if not slug:
+            results[name] = {"status": "error", "detail": "No project to resume"}
+            del _pause_state[name]
+            continue
+
+        success = await clients[name].select_project(slug)
+        if success:
+            del _pause_state[name]
+            results[name] = {"status": "ok"}
+            logger.info("Resumed %s with project %s", name, slug)
+        else:
+            results[name] = {"status": "error", "detail": "Failed to select project"}
+
+    _save_pause_state()
     return {"results": results}
 
 
 # -- Tracker stats --
 @app.get("/api/tracker")
 async def get_tracker_stats_endpoint():
-    """Get tracker leaderboard stats for the user across active projects."""
     seen = {}
     for client in clients.values():
         s = client.status
@@ -333,11 +496,9 @@ async def get_tracker_stats_endpoint():
             continue
         if not s.downloader:
             continue
-
         slug = s.project_slug
         if not slug:
             continue
-
         if slug not in seen:
             seen[slug] = s.downloader
             logger.debug("Tracker pair: slug=%s downloader=%s (from %s)", slug, s.downloader, s.name)
@@ -360,7 +521,6 @@ async def get_tracker_stats_endpoint():
 # -- History --
 @app.get("/api/history")
 async def get_history():
-    """Return 24h activity history, bucketed and aggregated."""
     return history.get_bucketed()
 
 

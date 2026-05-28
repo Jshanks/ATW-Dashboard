@@ -50,7 +50,8 @@
     white-space: nowrap;
 }
 
-.project-pending {
+/* Pause state badge */
+.pause-badge {
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;
@@ -64,12 +65,12 @@
     white-space: nowrap;
 }
 
-@keyframes pending-pulse {
+@keyframes pause-pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.4; }
 }
-.pending-pulse {
-    animation: pending-pulse 1.5s ease-in-out infinite;
+.pause-pulse {
+    animation: pause-pulse 2s ease-in-out infinite;
 }
 
 /* Toast notifications */

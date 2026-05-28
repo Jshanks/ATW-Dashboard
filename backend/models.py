@@ -78,6 +78,15 @@ class BulkProjectRequest(BaseModel):
     project_name: str = Field(..., description="Project slug to select")
 
 
+class PauseRequest(BaseModel):
+    instance_names: list[str] = Field(..., description="List of instance names to pause")
+    duration_hours: Optional[float] = Field(None, description="Hours until auto-resume. None = indefinite")
+
+
+class ResumeRequest(BaseModel):
+    instance_names: list[str] = Field(..., description="List of instance names to resume")
+
+
 class AddInstanceRequest(BaseModel):
     name: str
     host: str

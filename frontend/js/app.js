@@ -1,5 +1,5 @@
 /**
- * ATW Dashboard -- Frontend Application v2.7
+ * ATW Dashboard -- Frontend Application v2.8
  */
 (function () {
     "use strict";
@@ -10,6 +10,7 @@
     var dashboardState = { instances: [], total_online: 0, total_offline: 0, total_items_active: 0 };
     var knownInstances = new Set();
     var IDLE_STATES = { "getting_task": true, "waiting": true, "unknown": true };
+    var pauseState = {};
 
     var activityChart = null;
     var CHART_REFRESH_INTERVAL = 30000;
@@ -42,6 +43,18 @@
     var projectStatus = document.getElementById("project-status");
     var trackerBar = document.getElementById("tracker-bar");
     var trackerContent = document.getElementById("tracker-stats-content");
+    var pauseModal = document.getElementById("pause-modal");
+    var btnPauseModal = document.getElementById("btn-pause-modal");
+    var btnClosePause = document.getElementById("btn-close-pause");
+    var btnPauseSelected = document.getElementById("btn-pause-selected");
+    var btnResumeSelected = document.getElementById("btn-resume-selected");
+    var pauseSelectAll = document.getElementById("pause-select-all");
+    var pauseInstanceList = document.getElementById("pause-instance-list");
+    var pauseDuration = document.getElementById("pause-duration");
+    var pauseActionStatus = document.getElementById("pause-action-status");
+    var pauseBanner = document.getElementById("pause-banner");
+    var pauseBannerText = document.getElementById("pause-banner-text");
+    var btnBannerResume = document.getElementById("btn-banner-resume");
 
     // ---- Utility ----
     function escapeHtml(str) {
@@ -89,6 +102,14 @@
         if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
         if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
         return String(n);
+    }
+    function fmtCountdown(seconds) {
+        if (seconds === null || seconds === undefined) return "indefinite";
+        if (seconds <= 0) return "resuming...";
+        var h = Math.floor(seconds / 3600);
+        var m = Math.floor((seconds % 3600) / 60);
+        if (h > 0) return h + "h " + m + "m";
+        return m + "m";
     }
 
     // ---- WebSocket ----
@@ -186,6 +207,7 @@
     function renderInstanceCard(inst) {
         var stateClass = "border-state-" + inst.connection_state;
         var isOnline = inst.connection_state === "online";
+        var isPaused = pauseState[inst.name] !== undefined;
         var statusDot = isOnline
             ? '<span class="w-2.5 h-2.5 rounded-full bg-green-500 pulse-online" title="Online"></span>'
             : inst.connection_state === "connecting"
@@ -200,9 +222,17 @@
             projectBadgeHtml = '<span class="project-badge" title="' + escapeHtml(inst.current_project || inst.project_slug) + '">' + escapeHtml(inst.project_slug) + '</span>';
         }
 
+        // Pause badge
+        if (isPaused) {
+            var ps = pauseState[inst.name];
+            var remaining = ps.remaining_seconds;
+            var pauseText = remaining !== null ? fmtCountdown(remaining) : "indefinite";
+            projectBadgeHtml = '<span class="pause-badge pause-pulse" title="Paused — ' + pauseText + '">&#x23F8; paused</span>';
+        }
+
         // Bandwidth
         var bwHtml = "";
-        if (isOnline && (inst.bandwidth_down > 0 || inst.bandwidth_up > 0 || inst.bytes_downloaded > 0)) {
+        if (isOnline && !isPaused && (inst.bandwidth_down > 0 || inst.bandwidth_up > 0 || inst.bytes_downloaded > 0)) {
             bwHtml = '<p><span class="text-gray-500">BW:</span> ' +
                 '<span class="text-cyan-400">' + fmtBytes(inst.bandwidth_down || 0) + ' &#x2193;</span> ' +
                 '<span class="text-orange-400">' + fmtBytes(inst.bandwidth_up || 0) + ' &#x2191;</span></p>';
@@ -258,14 +288,14 @@
             reconnectInfo + '</div>' +
             '<div class="text-xs text-gray-400 space-y-0.5">' +
             '<p><span class="text-gray-500">URL:</span> ' + escapeHtml(inst.url) + '</p>' +
-            (isOnline ? '<p><span class="text-gray-500">Items:</span> ' + itemsLine + '</p>' +
+            (isOnline && !isPaused ? '<p><span class="text-gray-500">Items:</span> ' + itemsLine + '</p>' +
             doneHtml + bwHtml : "") +
             '</div>' + errorMsg +
             (inst.last_seen ? '<p class="text-xs text-gray-600 mt-2">Last seen: ' + formatTime(inst.last_seen) + '</p>' : "") +
             '</div>';
     }
 
-    // ---- 24h Activity Chart (combined bar + line) ----
+    // ---- 24h Activity Chart ----
     function initChart() {
         var ctx = document.getElementById("activity-chart").getContext("2d");
         activityChart = new Chart(ctx, {
@@ -381,9 +411,7 @@
             return res.json();
         }).then(function(data) {
             if (!data || !data.buckets) return;
-
             var buckets = data.buckets;
-
             var dataPoints = [];
             var itemPoints = [];
             for (var i = 0; i < buckets.length; i++) {
@@ -391,13 +419,10 @@
                 dataPoints.push({ x: ts, y: buckets[i].bytes });
                 itemPoints.push({ x: ts, y: buckets[i].items });
             }
-
             activityChart.data.datasets[0].data = dataPoints;
             activityChart.data.datasets[1].data = itemPoints;
-
             activityChart.data.datasets[0].barThickness = "flex";
             activityChart.data.datasets[0].maxBarThickness = Math.max(4, Math.min(20, Math.floor(800 / Math.max(buckets.length, 1))));
-
             activityChart.update("none");
         }).catch(function(e) { console.error("History load error:", e); });
     }
@@ -442,6 +467,161 @@
         });
     }
 
+    // ---- Pause / Resume ----
+    function loadPauseStatus() {
+        fetch("/api/pause-status").then(function(res) {
+            if (!res.ok) return;
+            return res.json();
+        }).then(function(data) {
+            if (!data) return;
+            pauseState = data.paused || {};
+            updatePauseBanner();
+        }).catch(function(e) { console.error("Pause status error:", e); });
+    }
+
+    function updatePauseBanner() {
+        var count = Object.keys(pauseState).length;
+        if (count === 0) {
+            pauseBanner.classList.add("hidden");
+            return;
+        }
+        var earliest = null;
+        var allIndefinite = true;
+        for (var name in pauseState) {
+            var rs = pauseState[name].remaining_seconds;
+            if (rs !== null) {
+                allIndefinite = false;
+                if (earliest === null || rs < earliest) earliest = rs;
+            }
+        }
+        var text = "\u23F8 " + count + " instance" + (count > 1 ? "s" : "") + " paused";
+        if (allIndefinite) {
+            text += " indefinitely";
+        } else if (earliest !== null) {
+            text += " \u2014 earliest resume in " + fmtCountdown(earliest);
+        }
+        pauseBannerText.textContent = text;
+        pauseBanner.classList.remove("hidden");
+    }
+
+    function populatePauseModal() {
+        var instances = dashboardState.instances || [];
+        var html = "";
+        for (var i = 0; i < instances.length; i++) {
+            var inst = instances[i];
+            var isPaused = pauseState[inst.name] !== undefined;
+            var statusHtml = "";
+            if (isPaused) {
+                var ps = pauseState[inst.name];
+                var remaining = ps.remaining_seconds;
+                if (remaining !== null) {
+                    statusHtml = '<span class="text-amber-400 text-xs">\u23F8 ' + fmtCountdown(remaining) + ' remaining</span>';
+                } else {
+                    statusHtml = '<span class="text-amber-400 text-xs">\u23F8 Paused indefinitely</span>';
+                }
+            } else if (inst.connection_state === "online") {
+                statusHtml = '<span class="text-green-400 text-xs">\u25CF Running</span>';
+            } else {
+                statusHtml = '<span class="text-gray-500 text-xs">\u25CB ' + inst.connection_state.replace("_", " ") + '</span>';
+            }
+            html += '<label class="flex items-center justify-between bg-gray-800 px-3 py-2 rounded-lg cursor-pointer hover:bg-gray-700 transition-colors">' +
+                '<div class="flex items-center gap-2">' +
+                '<input type="checkbox" class="pause-instance-cb rounded" value="' + escapeHtml(inst.name) + '" checked>' +
+                '<span class="text-sm">' + escapeHtml(inst.name) + '</span>' +
+                '</div>' +
+                statusHtml +
+                '</label>';
+        }
+        pauseInstanceList.innerHTML = html;
+        pauseActionStatus.textContent = "";
+        pauseActionStatus.className = "text-sm mb-3";
+    }
+
+    btnPauseModal.addEventListener("click", function () {
+        loadPauseStatus();
+        setTimeout(function () {
+            populatePauseModal();
+            pauseModal.classList.remove("hidden");
+        }, 200);
+    });
+    btnClosePause.addEventListener("click", function () { pauseModal.classList.add("hidden"); });
+
+    pauseSelectAll.addEventListener("change", function () {
+        var checked = pauseSelectAll.checked;
+        document.querySelectorAll(".pause-instance-cb").forEach(function (cb) { cb.checked = checked; });
+    });
+
+    btnPauseSelected.addEventListener("click", async function () {
+        var selected = [];
+        document.querySelectorAll(".pause-instance-cb:checked").forEach(function (cb) {
+            if (!pauseState[cb.value]) selected.push(cb.value);
+        });
+        if (selected.length === 0) { showToast("No running instances selected", "error"); return; }
+        var durVal = pauseDuration.value;
+        var duration = durVal ? parseFloat(durVal) : null;
+        pauseActionStatus.textContent = "Pausing...";
+        pauseActionStatus.className = "text-sm mb-3 text-yellow-400";
+        try {
+            var res = await fetch("/api/pause", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ instance_names: selected, duration_hours: duration }),
+            });
+            var data = await res.json();
+            var ok = Object.values(data.results).filter(function (r) { return r.status === "ok"; }).length;
+            var fail = Object.values(data.results).filter(function (r) { return r.status !== "ok"; }).length;
+            pauseActionStatus.textContent = ok + " paused" + (fail > 0 ? ", " + fail + " failed" : "");
+            pauseActionStatus.className = "text-sm mb-3 " + (fail > 0 ? "text-yellow-400" : "text-green-400");
+            showToast("Paused " + ok + " instance(s)", fail > 0 ? "error" : "success");
+            loadPauseStatus();
+            setTimeout(populatePauseModal, 500);
+        } catch (e) {
+            pauseActionStatus.textContent = "Failed: " + e.message;
+            pauseActionStatus.className = "text-sm mb-3 text-red-400";
+        }
+    });
+
+    btnResumeSelected.addEventListener("click", async function () {
+        var selected = [];
+        document.querySelectorAll(".pause-instance-cb:checked").forEach(function (cb) {
+            if (pauseState[cb.value]) selected.push(cb.value);
+        });
+        if (selected.length === 0) { showToast("No paused instances selected", "error"); return; }
+        pauseActionStatus.textContent = "Resuming...";
+        pauseActionStatus.className = "text-sm mb-3 text-yellow-400";
+        try {
+            var res = await fetch("/api/resume", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ instance_names: selected }),
+            });
+            var data = await res.json();
+            var ok = Object.values(data.results).filter(function (r) { return r.status === "ok"; }).length;
+            var fail = Object.values(data.results).filter(function (r) { return r.status !== "ok"; }).length;
+            pauseActionStatus.textContent = ok + " resumed" + (fail > 0 ? ", " + fail + " failed" : "");
+            pauseActionStatus.className = "text-sm mb-3 " + (fail > 0 ? "text-yellow-400" : "text-green-400");
+            showToast("Resumed " + ok + " instance(s)", fail > 0 ? "error" : "success");
+            loadPauseStatus();
+            setTimeout(populatePauseModal, 500);
+        } catch (e) {
+            pauseActionStatus.textContent = "Failed: " + e.message;
+            pauseActionStatus.className = "text-sm mb-3 text-red-400";
+        }
+    });
+
+    btnBannerResume.addEventListener("click", async function () {
+        var allPaused = Object.keys(pauseState);
+        if (allPaused.length === 0) return;
+        try {
+            var res = await fetch("/api/resume", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ instance_names: allPaused }),
+            });
+            var data = await res.json();
+            var ok = Object.values(data.results).filter(function (r) { return r.status === "ok"; }).length;
+            showToast("Resumed " + ok + " instance(s)", "success");
+            loadPauseStatus();
+        } catch (e) { showToast("Failed: " + e.message, "error"); }
+    });
+
     // ---- Settings Panel ----
     btnSettingsPanel.addEventListener("click", function () { settingsPanel.classList.toggle("hidden"); });
     btnCloseSettings.addEventListener("click", function () { settingsPanel.classList.add("hidden"); });
@@ -460,160 +640,4 @@
         if (d) settings.downloader = d;
         if (c) settings.concurrent_items = parseInt(c);
         if (r) settings.shared_rsync_threads = parseInt(r);
-        if (Object.keys(settings).length === 0) { showToast("No settings specified", "error"); return; }
-        settingsStatus.textContent = "Applying...";
-        settingsStatus.className = "text-sm self-center ml-4 text-yellow-400";
-        try {
-            var res = await fetch("/api/settings/bulk", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ instance_names: selected, settings: settings }),
-            });
-            var data = await res.json();
-            var ok = Object.values(data.results).filter(function (r) { return r.status === "ok"; }).length;
-            var fail = Object.values(data.results).filter(function (r) { return r.status !== "ok"; }).length;
-            settingsStatus.textContent = ok + " OK" + (fail > 0 ? ", " + fail + " failed" : "");
-            settingsStatus.className = "text-sm self-center ml-4 " + (fail > 0 ? "text-yellow-400" : "text-green-400");
-            showToast("Settings applied to " + ok + " instance(s)", fail > 0 ? "error" : "success");
-        } catch (e) {
-            settingsStatus.textContent = "Request failed";
-            settingsStatus.className = "text-sm self-center ml-4 text-red-400";
-            showToast("Failed: " + e.message, "error");
-        }
-    });
-
-    function updateInstanceCheckboxes(instances) {
-        var html = "";
-        for (var i = 0; i < instances.length; i++) {
-            var inst = instances[i];
-            var dot = inst.connection_state === "online" ? "bg-green-500" : "bg-red-500";
-            html += '<label class="flex items-center gap-2 bg-gray-800 px-3 py-1.5 rounded-lg cursor-pointer text-sm hover:bg-gray-700 transition-colors">' +
-                '<input type="checkbox" class="instance-checkbox rounded" value="' + escapeHtml(inst.name) + '" checked>' +
-                '<span class="w-2 h-2 rounded-full ' + dot + '"></span>' +
-                escapeHtml(inst.name) + '</label>';
-        }
-        instanceCheckboxes.innerHTML = html;
-    }
-
-    // ---- Project selector ----
-    async function loadProjects() {
-        try {
-            var res = await fetch("/api/projects");
-            if (!res.ok) return;
-            var projects = await res.json();
-            var html = '<option value="">-- Select Project --</option>';
-            for (var i = 0; i < projects.length; i++) {
-                html += '<option value="' + escapeHtml(projects[i].name) + '">' +
-                    escapeHtml(projects[i].title || projects[i].name) + '</option>';
-            }
-            projectSelect.innerHTML = html;
-        } catch (e) { console.error("Failed to load projects:", e); }
-    }
-    btnApplyProject.addEventListener("click", async function () {
-        var proj = projectSelect.value;
-        if (!proj) { showToast("Select a project first", "error"); return; }
-        var selected = [];
-        document.querySelectorAll(".instance-checkbox:checked").forEach(function (cb) { selected.push(cb.value); });
-        if (selected.length === 0) { showToast("No instances selected", "error"); return; }
-        projectStatus.textContent = "Applying...";
-        projectStatus.className = "text-sm ml-2 text-yellow-400";
-        try {
-            var res = await fetch("/api/project/bulk", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ instance_names: selected, project_name: proj }),
-            });
-            var data = await res.json();
-            var ok = Object.values(data.results).filter(function (r) { return r.status === "ok"; }).length;
-            var fail = Object.values(data.results).filter(function (r) { return r.status !== "ok"; }).length;
-            projectStatus.textContent = ok + " OK" + (fail > 0 ? ", " + fail + " failed" : "");
-            projectStatus.className = "text-sm ml-2 " + (fail > 0 ? "text-yellow-400" : "text-green-400");
-            showToast("Project set on " + ok + " instance(s)", fail > 0 ? "error" : "success");
-        } catch (e) {
-            projectStatus.textContent = "Failed";
-            projectStatus.className = "text-sm ml-2 text-red-400";
-            showToast("Failed: " + e.message, "error");
-        }
-    });
-
-    // ---- Add Instance ----
-    btnAddInstance.addEventListener("click", function () { addInstanceModal.classList.remove("hidden"); });
-    btnCancelAdd.addEventListener("click", function () { addInstanceModal.classList.add("hidden"); });
-    addInstanceForm.addEventListener("submit", async function (e) {
-        e.preventDefault();
-        var fd = new FormData(addInstanceForm);
-        var body = { name: fd.get("name"), host: fd.get("host"), port: parseInt(fd.get("port")) || 8001 };
-        var hu = fd.get("http_username"), hp = fd.get("http_password");
-        if (hu) body.http_username = hu;
-        if (hp) body.http_password = hp;
-        try {
-            var res = await fetch("/api/instances", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
-            });
-            if (res.ok) {
-                showToast('Instance "' + body.name + '" added', "success");
-                addInstanceModal.classList.add("hidden");
-                addInstanceForm.reset();
-            } else {
-                var data = await res.json();
-                showToast("Error: " + (data.detail || "Unknown"), "error");
-            }
-        } catch (e) { showToast("Failed: " + e.message, "error"); }
-    });
-
-    // ---- Edit Instance ----
-    btnCancelEdit.addEventListener("click", function () { editInstanceModal.classList.add("hidden"); });
-    async function editInstance(name) {
-        try {
-            var res = await fetch("/api/instances/" + encodeURIComponent(name));
-            if (!res.ok) { showToast("Failed to fetch instance details", "error"); return; }
-            var data = await res.json();
-            editInstanceForm.querySelector('[name="name"]').value = data.name || name;
-            editInstanceForm.querySelector('[name="host"]').value = data.host || "";
-            editInstanceForm.querySelector('[name="port"]').value = data.port || 8001;
-            editInstanceForm.querySelector('[name="http_username"]').value = "";
-            editInstanceForm.querySelector('[name="http_password"]').value = "";
-            editInstanceModal.classList.remove("hidden");
-        } catch (e) { showToast("Error: " + e.message, "error"); }
-    }
-    editInstanceForm.addEventListener("submit", async function (e) {
-        e.preventDefault();
-        var fd = new FormData(editInstanceForm);
-        var name = fd.get("name");
-        var body = { host: fd.get("host"), port: parseInt(fd.get("port")) || 8001 };
-        var hu = fd.get("http_username"), hp = fd.get("http_password");
-        if (hu) body.http_username = hu;
-        if (hp) body.http_password = hp;
-        try {
-            var res = await fetch("/api/instances/" + encodeURIComponent(name), {
-                method: "PUT", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
-            });
-            if (res.ok) {
-                showToast('Instance "' + name + '" updated', "success");
-                editInstanceModal.classList.add("hidden");
-            } else {
-                var data = await res.json();
-                showToast("Error: " + (data.detail || "Unknown"), "error");
-            }
-        } catch (e) { showToast("Failed: " + e.message, "error"); }
-    });
-
-    // ---- Remove Instance ----
-    async function removeInstance(name) {
-        if (!confirm('Remove instance "' + name + '" from the dashboard?')) return;
-        try {
-            var res = await fetch("/api/instances/" + encodeURIComponent(name), { method: "DELETE" });
-            if (res.ok) { showToast('Instance "' + name + '" removed', "info"); }
-            else { showToast("Failed to remove instance", "error"); }
-        } catch (e) { showToast("Error: " + e.message, "error"); }
-    }
-
-    // ---- Init ----
-    connectWebSocket();
-    loadProjects();
-    initChart();
-    loadHistory();
-    setInterval(loadHistory, CHART_REFRESH_INTERVAL);
-    loadTrackerStats();
-    setInterval(loadTrackerStats, 60000);
-})();
+        if (Object.keys(settings).length === 0)

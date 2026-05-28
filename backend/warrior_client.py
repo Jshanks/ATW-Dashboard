@@ -581,6 +581,46 @@ class WarriorClient:
             await self._fetch_selected_project()
         return success
 
+    async def deselect_project(self):
+        """Deselect the current project (pause the warrior)."""
+        slug = self._status.project_slug
+        if not slug:
+            logger.warning("[%s] No project slug to deselect", self.config.name)
+            return False
+        try:
+            resp = await self._http_client.post(
+                self._build_url() + "/api/deselect-project",
+                data={"project_name": slug},
+                auth=self._get_auth(),
+                timeout=10.0,
+            )
+            if resp.status_code in (200, 302):
+                logger.info("[%s] Project deselected: %s", self.config.name, slug)
+                return True
+            logger.warning("[%s] Deselect got HTTP %d", self.config.name, resp.status_code)
+            return False
+        except Exception as e:
+            logger.error("[%s] Deselect error: %s", self.config.name, e)
+            return False
+
+    async def select_project(self, project_name):
+        """Select a project (resume the warrior)."""
+        try:
+            resp = await self._http_client.post(
+                self._build_url() + "/api/select-project",
+                data={"project_name": project_name},
+                auth=self._get_auth(),
+                timeout=10.0,
+            )
+            if resp.status_code in (200, 302):
+                logger.info("[%s] Project selected: %s", self.config.name, project_name)
+                return True
+            logger.warning("[%s] Select project got HTTP %d", self.config.name, resp.status_code)
+            return False
+        except Exception as e:
+            logger.error("[%s] Select project error: %s", self.config.name, e)
+            return False
+
     async def _post_settings(self, data):
         try:
             resp = await self._http_client.post(
