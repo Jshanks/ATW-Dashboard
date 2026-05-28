@@ -252,7 +252,8 @@
         return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group">' +
             '<div class="absolute top-2 right-2 flex items-center gap-1.5">' + projectBadgeHtml + editBtn + removeBtn + '</div>' +
             '<div class="flex items-center gap-2 mb-2">' + statusDot + '<h3 class="font-semibold text-sm">' + escapeHtml(inst.name) + '</h3>' + reconnectInfo + '</div>' +
-            '<div class="text-xs text-gray-400 space-y-0.5">'<p><span class="text-gray-500">URL:</span> <a href="' + escapeHtml(inst.url) + '" target="_blank" class="text-blue-400 hover:text-blue-300 hover:underline">' + escapeHtml(inst.url) + '</a></p>' +
+            '<div class="text-xs text-gray-400 space-y-0.5">' +
+'<p><span class="text-gray-500">URL:</span> <a href="' + escapeHtml(inst.url) + '" target="_blank" class="text-blue-400 hover:text-blue-300 hover:underline">' + escapeHtml(inst.url) + '</a></p>' +
             (isOnline && !isPaused ? '<p><span class="text-gray-500">Items:</span> ' + itemsLine + '</p>' + doneHtml + bwHtml : "") +
             '</div>' + errorMsg +
             (inst.last_seen ? '<p class="text-xs text-gray-600 mt-2">Last seen: ' + formatTime(inst.last_seen) + '</p>' : "") +
