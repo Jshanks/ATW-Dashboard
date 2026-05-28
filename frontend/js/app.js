@@ -1,5 +1,5 @@
 /**
- * ATW Dashboard -- Frontend Application v2.6
+ * ATW Dashboard -- Frontend Application v2.7
  */
 (function () {
     "use strict";
@@ -456,12 +456,9 @@
         var formData = new FormData(settingsForm);
         var settings = {};
         var d = formData.get("downloader"), c = formData.get("concurrent_items");
-        var u = formData.get("http_username"), p = formData.get("http_password");
         var r = formData.get("shared_rsync_threads");
         if (d) settings.downloader = d;
         if (c) settings.concurrent_items = parseInt(c);
-        if (u) settings.http_username = u;
-        if (p) settings.http_password = p;
         if (r) settings.shared_rsync_threads = parseInt(r);
         if (Object.keys(settings).length === 0) { showToast("No settings specified", "error"); return; }
         settingsStatus.textContent = "Applying...";

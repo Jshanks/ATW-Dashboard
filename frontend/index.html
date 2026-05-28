@@ -99,15 +99,13 @@
                 <button id="btn-apply-project" class="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg transition-colors text-sm font-medium">Apply Project</button>
                 <span id="project-status" class="text-sm ml-2"></span>
             </div>
-            <form id="settings-form" class="grid grid-cols-1 md:grid-cols-5 gap-4">
+            <form id="settings-form" class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div><label class="block text-sm text-gray-400 mb-1">Nickname</label><input type="text" name="downloader" placeholder="Leave blank to skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
                 <div><label class="block text-sm text-gray-400 mb-1">Concurrent Items</label>
                     <select name="concurrent_items" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
                         <option value="">Skip</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option>
                     </select>
                 </div>
-                <div><label class="block text-sm text-gray-400 mb-1">HTTP Username</label><input type="text" name="http_username" placeholder="Leave blank to skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
-                <div><label class="block text-sm text-gray-400 mb-1">HTTP Password</label><input type="password" name="http_password" placeholder="Leave blank to skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
                 <div><label class="block text-sm text-gray-400 mb-1">Rsync Threads</label><input type="number" name="shared_rsync_threads" min="1" max="40" placeholder="Skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
             </form>
             <div class="mt-4 flex gap-3">
