@@ -1,12 +1,21 @@
-"""In-memory ring buffer for 24h history per instance + tracker items."""
+"""In-memory ring buffer for 24h history per instance + tracker items, with file persistence."""
 
+import json
+import logging
+import os
 import time
 import threading
 from collections import deque
 
+logger = logging.getLogger(__name__)
+
 SAMPLE_INTERVAL = 30
 MAX_SAMPLES = 2880
 TRACKER_SAMPLE_INTERVAL = 60
+SAVE_INTERVAL = 60
+
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
 
 _lock = threading.Lock()
 
@@ -14,9 +23,12 @@ _lock = threading.Lock()
 _history = {}
 _last_sample = {}
 
-# Global tracker items history (single timeline)
+# Global tracker items history
 _tracker_history = deque(maxlen=MAX_SAMPLES)
 _tracker_last_sample = 0
+
+# Save throttle
+_last_save = 0
 
 
 def record(instance_name, total_bytes):
@@ -37,7 +49,7 @@ def record(instance_name, total_bytes):
 
 
 def record_tracker(items_done):
-    """Record a tracker items snapshot (called ~every 60s from broadcast loop)."""
+    """Record a tracker items snapshot."""
     global _tracker_last_sample
     now = time.time()
     mono = time.monotonic()
@@ -55,7 +67,6 @@ def get_bucketed():
         now = time.time()
         cutoff = now - 86400
 
-        # Find earliest sample
         earliest = now
         for samples in _history.values():
             for s in samples:
@@ -67,7 +78,6 @@ def get_bucketed():
                 earliest = s[0]
                 break
 
-        # Auto-select interval
         span_hours = (now - earliest) / 3600
         if span_hours <= 1:
             interval_minutes = 5
@@ -80,15 +90,13 @@ def get_bucketed():
 
         interval_secs = interval_minutes * 60
 
-        # Pre-fill buckets
         buckets = {}
         bucket_start = int(cutoff // interval_secs) * interval_secs
         t = bucket_start
         while t <= now:
-            buckets[t] = [0, 0]  # [data_bytes_delta, items_delta]
+            buckets[t] = [0, 0]
             t += interval_secs
 
-        # Per-instance byte deltas
         for name, samples in _history.items():
             prev = None
             for sample in samples:
@@ -103,7 +111,6 @@ def get_bucketed():
                         buckets[bucket_key][0] += delta_bytes
                 prev = sample
 
-        # Tracker items deltas
         prev = None
         for sample in _tracker_history:
             ts, items_done = sample
@@ -117,7 +124,6 @@ def get_bucketed():
                     buckets[bucket_key][1] += delta_items
             prev = sample
 
-        # Convert to sorted list
         result = []
         for ts in sorted(buckets.keys()):
             result.append({
@@ -137,3 +143,92 @@ def remove(instance_name):
     with _lock:
         _history.pop(instance_name, None)
         _last_sample.pop(instance_name, None)
+
+
+# ------------------------------------------------------------------
+# Persistence
+# ------------------------------------------------------------------
+def save():
+    """Save history to disk, throttled to once per SAVE_INTERVAL."""
+    global _last_save
+    mono = time.monotonic()
+    if mono - _last_save < SAVE_INTERVAL:
+        return
+    force_save()
+    _last_save = mono
+
+
+def force_save():
+    """Save history to disk immediately."""
+    with _lock:
+        now = time.time()
+        cutoff = now - 86400
+
+        data = {
+            "instances": {},
+            "tracker": [],
+        }
+
+        # Only save samples within the 24h window
+        for name, samples in _history.items():
+            data["instances"][name] = [
+                s for s in samples if s[0] >= cutoff
+            ]
+
+        data["tracker"] = [
+            s for s in _tracker_history if s[0] >= cutoff
+        ]
+
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = HISTORY_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, HISTORY_FILE)
+        logger.debug("History saved (%d instances, %d tracker samples)",
+                      len(data["instances"]), len(data["tracker"]))
+    except Exception as e:
+        logger.warning("Failed to save history: %s", e)
+
+
+def load():
+    """Load history from disk on startup."""
+    global _tracker_last_sample
+
+    if not os.path.exists(HISTORY_FILE):
+        logger.info("No history file found, starting fresh")
+        return
+
+    try:
+        with open(HISTORY_FILE, "r") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning("Failed to load history file: %s", e)
+        return
+
+    now = time.time()
+    cutoff = now - 86400
+    loaded_instances = 0
+    loaded_samples = 0
+
+    with _lock:
+        # Load per-instance bytes history
+        instances = data.get("instances", {})
+        for name, samples in instances.items():
+            dq = deque(maxlen=MAX_SAMPLES)
+            for s in samples:
+                if isinstance(s, (list, tuple)) and len(s) >= 2 and s[0] >= cutoff:
+                    dq.append(tuple(s))
+                    loaded_samples += 1
+            if dq:
+                _history[name] = dq
+                loaded_instances += 1
+
+        # Load tracker history
+        tracker_samples = data.get("tracker", [])
+        for s in tracker_samples:
+            if isinstance(s, (list, tuple)) and len(s) >= 2 and s[0] >= cutoff:
+                _tracker_history.append(tuple(s))
+
+    logger.info("History loaded: %d instances, %d samples, %d tracker points",
+                loaded_instances, loaded_samples, len(_tracker_history))

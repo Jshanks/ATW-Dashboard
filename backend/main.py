@@ -85,6 +85,9 @@ async def lifespan(app):
     config = DashboardConfig.load()
     logger.info('Dashboard "%s" starting', config.title)
 
+    # Load persisted history
+    history.load()
+
     saved = store.get_all()
     logger.info("Loaded %d saved instance(s) from store", len(saved))
     for inst_dict in saved:
@@ -123,13 +126,16 @@ async def lifespan(app):
     for client in clients.values():
         await client.stop()
 
+    # Save history on shutdown
+    history.force_save()
+
     logger.info("Dashboard shut down cleanly.")
 
 
 app = FastAPI(
     title="ATW Dashboard",
     description="Monitoring & control dashboard for ArchiveTeam Warrior instances",
-    version="2.5.0",
+    version="2.5.1",
     lifespan=lifespan,
 )
 
@@ -147,6 +153,9 @@ async def _broadcast_loop():
                 if s.connection_state == ConnectionState.ONLINE:
                     total_bytes = s.bytes_downloaded + s.bytes_uploaded
                     history.record(s.name, total_bytes)
+
+            # Periodically save history to disk (throttled internally to ~60s)
+            history.save()
 
             if not ws_connections:
                 continue
