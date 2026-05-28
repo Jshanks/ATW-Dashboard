@@ -348,13 +348,21 @@ class WarriorClient:
     def _on_project_refresh(self, msg):
         if not isinstance(msg, dict):
             return
-        if not self._status.current_project:
-            project = msg.get("project", {})
-            if isinstance(project, dict):
+
+        project = msg.get("project", {})
+        if isinstance(project, dict):
+            # Extract slug directly from project data (reliable, no HTML parsing)
+            slug = project.get("name", "")
+            if slug and isinstance(slug, str):
+                self._status.project_slug = slug
+
+            # Extract display name from HTML as fallback
+            if not self._status.current_project:
                 html = project.get("project_html", "")
                 name = self._extract_project_name(html)
                 if name:
                     self._status.current_project = name
+
         items_raw = msg.get("items", [])
         self._items.clear()
         self._item_updated.clear()
