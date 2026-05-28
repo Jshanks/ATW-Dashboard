@@ -2,7 +2,7 @@
 
 A real-time monitoring and control dashboard for [ArchiveTeam Warrior](https://wiki.archiveteam.org/index.php/ArchiveTeam_Warrior) Docker instances.
 
-![ATW Dashboard](screenshot.png)
+![ATW Dashboard](dashboard_screenshot.png)
 
 ## Features
 
