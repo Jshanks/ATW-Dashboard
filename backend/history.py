@@ -14,8 +14,6 @@ MAX_SAMPLES = 2880
 TRACKER_SAMPLE_INTERVAL = 60
 SAVE_INTERVAL = 60
 
-# Skip deltas where samples are more than this many seconds apart
-# (prevents massive spikes after restart/load)
 MAX_DELTA_GAP = 180
 
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data"))
@@ -98,7 +96,6 @@ def get_bucketed():
             buckets[t] = [0, 0]
             t += interval_secs
 
-        # Per-instance byte deltas
         for name, samples in _history.items():
             prev = None
             for sample in samples:
@@ -115,7 +112,6 @@ def get_bucketed():
                             buckets[bucket_key][0] += delta_bytes
                 prev = sample
 
-        # Tracker items deltas
         prev = None
         for sample in _tracker_history:
             ts, items_done = sample

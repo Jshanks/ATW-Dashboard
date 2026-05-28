@@ -1,5 +1,5 @@
 /**
- * ATW Dashboard -- Frontend Application v2.4
+ * ATW Dashboard -- Frontend Application v2.6
  */
 (function () {
     "use strict";
@@ -11,11 +11,9 @@
     var knownInstances = new Set();
     var IDLE_STATES = { "getting_task": true, "waiting": true, "unknown": true };
 
-    // Chart
     var activityChart = null;
     var CHART_REFRESH_INTERVAL = 30000;
 
-    // DOM refs
     var grid = document.getElementById("instance-grid");
     var totalOnlineEl = document.getElementById("total-online");
     var totalOfflineEl = document.getElementById("total-offline");
@@ -278,49 +276,6 @@
                         type: "bar",
                         label: "Data Used",
                         data: [],
-                        backgroundColor: "#06b6d480",
-                        borderColor: "#06b6d4",
-                        borderWidth: 1,
-                        yAxisID: "yData",
-                        order: 2
-                    },
-                    {
-                        type: "line",
-                        label: "Items Done",
-                        data: [],
-                        borderColor: "#22c55e",
-                        backgroundColor: "#22c55e20",
-                        borderWidth: 2,
-                        pointRadius: 0,
-                        tension: 0.3,
-                        fill: false,
-                        yAxisID: "yItems",
-                        order: 1
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                interaction: { mode: "index", intersect: false },
-                plugins: {
-                    legend: {
-                        labels: { color: "#9ca3af", boxWidth: 12, padding: 16, font: { size: 11 } }
-                    },
-                    tooltip: {
-                        backgroundColor: "#1f2937",
-                        titleColor: "#e5e7eb",
-                        bodyColor: "#d1d5db",
-                        borderColorfunction initChart() {
-        var ctx = document.getElementById("activity-chart").getContext("2d");
-        activityChart = new Chart(ctx, {
-            type: "bar",
-            data: {
-                datasets: [
-                    {
-                        type: "bar",
-                        label: "Data Used",
-                        data: [],
                         backgroundColor: "#f59e0b80",
                         borderColor: "#f59e0b",
                         borderWidth: 1,
@@ -428,7 +383,6 @@
             if (!data || !data.buckets) return;
 
             var buckets = data.buckets;
-            var intervalMs = (data.interval_minutes || 30) * 60 * 1000;
 
             var dataPoints = [];
             var itemPoints = [];
@@ -441,7 +395,6 @@
             activityChart.data.datasets[0].data = dataPoints;
             activityChart.data.datasets[1].data = itemPoints;
 
-            // Set bar width to match interval
             activityChart.data.datasets[0].barThickness = "flex";
             activityChart.data.datasets[0].maxBarThickness = Math.max(4, Math.min(20, Math.floor(800 / Math.max(buckets.length, 1))));
 
