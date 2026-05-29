@@ -318,41 +318,39 @@
     function updateCumulativeStats(totalBytes, totalItems) {
         var statsEl = document.getElementById("chart-24h-stats");
         if (!statsEl) {
-            // Find the chart canvas and navigate up to its section
-            var chartCanvas = document.getElementById("activity-chart");
-            if (!chartCanvas) return;
-            var section = chartCanvas.closest("[class*='bg-gray']") || chartCanvas.parentElement;
-            if (!section) return;
-            // Find the heading that contains "Activity" and "24"
-            var headings = section.querySelectorAll("h2, h3, p, span, div");
+            // Find the "Activity — Last 24 Hours" heading
+            var headings = document.querySelectorAll("h2");
             var headingEl = null;
             for (var h = 0; h < headings.length; h++) {
-                if (headings[h].textContent.indexOf("Activity") !== -1 && headings[h].textContent.indexOf("24") !== -1) {
+                var txt = headings[h].textContent || "";
+                if (txt.indexOf("Activity") !== -1 && txt.indexOf("24") !== -1) {
                     headingEl = headings[h];
                     break;
                 }
             }
             if (!headingEl) return;
-            // Make the heading's parent a flex row so stats appear to the right
-            var wrapper = headingEl.parentElement;
-            if (wrapper && !wrapper.dataset.flexApplied) {
-                wrapper.style.display = "flex";
-                wrapper.style.alignItems = "center";
-                wrapper.style.justifyContent = "space-between";
-                wrapper.style.flexWrap = "wrap";
-                wrapper.style.gap = "0.5rem";
-                wrapper.dataset.flexApplied = "true";
-            }
-            // Create and append the stats element
+            // Create a flex wrapper for just the heading + stats (not the chart)
+            var flexRow = document.createElement("div");
+            flexRow.style.display = "flex";
+            flexRow.style.alignItems = "center";
+            flexRow.style.justifyContent = "space-between";
+            flexRow.style.flexWrap = "wrap";
+            flexRow.style.gap = "0.5rem";
+            flexRow.className = "mb-2";
+            // Insert the wrapper where the heading is, then move the heading into it
+            headingEl.parentElement.insertBefore(flexRow, headingEl);
+            headingEl.classList.remove("mb-2");
+            flexRow.appendChild(headingEl);
+            // Create and append the stats element alongside the heading
             statsEl = document.createElement("div");
             statsEl.id = "chart-24h-stats";
             statsEl.className = "flex items-center gap-3 text-xs";
-            wrapper.appendChild(statsEl);
+            flexRow.appendChild(statsEl);
         }
         statsEl.innerHTML =
             '<span class="text-gray-500">24h Total:</span> ' +
             '<span class="text-amber-400 font-semibold">' + fmtTotal(totalBytes) + '</span>' +
-            '<span class="text-gray-600 mx-1">\u2022</span>' +
+            '<span class="text-gray-600 mx-1">•</span>' +
             '<span class="text-indigo-400 font-semibold">' + fmtNum(totalItems) + ' items</span>';
     }
 
