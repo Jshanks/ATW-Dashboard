@@ -297,17 +297,63 @@
             if (!data || !data.buckets) return;
             var buckets = data.buckets;
             var dataPoints = [], itemPoints = [];
+            var cumulativeBytes = 0, cumulativeItems = 0;
             for (var i = 0; i < buckets.length; i++) {
                 var ts = buckets[i].t * 1000;
                 dataPoints.push({ x: ts, y: buckets[i].bytes });
                 itemPoints.push({ x: ts, y: buckets[i].items });
+                cumulativeBytes += buckets[i].bytes;
+                cumulativeItems += buckets[i].items;
             }
             activityChart.data.datasets[0].data = dataPoints;
             activityChart.data.datasets[1].data = itemPoints;
             activityChart.data.datasets[0].barThickness = "flex";
             activityChart.data.datasets[0].maxBarThickness = Math.max(4, Math.min(20, Math.floor(800 / Math.max(buckets.length, 1))));
             activityChart.update("none");
+            updateCumulativeStats(cumulativeBytes, cumulativeItems);
         }).catch(function(e) { console.error("History load error:", e); });
+    }
+
+    // ---- Cumulative 24h Stats Display ----
+    function updateCumulativeStats(totalBytes, totalItems) {
+        var statsEl = document.getElementById("chart-24h-stats");
+        if (!statsEl) {
+            // Find the chart canvas and navigate up to its section
+            var chartCanvas = document.getElementById("activity-chart");
+            if (!chartCanvas) return;
+            var section = chartCanvas.closest("[class*='bg-gray']") || chartCanvas.parentElement;
+            if (!section) return;
+            // Find the heading that contains "Activity" and "24"
+            var headings = section.querySelectorAll("h2, h3, p, span, div");
+            var headingEl = null;
+            for (var h = 0; h < headings.length; h++) {
+                if (headings[h].textContent.indexOf("Activity") !== -1 && headings[h].textContent.indexOf("24") !== -1) {
+                    headingEl = headings[h];
+                    break;
+                }
+            }
+            if (!headingEl) return;
+            // Make the heading's parent a flex row so stats appear to the right
+            var wrapper = headingEl.parentElement;
+            if (wrapper && !wrapper.dataset.flexApplied) {
+                wrapper.style.display = "flex";
+                wrapper.style.alignItems = "center";
+                wrapper.style.justifyContent = "space-between";
+                wrapper.style.flexWrap = "wrap";
+                wrapper.style.gap = "0.5rem";
+                wrapper.dataset.flexApplied = "true";
+            }
+            // Create and append the stats element
+            statsEl = document.createElement("div");
+            statsEl.id = "chart-24h-stats";
+            statsEl.className = "flex items-center gap-3 text-xs";
+            wrapper.appendChild(statsEl);
+        }
+        statsEl.innerHTML =
+            '<span class="text-gray-500">24h Total:</span> ' +
+            '<span class="text-amber-400 font-semibold">' + fmtTotal(totalBytes) + '</span>' +
+            '<span class="text-gray-600 mx-1">\u2022</span>' +
+            '<span class="text-indigo-400 font-semibold">' + fmtNum(totalItems) + ' items</span>';
     }
 
     // ---- Tracker Stats ----
