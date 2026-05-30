@@ -92,9 +92,10 @@
     }
     function fmtTotal(bytes) {
         if (bytes < 1024) return bytes + " B";
-        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
-        if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + " MB";
-        return (bytes / 1073741824).toFixed(2) + " GB";
+        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KiB";
+        if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + " MiB";
+        if (bytes < 1099511627776) return (bytes / 1073741824).toFixed(2) + " GiB";
+        return (bytes / 1099511627776).toFixed(2) + " TiB";
     }
     function fmtNum(n) {
         if (n === null || n === undefined) return "0";
