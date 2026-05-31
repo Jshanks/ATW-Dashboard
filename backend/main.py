@@ -52,6 +52,11 @@ _last_tracker_items = 0
 # Pause state: {instance_name: {"project_slug": str, "paused_at": float, "resume_at": float|None}}
 _pause_state = {}
 
+# Supplementary WS broadcast intervals (seconds)
+_HISTORY_BROADCAST_INTERVAL = 30
+_TRACKER_BROADCAST_INTERVAL = 60
+_PAUSE_BROADCAST_INTERVAL = 30
+
 
 # ------------------------------------------------------------------
 # Pause state persistence
@@ -215,22 +220,38 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 
 async def _broadcast_loop():
+    last_history_time = 0.0
+    last_tracker_time = 0.0
+    last_pause_time = 0.0
     while True:
         try:
             await asyncio.sleep(2)
-
             for client in clients.values():
                 s = client.status
                 if s.connection_state == ConnectionState.ONLINE:
                     total_bytes = s.bytes_downloaded + s.bytes_uploaded
                     history.record(s.name, total_bytes)
-
             history.save()
-
             if not ws_connections:
                 continue
+            now = time.monotonic()
             state = _build_dashboard_state()
-            message = state.model_dump_json()
+            state_dict = state.model_dump(mode="json")
+            # Attach supplementary data when their intervals elapse
+            if now - last_history_time >= _HISTORY_BROADCAST_INTERVAL:
+                state_dict["history"] = history.get_bucketed()
+                last_history_time = now
+            if now - last_tracker_time >= _TRACKER_BROADCAST_INTERVAL:
+                try:
+                    tracker_data = await _build_tracker_stats()
+                    state_dict["tracker_stats"] = tracker_data.get("tracker_stats", [])
+                except Exception:
+                    pass
+                last_tracker_time = now
+            if now - last_pause_time >= _PAUSE_BROADCAST_INTERVAL:
+                state_dict["pause_status"] = _build_pause_status()
+                last_pause_time = now
+            message = json.dumps(state_dict)
             disconnected = []
             for ws in ws_connections:
                 try:
@@ -407,9 +428,8 @@ async def bulk_change_project(request: BulkProjectRequest):
 
 
 # -- Pause / Resume --
-@app.get("/api/pause-status")
-async def get_pause_status():
-    """Return current pause state for all instances."""
+def _build_pause_status():
+    """Build pause status dict (shared by endpoint and WS broadcast)."""
     now = time.time()
     paused = {}
     for name, state in _pause_state.items():
@@ -424,6 +444,10 @@ async def get_pause_status():
             "remaining_seconds": remaining,
         }
     return {"paused": paused, "count": len(paused)}
+
+@app.get("/api/pause-status")
+async def get_pause_status():
+    return _build_pause_status()
 
 
 @app.post("/api/pause")
@@ -497,8 +521,8 @@ async def resume_instances(request: ResumeRequest):
 
 
 # -- Tracker stats --
-@app.get("/api/tracker")
-async def get_tracker_stats_endpoint():
+async def _build_tracker_stats():
+    """Build tracker stats dict (shared by endpoint and WS broadcast)."""
     seen = {}
     for client in clients.values():
         s = client.status
@@ -511,11 +535,9 @@ async def get_tracker_stats_endpoint():
             continue
         if slug not in seen:
             seen[slug] = s.downloader
-            logger.debug("Tracker pair: slug=%s downloader=%s (from %s)", slug, s.downloader, s.name)
-
+        logger.debug("Tracker pair: slug=%s downloader=%s (from %s)", slug, s.downloader, s.name)
     if not seen:
         return {"tracker_stats": [], "message": "No active project/downloader pairs found"}
-
     results = []
     for slug, downloader in seen.items():
         stats = await tracker.get_project_data(slug)
@@ -524,8 +546,11 @@ async def get_tracker_stats_endpoint():
             continue
         entry = tracker.build_user_stats(stats, downloader, slug)
         results.append(entry)
-
     return {"tracker_stats": results}
+
+@app.get("/api/tracker")
+async def get_tracker_stats_endpoint():
+    return await _build_tracker_stats()
 
 
 # -- History --
@@ -541,7 +566,15 @@ async def websocket_endpoint(ws: WebSocket):
     ws_connections.append(ws)
     logger.info("WebSocket client connected (%d total)", len(ws_connections))
     try:
-        await ws.send_text(_build_dashboard_state().model_dump_json())
+        init_state = _build_dashboard_state().model_dump(mode="json")
+        init_state["history"] = history.get_bucketed()
+        try:
+            tracker_data = await _build_tracker_stats()
+            init_state["tracker_stats"] = tracker_data.get("tracker_stats", [])
+        except Exception:
+            pass
+        init_state["pause_status"] = _build_pause_status()
+        await ws.send_text(json.dumps(init_state))
         while True:
             data = await ws.receive_text()
             try:

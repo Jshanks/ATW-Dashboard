@@ -1,5 +1,5 @@
 /**
- * ATW Dashboard -- Frontend Application v2.8
+ * ATW Dashboard -- Frontend Application v3.0
  */
 (function () {
     "use strict";
@@ -14,6 +14,7 @@
 
     var activityChart = null;
     var CHART_REFRESH_INTERVAL = 30000;
+    var pingIntervalId = null;
 
     var grid = document.getElementById("instance-grid");
     var totalOnlineEl = document.getElementById("total-online");
@@ -129,6 +130,9 @@
                 if (data.type === "pong") return;
                 dashboardState = data;
                 render();
+                if (data.history) applyHistoryData(data.history);
+                if (data.tracker_stats !== undefined) applyTrackerData(data);
+                if (data.pause_status) applyPauseData(data.pause_status);
             } catch (e) { console.error("WS parse error:", e); }
         };
         ws.onclose = function () {
@@ -140,7 +144,8 @@
             wsIndicator.className = "w-2 h-2 rounded-full bg-red-500";
             wsStatusText.textContent = "Error";
         };
-        setInterval(function () {
+        if (pingIntervalId !== null) { clearInterval(pingIntervalId); }
+        pingIntervalId = setInterval(function () {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: "ping" }));
             }
@@ -295,24 +300,28 @@
     }
     function loadHistory() {
         fetch("/api/history").then(function(res) { if (!res.ok) return; return res.json(); }).then(function(data) {
-            if (!data || !data.buckets) return;
-            var buckets = data.buckets;
-            var dataPoints = [], itemPoints = [];
-            var cumulativeBytes = 0, cumulativeItems = 0;
-            for (var i = 0; i < buckets.length; i++) {
-                var ts = buckets[i].t * 1000;
-                dataPoints.push({ x: ts, y: buckets[i].bytes });
-                itemPoints.push({ x: ts, y: buckets[i].items });
-                cumulativeBytes += buckets[i].bytes;
-                cumulativeItems += buckets[i].items;
-            }
-            activityChart.data.datasets[0].data = dataPoints;
-            activityChart.data.datasets[1].data = itemPoints;
-            activityChart.data.datasets[0].barThickness = "flex";
-            activityChart.data.datasets[0].maxBarThickness = Math.max(4, Math.min(20, Math.floor(800 / Math.max(buckets.length, 1))));
-            activityChart.update("none");
-            updateCumulativeStats(cumulativeBytes, cumulativeItems);
+            if (!data) return;
+            applyHistoryData(data);
         }).catch(function(e) { console.error("History load error:", e); });
+    }
+    function applyHistoryData(data) {
+        if (!data || !data.buckets) return;
+        var buckets = data.buckets;
+        var dataPoints = [], itemPoints = [];
+        var cumulativeBytes = 0, cumulativeItems = 0;
+        for (var i = 0; i < buckets.length; i++) {
+            var ts = buckets[i].t * 1000;
+            dataPoints.push({ x: ts, y: buckets[i].bytes });
+            itemPoints.push({ x: ts, y: buckets[i].items });
+            cumulativeBytes += buckets[i].bytes;
+            cumulativeItems += buckets[i].items;
+        }
+        activityChart.data.datasets[0].data = dataPoints;
+        activityChart.data.datasets[1].data = itemPoints;
+        activityChart.data.datasets[0].barThickness = "flex";
+        activityChart.data.datasets[0].maxBarThickness = Math.max(4, Math.min(20, Math.floor(800 / Math.max(buckets.length, 1))));
+        activityChart.update("none");
+        updateCumulativeStats(cumulativeBytes, cumulativeItems);
     }
 
     // ---- Cumulative 24h Stats Display ----
@@ -358,37 +367,45 @@
     // ---- Tracker Stats ----
     function loadTrackerStats() {
         fetch("/api/tracker").then(function(res) { if (!res.ok) return; return res.json(); }).then(function(data) {
-            if (!data || !data.tracker_stats || data.tracker_stats.length === 0) { trackerBar.classList.add("hidden"); return; }
-            var html = "";
-            for (var i = 0; i < data.tracker_stats.length; i++) {
-                var s = data.tracker_stats[i];
-                var sep = i > 0 ? '<span class="text-gray-700 mx-2">|</span>' : "";
-                var userLine = "";
-                if (s.user_items_done > 0 || s.user_bytes > 0) {
-                    userLine = '<span class="text-cyan-400">You: ' + fmtNum(s.user_items_done) + ' items (' + fmtTotal(s.user_bytes) + ')</span>';
-                } else {
-                    userLine = '<span class="text-gray-500">You: no data yet</span>';
-                }
-                html += sep + '<div class="flex items-center gap-2 flex-wrap">' +
-                    '<span class="text-white font-medium">&#x1F3DB;&#xFE0F; ' + escapeHtml(s.project) + '</span>' +
-                    '<span class="text-gray-600">&#x2014;</span>' + userLine +
-                    '<span class="text-gray-600">&#x00B7;</span>' +
-                    '<span class="text-gray-400">' + fmtNum(s.items_done) + ' done + ' + fmtNum(s.items_out) + ' out + ' + fmtNum(s.items_todo) + ' todo</span>' +
-                    '<span class="text-gray-600">&#x00B7;</span>' +
-                    '<span class="text-gray-400">' + fmtTotal(s.total_data_bytes) + ' total</span></div>';
-            }
-            trackerContent.innerHTML = html;
-            trackerBar.classList.remove("hidden");
+            if (!data) return;
+            applyTrackerData(data);
         }).catch(function(e) { console.error("Tracker stats error:", e); });
+    }
+    function applyTrackerData(data) {
+        if (!data || !data.tracker_stats || data.tracker_stats.length === 0) { trackerBar.classList.add("hidden"); return; }
+        var html = "";
+        for (var i = 0; i < data.tracker_stats.length; i++) {
+            var s = data.tracker_stats[i];
+            var sep = i > 0 ? '<span class="text-gray-700 mx-2">|</span>' : "";
+            var userLine = "";
+            if (s.user_items_done > 0 || s.user_bytes > 0) {
+                userLine = '<span class="text-cyan-400">You: ' + fmtNum(s.user_items_done) + ' items (' + fmtTotal(s.user_bytes) + ')</span>';
+            } else {
+                userLine = '<span class="text-gray-500">You: no data yet</span>';
+            }
+            html += sep + '<div class="flex items-center gap-2 flex-wrap">' +
+                '<span class="text-white font-medium">&#x1F3DB;&#xFE0F; ' + escapeHtml(s.project) + '</span>' +
+                '<span class="text-gray-600">&#x2014;</span>' + userLine +
+                '<span class="text-gray-600">&#x00B7;</span>' +
+                '<span class="text-gray-400">' + fmtNum(s.items_done) + ' done + ' + fmtNum(s.items_out) + ' out + ' + fmtNum(s.items_todo) + ' todo</span>' +
+                '<span class="text-gray-600">&#x00B7;</span>' +
+                '<span class="text-gray-400">' + fmtTotal(s.total_data_bytes) + ' total</span></div>';
+        }
+        trackerContent.innerHTML = html;
+        trackerBar.classList.remove("hidden");
     }
 
     // ---- Pause / Resume ----
     function loadPauseStatus() {
         fetch("/api/pause-status").then(function(res) { if (!res.ok) return; return res.json(); }).then(function(data) {
             if (!data) return;
-            pauseState = data.paused || {};
-            updatePauseBanner();
+            applyPauseData(data);
         }).catch(function(e) { console.error("Pause status error:", e); });
+    }
+    function applyPauseData(data) {
+        if (!data) return;
+        pauseState = data.paused || {};
+        updatePauseBanner();
     }
     function updatePauseBanner() {
         var count = Object.keys(pauseState).length;
@@ -680,10 +697,7 @@
     loadProjects();
     initChart();
     loadHistory();
-    setInterval(loadHistory, CHART_REFRESH_INTERVAL);
     loadTrackerStats();
-    setInterval(loadTrackerStats, 60000);
     loadPauseStatus();
-    setInterval(loadPauseStatus, 30000);
 
 })();
