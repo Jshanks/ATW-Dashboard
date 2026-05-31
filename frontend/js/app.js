@@ -628,6 +628,53 @@
         } catch (e) { showToast("Error: " + e.message, "error"); }
     }
 
+    // ---- Grid Column Selector ----
+    var GRID_COL_KEY = "atw-grid-cols";
+    var colBtns = document.querySelectorAll(".col-btn");
+
+    function applyGridColumns(n) {
+        n = parseInt(n) || 4;
+        if (n < 1) n = 1;
+        if (n > 8) n = 8;
+        // On mobile (< 768px), always single column
+        if (window.innerWidth < 768) {
+            grid.style.gridTemplateColumns = "1fr";
+        } else {
+            grid.style.gridTemplateColumns = "repeat(" + n + ", minmax(0, 1fr))";
+        }
+        // Highlight active button
+        for (var i = 0; i < colBtns.length; i++) {
+            var btn = colBtns[i];
+            if (parseInt(btn.dataset.cols) === n) {
+                btn.classList.remove("bg-gray-800", "text-gray-400");
+                btn.classList.add("bg-blue-600", "text-white");
+            } else {
+                btn.classList.remove("bg-blue-600", "text-white");
+                btn.classList.add("bg-gray-800", "text-gray-400");
+            }
+        }
+    }
+
+    // Attach click handlers to column selector buttons
+    for (var ci = 0; ci < colBtns.length; ci++) {
+        colBtns[ci].addEventListener("click", function () {
+            var cols = this.dataset.cols;
+            localStorage.setItem(GRID_COL_KEY, cols);
+            applyGridColumns(cols);
+        });
+    }
+
+    // Re-evaluate on resize (snap to 1 col on mobile)
+    window.addEventListener("resize", function () {
+        var saved = localStorage.getItem(GRID_COL_KEY) || "4";
+        applyGridColumns(saved);
+    });
+
+    // Apply saved preference on load
+    applyGridColumns(localStorage.getItem(GRID_COL_KEY) || "4");
+
+    // ---- Init ----
+
     // ---- Init ----
     connectWebSocket();
     loadProjects();

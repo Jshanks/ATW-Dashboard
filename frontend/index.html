@@ -203,8 +203,20 @@
         </div>
     </div>
 
+    <!-- Grid Column Selector -->
+    <div class="px-6 pt-4 pb-0">
+        <div class="flex items-center gap-2 justify-end">
+            <span class="text-xs text-gray-500">Columns:</span>
+            <div id="col-selector" class="flex gap-1">
+                <button class="col-btn px-2 py-0.5 text-xs rounded bg-gray-800 text-gray-400 hover:bg-gray-700" data-cols="3">3</button>
+                <button class="col-btn px-2 py-0.5 text-xs rounded bg-gray-800 text-gray-400 hover:bg-gray-700" data-cols="4">4</button>
+                <button class="col-btn px-2 py-0.5 text-xs rounded bg-gray-800 text-gray-400 hover:bg-gray-700" data-cols="5">5</button>
+                <button class="col-btn px-2 py-0.5 text-xs rounded bg-gray-800 text-gray-400 hover:bg-gray-700" data-cols="6">6</button>
+            </div>
+        </div>
+    </div>
     <!-- Instance Grid -->
-    <main class="max-w-7xl mx-auto px-6 py-6">
+    <main class="px-6 py-6">
         <div id="instance-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             <div class="col-span-full text-center text-gray-500 py-12">
                 <p class="text-lg">No warrior instances yet.</p>
