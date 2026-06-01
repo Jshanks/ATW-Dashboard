@@ -726,7 +726,7 @@ function applyProjectList(data) {
 
     // ---- Grid Column Selector ----
     var GRID_COL_KEY = "atw-grid-cols";
-    var CARD_FIXED_WIDTH = "13rem"; // matches ~6-column card width
+    var CARD_FIXED_WIDTH = "minmax(0, 16.666%)"; // matches 6-column (1/6) card width
     var colBtns = document.querySelectorAll(".col-btn");
 
     function applyGridColumns(n) {
