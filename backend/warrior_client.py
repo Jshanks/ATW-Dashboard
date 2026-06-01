@@ -53,13 +53,24 @@ STALE_ITEM_TIMEOUT = 30
 REFRESH_INTERVAL = 30
 
 
+_stage_cache = {}
+
 def classify_stage(text):
+    if text in _stage_cache:
+        return _stage_cache[text]
+
     lower = text.lower().strip()
+
+    if lower == "" or "idle" in lower:
+        _stage_cache[text] = ItemState.WAITING
+        return ItemState.WAITING
+
     for keyword, state in STAGE_MAP.items():
         if keyword in lower:
+            _stage_cache[text] = state
             return state
-    if lower == "" or "idle" in lower:
-        return ItemState.WAITING
+
+    _stage_cache[text] = ItemState.UNKNOWN
     return ItemState.UNKNOWN
 
 def _extract_input_value(html, input_name):
