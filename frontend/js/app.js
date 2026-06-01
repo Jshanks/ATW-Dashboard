@@ -825,7 +825,6 @@ function applyVersionBadge(cfg) {
 }
 
 loadConfigCached();
-connectWebSocket();
     connectWebSocket();
     loadProjects();
     initChart();
