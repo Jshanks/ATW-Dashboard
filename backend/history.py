@@ -28,6 +28,8 @@ _tracker_history = deque(maxlen=MAX_SAMPLES)
 _tracker_last_sample = 0
 
 _last_save = 0
+_bucketed_cache = None
+_bucketed_dirty = True
 
 
 def record(instance_name, total_bytes):
@@ -45,6 +47,8 @@ def record(instance_name, total_bytes):
 
         _history[instance_name].append((now, total_bytes))
         _last_sample[instance_name] = mono
+        global _bucketed_dirty
+        _bucketed_dirty = True
 
 
 def record_tracker(items_done):
@@ -58,11 +62,17 @@ def record_tracker(items_done):
             return
         _tracker_history.append((now, items_done))
         _tracker_last_sample = mono
+        global _bucketed_dirty
+        _bucketed_dirty = True
 
 
 def get_bucketed():
     """Return deltas bucketed by auto-selected interval."""
+    global _bucketed_cache, _bucketed_dirty
+    if not _bucketed_dirty and _bucketed_cache is not None:
+        return _bucketed_cache
     with _lock:
+        _bucketed_dirty = False
         now = time.time()
         cutoff = now - 86400
 
@@ -135,17 +145,21 @@ def get_bucketed():
                 "items": buckets[ts][1],
             })
 
-        return {
+        _bucketed_cache = {
             "interval_minutes": interval_minutes,
             "buckets": result,
         }
+        return _bucketed_cache
 
 
 def remove(instance_name):
     """Remove history for a deleted instance."""
     with _lock:
+        global _bucketed_dirty
+    with _lock:
         _history.pop(instance_name, None)
         _last_sample.pop(instance_name, None)
+        _bucketed_dirty = True
 
 
 def save():
