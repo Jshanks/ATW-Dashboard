@@ -15,6 +15,7 @@
     var activityChart = null;
     var CHART_REFRESH_INTERVAL = 30000;
     var pingIntervalId = null;
+    var instanceFingerprints = {};
 
     var grid = document.getElementById("instance-grid");
     var totalOnlineEl = document.getElementById("total-online");
@@ -113,6 +114,41 @@
         if (h > 0) return h + "h " + m + "m";
         return m + "m";
     }
+    // ---- Instance diffing helpers ----
+function getInstanceFingerprint(inst) {
+    var pauseInfo = pauseState[inst.name];
+    var pauseKey = pauseInfo
+        ? String(pauseInfo.remaining_seconds) + "|" + String(pauseInfo.project_slug || "")
+        : "np";
+    var itemStates = "";
+    if (inst.items) {
+        for (var i = 0; i < inst.items.length; i++) {
+            itemStates += inst.items[i].state + ",";
+        }
+    }
+    return inst.connection_state + "|" +
+        inst.project_slug + "|" +
+        inst.bandwidth_down + "|" +
+        inst.bandwidth_up + "|" +
+        inst.bytes_downloaded + "|" +
+        inst.bytes_uploaded + "|" +
+        inst.completed_items + "|" +
+        inst.error_message + "|" +
+        inst.reconnect_attempts + "|" +
+        inst.last_seen + "|" +
+        pauseKey + "|" +
+        itemStates;
+}
+
+function findCardByName(name) {
+    var children = grid.children;
+    for (var i = 0; i < children.length; i++) {
+        if (children[i].dataset && children[i].dataset.instanceName === name) {
+            return children[i];
+        }
+    }
+    return null;
+}
 
     // ---- WebSocket ----
     function connectWebSocket() {
@@ -162,46 +198,66 @@
 
     // ---- Rendering ----
     function render() {
-        var state = dashboardState;
-        totalOnlineEl.textContent = state.total_online || 0;
-        totalOfflineEl.textContent = state.total_offline || 0;
-        var aggDl = 0, aggUl = 0, workingItems = 0;
-        if (state.instances) {
-            for (var i = 0; i < state.instances.length; i++) {
-                var inst = state.instances[i];
-                aggDl += inst.bandwidth_down || 0;
-                aggUl += inst.bandwidth_up || 0;
-                if (inst.items) {
-                    for (var j = 0; j < inst.items.length; j++) {
-                        if (!IDLE_STATES[inst.items[j].state]) workingItems++;
-                    }
+    var state = dashboardState;
+    totalOnlineEl.textContent = state.total_online || 0;
+    totalOfflineEl.textContent = state.total_offline || 0;
+
+    var aggDl = 0, aggUl = 0, workingItems = 0;
+    if (state.instances) {
+        for (var i = 0; i < state.instances.length; i++) {
+            var inst = state.instances[i];
+            aggDl += inst.bandwidth_down || 0;
+            aggUl += inst.bandwidth_up || 0;
+            if (inst.items) {
+                for (var j = 0; j < inst.items.length; j++) {
+                    if (!IDLE_STATES[inst.items[j].state]) workingItems++;
                 }
             }
         }
-        totalItemsEl.textContent = workingItems;
-        totalDlEl.textContent = fmtBytes(aggDl);
-        totalUlEl.textContent = fmtBytes(aggUl);
-        if (!state.instances || state.instances.length === 0) {
-            grid.innerHTML = '<div class="col-span-full text-center text-gray-500 py-12"><p class="text-lg">No warrior instances yet.</p><p class="text-sm mt-2">Click <strong>Add Instance</strong> to connect your first warrior.</p></div>';
-            return;
-        }
-        var currentNames = new Set(state.instances.map(function (i) { return i.name; }));
+    }
+    totalItemsEl.textContent = workingItems;
+    totalDlEl.textContent = fmtBytes(aggDl);
+    totalUlEl.textContent = fmtBytes(aggUl);
+
+    if (!state.instances || state.instances.length === 0) {
+        grid.innerHTML = '<div class="col-span-full text-center text-gray-500 py-12">' +
+            '<p class="text-lg">No warrior instances yet.</p>' +
+            '<p class="text-sm mt-2">Click <strong>Add Instance</strong> to connect your first warrior.</p></div>';
+        instanceFingerprints = {};
+        knownInstances = new Set();
+        return;
+    }
+
+    var currentNames = new Set(state.instances.map(function (i) { return i.name; }));
+    var structureChanged = !setsEqual(currentNames, knownInstances);
+
+    if (structureChanged) {
+        // Full rebuild when instances added or removed
         var html = "";
+        instanceFingerprints = {};
         for (var idx = 0; idx < state.instances.length; idx++) {
             html += renderInstanceCard(state.instances[idx]);
+            instanceFingerprints[state.instances[idx].name] = getInstanceFingerprint(state.instances[idx]);
         }
         grid.innerHTML = html;
-        if (!setsEqual(currentNames, knownInstances)) {
-            knownInstances = currentNames;
-            updateInstanceCheckboxes(state.instances);
+        knownInstances = currentNames;
+        updateInstanceCheckboxes(state.instances);
+    } else {
+        // Targeted update — only touch cards whose data actually changed
+        for (var idx = 0; idx < state.instances.length; idx++) {
+            var inst = state.instances[idx];
+            var fingerprint = getInstanceFingerprint(inst);
+            if (instanceFingerprints[inst.name] === fingerprint) {
+                continue; // Nothing changed — skip entirely
+            }
+            var card = findCardByName(inst.name);
+            if (card) {
+                card.outerHTML = renderInstanceCard(inst);
+            }
+            instanceFingerprints[inst.name] = fingerprint;
         }
-        document.querySelectorAll("[data-edit-instance]").forEach(function (btn) {
-            btn.addEventListener("click", function () { editInstance(btn.dataset.editInstance); });
-        });
-        document.querySelectorAll("[data-remove-instance]").forEach(function (btn) {
-            btn.addEventListener("click", function () { removeInstance(btn.dataset.removeInstance); });
-        });
     }
+}
 
     function renderInstanceCard(inst) {
         var stateClass = "border-state-" + inst.connection_state;
@@ -255,7 +311,7 @@
         var reconnectInfo = !isOnline && inst.reconnect_attempts > 0 ? '<span class="text-xs text-gray-500 ml-1">(attempt ' + inst.reconnect_attempts + ')</span>' : "";
         var editBtn = '<button data-edit-instance="' + escapeHtml(inst.name) + '" class="text-gray-600 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Edit"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg></button>';
         var removeBtn = '<button data-remove-instance="' + escapeHtml(inst.name) + '" class="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Remove"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>';
-        return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group">' +
+        return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group" data-instance-name="' + escapeHtml(inst.name) + '">' +
             '<div class="absolute top-2 right-2 flex items-center gap-1.5">' + projectBadgeHtml + editBtn + removeBtn + '</div>' +
             '<div class="flex items-center gap-2 mb-2">' + statusDot + '<h3 class="font-semibold text-sm">' + escapeHtml(inst.name) + '</h3>' + reconnectInfo + '</div>' +
             '<div class="text-xs text-gray-400 space-y-0.5">' +
@@ -715,6 +771,19 @@ function applyProjectList(data) {
     // Apply saved preference on load
     applyGridColumns(localStorage.getItem(GRID_COL_KEY) || "4");
 
+    // ---- Event delegation for instance cards ----
+grid.addEventListener("click", function (e) {
+    var editBtn = e.target.closest("[data-edit-instance]");
+    if (editBtn) {
+        editInstance(editBtn.dataset.editInstance);
+        return;
+    }
+    var removeBtn = e.target.closest("[data-remove-instance]");
+    if (removeBtn) {
+        removeInstance(removeBtn.dataset.removeInstance);
+        return;
+    }
+});
 
     // ---- Init ----
     // ---- Version Badge (sessionStorage cached) ----
