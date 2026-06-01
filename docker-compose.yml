@@ -1,6 +1,9 @@
 services:
   atw-dashboard:
-    build: .
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
     container_name: atw-dashboard
     restart: unless-stopped
     ports:

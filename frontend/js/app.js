@@ -690,9 +690,20 @@
     // Apply saved preference on load
     applyGridColumns(localStorage.getItem(GRID_COL_KEY) || "4");
 
-    // ---- Init ----
 
     // ---- Init ----
+    // ---- Version Badge ----
+    fetch("/api/config").then(function(res) { return res.json(); }).then(function(cfg) {
+        if (!cfg || !cfg.version || cfg.version === "dev") return;
+        var badge = document.createElement("span");
+        badge.className = "text-xs text-gray-600 font-mono";
+        badge.textContent = cfg.version;
+        badge.title = "ATW Dashboard version";
+        var addBtn = document.getElementById("btn-add-instance");
+        if (addBtn && addBtn.parentElement) {
+            addBtn.parentElement.appendChild(badge);
+        }
+    }).catch(function() {});
     connectWebSocket();
     loadProjects();
     initChart();

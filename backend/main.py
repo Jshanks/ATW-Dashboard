@@ -40,6 +40,7 @@ logger = logging.getLogger("atw-dashboard")
 
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data"))
 PAUSE_FILE = os.path.join(DATA_DIR, "pause.json")
+APP_VERSION = os.environ.get("APP_VERSION", "dev")
 
 config = None
 clients = {}
@@ -211,7 +212,7 @@ async def lifespan(app):
 app = FastAPI(
     title="ATW Dashboard",
     description="Monitoring & control dashboard for ArchiveTeam Warrior instances",
-    version="2.8.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -309,6 +310,7 @@ async def get_config():
         "title": config.title,
         "poll_interval": config.poll_interval,
         "instance_count": len(clients),
+        "version": APP_VERSION,
     }
 
 
