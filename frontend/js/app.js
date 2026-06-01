@@ -441,7 +441,7 @@ function findCardByName(name) {
         }
         html += sep +
             '<span class="inline-flex items-center gap-1.5 whitespace-nowrap">' +
-            '<span class="text-gray-500">▸</span> <span class="font-semibold text-blue-400">' + escapeHtml(s.project) + '</span>' +
+            '<span class="text-gray-500">▸</span> <a href="https://tracker.archiveteam.org/' + encodeURIComponent(s.project) + '" target="_blank" class="font-semibold text-blue-400 hover:text-blue-300 hover:underline">' + escapeHtml(s.project) + '</a>' +
             '<span class="text-gray-500">—</span> ' + userLine +
             '</span>';
     }
