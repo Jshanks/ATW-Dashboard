@@ -428,28 +428,26 @@ function findCardByName(name) {
         }).catch(function(e) { console.error("Tracker stats error:", e); });
     }
     function applyTrackerData(data) {
-        if (!data || !data.tracker_stats || data.tracker_stats.length === 0) { trackerBar.classList.add("hidden"); return; }
-        var html = "";
-        for (var i = 0; i < data.tracker_stats.length; i++) {
-            var s = data.tracker_stats[i];
-            var sep = i > 0 ? '<span class="text-gray-700 mx-2">|</span>' : "";
-            var userLine = "";
-            if (s.user_items_done > 0 || s.user_bytes > 0) {
-                userLine = '<span class="text-cyan-400">You: ' + fmtNum(s.user_items_done) + ' items (' + fmtTotal(s.user_bytes) + ')</span>';
-            } else {
-                userLine = '<span class="text-gray-500">You: no data yet</span>';
-            }
-            html += sep + '<div class="flex items-center gap-2 flex-wrap">' +
-                '<span class="text-white font-medium">&#x1F3DB;&#xFE0F; ' + escapeHtml(s.project) + '</span>' +
-                '<span class="text-gray-600">&#x2014;</span>' + userLine +
-                '<span class="text-gray-600">&#x00B7;</span>' +
-                '<span class="text-gray-400">' + fmtNum(s.items_done) + ' done + ' + fmtNum(s.items_out) + ' out + ' + fmtNum(s.items_todo) + ' todo</span>' +
-                '<span class="text-gray-600">&#x00B7;</span>' +
-                '<span class="text-gray-400">' + fmtTotal(s.total_data_bytes) + ' total</span></div>';
+    if (!data || !data.tracker_stats || data.tracker_stats.length === 0) { trackerBar.classList.add("hidden"); return; }
+    var html = "";
+    for (var i = 0; i < data.tracker_stats.length; i++) {
+        var s = data.tracker_stats[i];
+        var sep = i > 0 ? '<span class="text-gray-600 mx-1">|</span>' : "";
+        var userLine = "";
+        if (s.user_items_done > 0 || s.user_bytes > 0) {
+            userLine = '<span class="text-cyan-400">You:</span> ' + fmtNum(s.user_items_done) + ' items (' + fmtTotal(s.user_bytes) + ')';
+        } else {
+            userLine = '<span class="text-cyan-400">You:</span> no data yet';
         }
-        trackerContent.innerHTML = html;
-        trackerBar.classList.remove("hidden");
+        html += sep +
+            '<span class="inline-flex items-center gap-1.5 whitespace-nowrap">' +
+            '<span>🏛</span> <span class="font-semibold text-blue-400">' + escapeHtml(s.project) + '</span>' +
+            '<span class="text-gray-500">—</span> ' + userLine +
+            '</span>';
     }
+    trackerContent.innerHTML = '<div class="flex flex-wrap items-center gap-x-3 gap-y-1">' + html + '</div>';
+    trackerBar.classList.remove("hidden");
+}
 
     // ---- Pause / Resume ----
     function loadPauseStatus() {
