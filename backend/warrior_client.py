@@ -8,8 +8,9 @@ import string
 import time
 from datetime import datetime, timezone
 
+import re
+
 import httpx
-from bs4 import BeautifulSoup
 
 from backend.models import (
     ConnectionState,
@@ -61,6 +62,18 @@ def classify_stage(text):
         return ItemState.WAITING
     return ItemState.UNKNOWN
 
+def _extract_input_value(html, input_name):
+    """Extract the value attribute from an <input> tag with the given name."""
+    escaped_name = re.escape(input_name)
+    # Handle either attribute order (name before value, or value before name)
+    for pattern in (
+        r'<input\s[^>]*?name=["\']' + escaped_name + r'["\'][^>]*?value=["\']([^"\']*)["\']',
+        r'<input\s[^>]*?value=["\']([^"\']*)["\'][^>]*?name=["\']' + escaped_name + r'["\']',
+    ):
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
 
 class WarriorClient:
     def __init__(self, instance_config, reconnect_base=5, reconnect_max=60):
@@ -186,10 +199,9 @@ class WarriorClient:
             )
             if resp.status_code != 200:
                 return
-            soup = BeautifulSoup(resp.text, "lxml")
-            dl_input = soup.find("input", {"name": "downloader"})
-            if dl_input and dl_input.get("value"):
-                self._status.downloader = dl_input["value"].strip()
+            value = _extract_input_value(resp.text, "downloader")
+            if value:
+                self._status.downloader = value
                 logger.info("[%s] Downloader: %s", self.config.name, self._status.downloader)
         except Exception as e:
             logger.debug("[%s] Could not fetch downloader: %s", self.config.name, e)
@@ -209,33 +221,37 @@ class WarriorClient:
             if resp.status_code != 200:
                 logger.debug("[%s] /api/all-projects returned %d", self.config.name, resp.status_code)
                 return
-            soup = BeautifulSoup(resp.text, "lxml")
-            current_h3 = None
-            for h3 in soup.find_all("h3"):
-                if "current project" in h3.get_text(strip=True).lower():
-                    current_h3 = h3
-                    break
-            if not current_h3:
+
+            html = resp.text
+
+            # Find the "Your current project" heading
+            current_heading = re.search(
+                r'<h3[^>]*>[^<]*current\s+project[^<]*</h3>',
+                html, re.IGNORECASE,
+            )
+            if not current_heading:
                 logger.debug("[%s] No 'Your current project' heading found", self.config.name)
                 return
-            current_ul = current_h3.find_next_sibling("ul")
-            if not current_ul:
-                logger.debug("[%s] No <ul> after current project heading", self.config.name)
-                return
-            current_li = current_ul.find("li")
-            if not current_li:
-                logger.debug("[%s] No <li> in current project list", self.config.name)
-                return
-            slug_input = current_li.find("input", {"name": "project_name"})
-            if slug_input and slug_input.get("value"):
-                self._status.project_slug = slug_input["value"].strip()
+
+            # Scope to the section between this <h3> and the next <h3> (or end)
+            section_start = current_heading.end()
+            next_heading = re.search(r'<h3[\s>]', html[section_start:], re.IGNORECASE)
+            section = html[section_start:section_start + next_heading.start()] if next_heading else html[section_start:]
+
+            # Extract project slug from <input name="project_name" value="...">
+            slug = _extract_input_value(section, "project_name")
+            if slug:
+                self._status.project_slug = slug
                 logger.info("[%s] Project slug: %s", self.config.name, self._status.project_slug)
-            h4 = current_li.find("h4")
-            if h4:
-                name = h4.get_text(strip=True)
-                if name:
-                    self._status.current_project = name
-                    logger.info("[%s] Project name: %s", self.config.name, name)
+
+            # Extract display name from the first <h4>
+            h4_match = re.search(r'<h4[^>]*>(.*?)</h4>', section, re.IGNORECASE | re.DOTALL)
+            if h4_match:
+                display_name = re.sub(r'<[^>]+>', '', h4_match.group(1)).strip()
+                if display_name:
+                    self._status.current_project = display_name
+                    logger.info("[%s] Project name: %s", self.config.name, display_name)
+
         except Exception as e:
             logger.debug("[%s] Could not fetch selected project: %s", self.config.name, e)
 
@@ -375,27 +391,30 @@ class WarriorClient:
     def _extract_project_name(project_html):
         if not project_html:
             return ""
-        soup = BeautifulSoup(project_html, "lxml")
-        h2 = soup.find("h2")
-        if h2:
-            parts = []
-            for child in h2.children:
-                if isinstance(child, str):
-                    t = child.strip().strip("\u00b7").strip()
-                    if t:
-                        parts.append(t)
-            if parts:
-                return parts[0]
-            text = h2.get_text(strip=True)
-            for suffix in ["\u00b7Leaderboard", "Leaderboard", "\u00b7 Leaderboard"]:
-                text = text.replace(suffix, "").strip().rstrip("\u00b7").strip()
-            if text:
-                return text
-        text = soup.get_text(" ", strip=True)
-        for suffix in ["\u00b7Leaderboard", "Leaderboard"]:
-            text = text.replace(suffix, "").strip()
-        if text:
-            return text.split("\n")[0].strip()[:80]
+
+        # Try to extract from <h2> tag first
+        h2_match = re.search(r'<h2[^>]*>(.*?)</h2>', project_html, re.IGNORECASE | re.DOTALL)
+        if h2_match:
+            h2_inner = h2_match.group(1)
+            # Strip all nested tags to get direct text fragments
+            text_only = re.sub(r'<[^>]+>', '\n', h2_inner)
+            for fragment in text_only.split('\n'):
+                cleaned = fragment.strip().strip('\u00b7').strip()
+                if cleaned:
+                    return cleaned
+            # Fallback: full h2 text with leaderboard suffixes removed
+            full_text = re.sub(r'<[^>]+>', '', h2_inner).strip()
+            for suffix in ['\u00b7Leaderboard', 'Leaderboard', '\u00b7 Leaderboard']:
+                full_text = full_text.replace(suffix, '').strip().rstrip('\u00b7').strip()
+            if full_text:
+                return full_text
+
+        # Last resort: all visible text, first line, capped at 80 chars
+        all_text = re.sub(r'<[^>]+>', ' ', project_html).strip()
+        for suffix in ['\u00b7Leaderboard', 'Leaderboard']:
+            all_text = all_text.replace(suffix, '').strip()
+        if all_text:
+            return all_text.split('\n')[0].strip()[:80]
         return ""
 
     def _on_bandwidth(self, msg):
