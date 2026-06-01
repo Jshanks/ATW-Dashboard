@@ -290,7 +290,7 @@ async def lifespan(app):
 
     history.force_save()
     _save_pause_state()
-    _save_tracker_baselines(
+    _save_tracker_baselines()
 
     logger.info("Dashboard shut down cleanly.")
 
