@@ -441,7 +441,7 @@ function findCardByName(name) {
         }
         html += sep +
             '<span class="inline-flex items-center gap-1.5 whitespace-nowrap">' +
-            '<span>🏛</span> <span class="font-semibold text-blue-400">' + escapeHtml(s.project) + '</span>' +
+            '<span class="text-gray-500">▸</span> <span class="font-semibold text-blue-400">' + escapeHtml(s.project) + '</span>' +
             '<span class="text-gray-500">—</span> ' + userLine +
             '</span>';
     }
