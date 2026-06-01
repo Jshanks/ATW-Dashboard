@@ -726,6 +726,7 @@ function applyProjectList(data) {
 
     // ---- Grid Column Selector ----
     var GRID_COL_KEY = "atw-grid-cols";
+    var CARD_FIXED_WIDTH = "13rem"; // matches ~6-column card width
     var colBtns = document.querySelectorAll(".col-btn");
 
     function applyGridColumns(n) {
@@ -736,7 +737,8 @@ function applyProjectList(data) {
         if (window.innerWidth < 768) {
             grid.style.gridTemplateColumns = "1fr";
         } else {
-            grid.style.gridTemplateColumns = "repeat(" + n + ", minmax(0, 1fr))";
+            grid.style.gridTemplateColumns = "repeat(" + n + ", " + CARD_FIXED_WIDTH + ")";
+	    grid.style.justifyContent = "center";
         }
         // Highlight active button
         for (var i = 0; i < colBtns.length; i++) {
