@@ -695,15 +695,11 @@
     // ---- Version Badge ----
     fetch("/api/config").then(function(res) { return res.json(); }).then(function(cfg) {
         if (!cfg || !cfg.version || cfg.version === "dev") return;
-        var badge = document.createElement("span");
-        badge.className = "text-xs text-gray-600 font-mono";
-        badge.style.cssText = "position:absolute;right:1.5rem;top:50%;transform:translateY(-50%)";
-        badge.textContent = cfg.version;
-        badge.title = "ATW Dashboard version";
-        var header = document.querySelector("header");
-        if (header) {
-            header.style.position = "relative";
-            header.appendChild(badge);
+        var badge = document.getElementById("version-badge");
+        if (badge) {
+            badge.textContent = cfg.version;
+            badge.title = "ATW Dashboard version";
+            badge.classList.remove("hidden");
         }
     }).catch(function() {});
     connectWebSocket();
