@@ -14,7 +14,7 @@ A real-time monitoring and control dashboard for [ArchiveTeam Warrior](https://w
 - **Tracker Integration** — Live leaderboard stats pulled from ArchiveTeam tracker (items done, out, todo, your contribution) with per-project delta tracking
 - **Instance Management** — Add, edit, and remove warrior instances on the fly
 - **Persistent State** — Config, history, pause state, and tracker baselines survive restarts via JSON files in `/app/data`
-- **Configurable Grid** — Adjustable column layout (1–8 columns) with preference saved to localStorage
+- **Configurable Grid** — Adjustable column layout (3-6 columns) with preference saved to localStorage
 - **Dark Theme** — Clean dark UI built with Tailwind CSS
 
 ## Tech Stack
