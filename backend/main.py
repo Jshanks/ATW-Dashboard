@@ -48,7 +48,6 @@ ws_connections = []
 broadcast_task = None
 tracker_task = None
 auto_resume_task = None
-_last_tracker_items = 0
 
 # Pause state: {instance_name: {"project_slug": str, "paused_at": float, "resume_at": float|None}}
 _pause_state = {}
@@ -58,6 +57,40 @@ _HISTORY_BROADCAST_INTERVAL = 30
 _TRACKER_BROADCAST_INTERVAL = 60
 _PAUSE_BROADCAST_INTERVAL = 30
 
+
+# ------------------------------------------------------------------
+# Tracker baseline persistence (per-project)
+# ------------------------------------------------------------------
+TRACKER_BASELINE_FILE = os.path.join(DATA_DIR, "tracker_baseline.json")
+# Maximum reasonable items-done delta per 60s poll cycle.
+# Anything above this is treated as a baseline reset (project switch
+# residue, tracker API anomaly, container restart, etc.)
+MAX_TRACKER_DELTA_PER_POLL = 10000
+
+_tracker_baselines = {}  # {project_slug: last_known_items_done}
+
+
+def _load_tracker_baselines():
+    global _tracker_baselines
+    if not os.path.exists(TRACKER_BASELINE_FILE):
+        return
+    try:
+        with open(TRACKER_BASELINE_FILE, "r") as fh:
+            _tracker_baselines = json.load(fh)
+        logger.info("Loaded tracker baselines for %d project(s)", len(_tracker_baselines))
+    except Exception as exc:
+        logger.warning("Failed to load tracker baselines: %s", exc)
+
+
+def _save_tracker_baselines():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        temporary_path = TRACKER_BASELINE_FILE + ".tmp"
+        with open(temporary_path, "w") as fh:
+            json.dump(_tracker_baselines, fh)
+        os.replace(temporary_path, TRACKER_BASELINE_FILE)
+    except Exception as exc:
+        logger.warning("Failed to save tracker baselines: %s", exc)
 
 # ------------------------------------------------------------------
 # Pause state persistence
@@ -101,29 +134,80 @@ def _get_tracker_pair():
 
 
 async def _tracker_poll_loop():
-    global _last_tracker_items
+    """Poll the ArchiveTeam tracker for per-project item deltas.
+
+    Iterates ALL active project/downloader pairs (not just the first),
+    tracks baselines per-project to avoid cross-project delta inflation,
+    and caps deltas to catch anomalies.
+    """
     while True:
         try:
             await asyncio.sleep(60)
-            slug, downloader = _get_tracker_pair()
-            if not slug or not downloader:
+
+            # Gather every unique project_slug → downloader pair across
+            # all online warriors (replaces _get_tracker_pair's single-pair approach)
+            active_pairs = {}
+            for client in clients.values():
+                warrior_status = client.status
+                if warrior_status.connection_state != ConnectionState.ONLINE:
+                    continue
+                if not warrior_status.downloader or not warrior_status.project_slug:
+                    continue
+                if warrior_status.project_slug not in active_pairs:
+                    active_pairs[warrior_status.project_slug] = warrior_status.downloader
+
+            if not active_pairs:
                 continue
-            stats = await tracker.get_project_data(slug)
-            if not stats:
-                continue
-            user_stats = tracker.build_user_stats(stats, downloader, slug)
-            items_done = user_stats.get("user_items_done", 0)
-            if items_done > 0:
-                if _last_tracker_items > 0 and items_done >= _last_tracker_items:
-                    delta = items_done - _last_tracker_items
-                    if delta > 0:
+
+            baselines_changed = False
+
+            for project_slug, downloader_name in active_pairs.items():
+                project_stats = await tracker.get_project_data(project_slug)
+                if not project_stats:
+                    continue
+
+                user_stats = tracker.build_user_stats(
+                    project_stats, downloader_name, project_slug
+                )
+                items_done = user_stats.get("user_items_done", 0)
+
+                if items_done <= 0:
+                    continue
+
+                previous_items = _tracker_baselines.get(project_slug, 0)
+
+                if previous_items > 0 and items_done >= previous_items:
+                    delta = items_done - previous_items
+                    if 0 < delta <= MAX_TRACKER_DELTA_PER_POLL:
                         history.record_tracker(delta)
-                        logger.debug("Recorded tracker delta: %d items (total: %d)", delta, items_done)
-                _last_tracker_items = items_done
+                        logger.debug(
+                            "Recorded tracker delta: %d items for %s (total: %d)",
+                            delta, project_slug, items_done,
+                        )
+                    elif delta > MAX_TRACKER_DELTA_PER_POLL:
+                        logger.warning(
+                            "Tracker delta %d for project '%s' exceeds sanity cap %d "
+                            "— resetting baseline without recording",
+                            delta, project_slug, MAX_TRACKER_DELTA_PER_POLL,
+                        )
+                elif previous_items > 0 and items_done < previous_items:
+                    # Tracker count went backwards (project reset / data correction)
+                    logger.info(
+                        "Tracker items for '%s' decreased (%d → %d) — resetting baseline",
+                        project_slug, previous_items, items_done,
+                    )
+
+                # Always update baseline to latest value
+                _tracker_baselines[project_slug] = items_done
+                baselines_changed = True
+
+            if baselines_changed:
+                _save_tracker_baselines()
+
         except asyncio.CancelledError:
             break
-        except Exception as e:
-            logger.error("Tracker poll error: %s", e)
+        except Exception as exc:
+            logger.error("Tracker poll error: %s", exc)
             await asyncio.sleep(30)
 
 
@@ -169,6 +253,7 @@ async def lifespan(app):
 
     history.load()
     _load_pause_state()
+    _load_tracker_baselines()
 
     saved = store.get_all()
     logger.info("Loaded %d saved instance(s) from store", len(saved))
@@ -205,6 +290,7 @@ async def lifespan(app):
 
     history.force_save()
     _save_pause_state()
+    _save_tracker_baselines(
 
     logger.info("Dashboard shut down cleanly.")
 
@@ -306,12 +392,17 @@ async def health_check():
 
 @app.get("/api/config")
 async def get_config():
-    return {
+    """Dashboard config — rarely changes, safe to cache 5 minutes."""
+    response_data = {
         "title": config.title,
         "poll_interval": config.poll_interval,
         "instance_count": len(clients),
         "version": APP_VERSION,
     }
+    return JSONResponse(
+        content=response_data,
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
 @app.get("/api/instances")
@@ -406,7 +497,12 @@ async def bulk_update_settings(request: BulkSettingsRequest):
 # -- Projects --
 @app.get("/api/projects")
 async def list_projects():
-    return await projects.get_projects()
+    """Active project list — upstream caches 30min, we cache response 10min."""
+    project_list = await projects.get_projects()
+    return JSONResponse(
+        content=project_list,
+        headers={"Cache-Control": "public, max-age=600"},
+    )
 
 
 @app.post("/api/project/bulk")

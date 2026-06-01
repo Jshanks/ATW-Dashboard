@@ -551,20 +551,45 @@
         instanceCheckboxes.innerHTML = html;
     }
 
-    // ---- Projects ----
-    function loadProjects() {
-        fetch("/api/projects").then(function(res) { return res.json(); }).then(function(data) {
-            if (!Array.isArray(data)) return;
-            var html = '<option value="">-- Select Project --</option>';
-            for (var i = 0; i < data.length; i++) {
-                var item = data[i];
-                var slug = typeof item === "string" ? item : (item.slug || item.name || String(item));
-                var name = typeof item === "string" ? item : (item.name || item.slug || String(item));
-                html += '<option value="' + escapeHtml(slug) + '">' + escapeHtml(name) + '</option>';
+    // ---- Projects (sessionStorage cached) ----
+var PROJECTS_CACHE_KEY = "atw-projects-cache";
+var PROJECTS_CACHE_TTL = 600000; // 10 minutes in ms
+
+function loadProjects() {
+    var cached = sessionStorage.getItem(PROJECTS_CACHE_KEY);
+    if (cached) {
+        try {
+            var parsed = JSON.parse(cached);
+            if (Date.now() - parsed.timestamp < PROJECTS_CACHE_TTL) {
+                applyProjectList(parsed.data);
+                return;
             }
-            projectSelect.innerHTML = html;
-        }).catch(function(e) { console.error("Load projects error:", e); });
+        } catch (ignored) { /* stale or corrupt — fetch fresh */ }
     }
+    fetch("/api/projects")
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+            if (!Array.isArray(data)) return;
+            sessionStorage.setItem(
+                PROJECTS_CACHE_KEY,
+                JSON.stringify({ data: data, timestamp: Date.now() })
+            );
+            applyProjectList(data);
+        })
+        .catch(function (e) { console.error("Load projects error:", e); });
+}
+
+function applyProjectList(data) {
+    if (!Array.isArray(data)) return;
+    var html = '<option value="">-- Select Project --</option>';
+    for (var i = 0; i < data.length; i++) {
+        var item = data[i];
+        var slug = typeof item === "string" ? item : (item.slug || item.name || String(item));
+        var displayName = typeof item === "string" ? item : (item.name || item.slug || String(item));
+        html += '<option value="' + escapeHtml(slug) + '">' + escapeHtml(displayName) + '</option>';
+    }
+    projectSelect.innerHTML = html;
+}
     btnApplyProject.addEventListener("click", async function () {
         var slug = projectSelect.value;
         if (!slug) { showToast("Select a project first", "error"); return; }
@@ -692,16 +717,46 @@
 
 
     // ---- Init ----
-    // ---- Version Badge ----
-    fetch("/api/config").then(function(res) { return res.json(); }).then(function(cfg) {
-        if (!cfg || !cfg.version || cfg.version === "dev") return;
-        var badge = document.getElementById("version-badge");
-        if (badge) {
-            badge.textContent = cfg.version;
-            badge.title = "ATW Dashboard version";
-            badge.classList.remove("hidden");
-        }
-    }).catch(function() {});
+    // ---- Version Badge (sessionStorage cached) ----
+var CONFIG_CACHE_KEY = "atw-config-cache";
+var CONFIG_CACHE_TTL = 300000; // 5 minutes in ms
+
+function loadConfigCached() {
+    var cached = sessionStorage.getItem(CONFIG_CACHE_KEY);
+    if (cached) {
+        try {
+            var parsed = JSON.parse(cached);
+            if (Date.now() - parsed.timestamp < CONFIG_CACHE_TTL) {
+                applyVersionBadge(parsed.data);
+                return;
+            }
+        } catch (ignored) { /* stale or corrupt — fetch fresh */ }
+    }
+    fetch("/api/config")
+        .then(function (res) { return res.json(); })
+        .then(function (cfg) {
+            if (!cfg) return;
+            sessionStorage.setItem(
+                CONFIG_CACHE_KEY,
+                JSON.stringify({ data: cfg, timestamp: Date.now() })
+            );
+            applyVersionBadge(cfg);
+        })
+        .catch(function () {});
+}
+
+function applyVersionBadge(cfg) {
+    if (!cfg || !cfg.version || cfg.version === "dev") return;
+    var badge = document.getElementById("version-badge");
+    if (badge) {
+        badge.textContent = cfg.version;
+        badge.title = "ATW Dashboard version";
+        badge.classList.remove("hidden");
+    }
+}
+
+loadConfigCached();
+connectWebSocket();
     connectWebSocket();
     loadProjects();
     initChart();
