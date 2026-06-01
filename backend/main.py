@@ -310,6 +310,7 @@ async def _broadcast_loop():
     last_history_time = 0.0
     last_tracker_time = 0.0
     last_pause_time = 0.0
+    last_broadcast_message = ""
     while True:
         try:
             await asyncio.sleep(2)
@@ -339,14 +340,16 @@ async def _broadcast_loop():
                 state_dict["pause_status"] = _build_pause_status()
                 last_pause_time = now
             message = json.dumps(state_dict)
-            disconnected = []
-            for ws in ws_connections:
-                try:
-                    await ws.send_text(message)
-                except Exception:
-                    disconnected.append(ws)
-            for ws in disconnected:
-                ws_connections.remove(ws)
+            if message != last_broadcast_message:
+                last_broadcast_message = message
+                disconnected = []
+                for ws in ws_connections:
+                    try:
+                        await ws.send_text(message)
+                    except Exception:
+                        disconnected.append(ws)
+                for ws in disconnected:
+                    ws_connections.remove(ws)
         except asyncio.CancelledError:
             break
         except Exception as e:
