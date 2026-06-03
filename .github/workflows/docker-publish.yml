@@ -4,7 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  workflow_run:
+    workflows:
+      - "CodeQL Security Analysis"
+      - "Trivy Security Scan"
+      - "Gitleaks Secret Scan"
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: ci-pipeline
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
@@ -13,6 +24,10 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     permissions:
       contents: read
       packages: write
