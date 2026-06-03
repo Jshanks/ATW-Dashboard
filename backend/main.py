@@ -228,9 +228,9 @@ async def _auto_resume_loop():
                 if name in clients and slug:
                     success = await clients[name].select_project(slug)
                     if success:
-                        logger.info("Auto-resumed %s with project %s", name, slug)
+                        logger.info("Auto-resumed %s with project %s", _safe_log(name), _safe_log(slug))
                     else:
-                        logger.warning("Auto-resume failed for %s", name)
+                        logger.warning("Auto-resume failed for %s", _safe_log(name))
                 del _pause_state[name]
 
             if to_resume:
@@ -583,7 +583,7 @@ async def pause_instances(request: PauseRequest):
             }
             results[name] = {"status": "ok"}
             dur_str = "indefinite" if not resume_at else str(request.duration_hours) + "h"
-            logger.info("Paused %s (project: %s, resume: %s)", name, slug, dur_str)
+            logger.info("Paused %s (project: %s, resume: %s)", _safe_log(name), _safe_log(slug), dur_str)
         else:
             results[name] = {"status": "error", "detail": "Failed to deselect project"}
 
@@ -613,7 +613,7 @@ async def resume_instances(request: ResumeRequest):
         if success:
             del _pause_state[name]
             results[name] = {"status": "ok"}
-            logger.info("Resumed %s with project %s", name, slug)
+            logger.info("Resumed %s with project %s", _safe_log(name), _safe_log(slug))
         else:
             results[name] = {"status": "error", "detail": "Failed to select project"}
 
@@ -643,7 +643,7 @@ async def _build_tracker_stats():
     for slug, downloader in seen.items():
         stats = await tracker.get_project_data(slug)
         if not stats:
-            logger.warning("Tracker returned no data for slug: %s", slug)
+            logger.warning("Tracker returned no data for slug: %s", _safe_log(slug))
             continue
         entry = tracker.build_user_stats(stats, downloader, slug)
         results.append(entry)

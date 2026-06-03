@@ -1,5 +1,10 @@
 FROM python:3.13-alpine AS base
 
+# Patch OS-level vulnerabilities (xz, etc.)
+RUN apk upgrade --no-cache
+# Patch pip itself before installing dependencies
+RUN pip install --no-cache-dir --upgrade pip
+
 WORKDIR /app
 
 # Install build dependencies for any C extensions (uvloop, etc.)

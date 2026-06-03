@@ -6,6 +6,11 @@ import threading
 import logging
 
 logger = logging.getLogger(__name__)
+def _safe_log(value):
+    """Strip newlines/control characters from user input before logging."""
+    if not isinstance(value, str):
+        return value
+    return value.replace('\n', '').replace('\r', '')
 
 DATA_DIR = os.environ.get("DATA_DIR", "data")
 INSTANCES_FILE = os.path.join(DATA_DIR, "instances.json")
@@ -69,7 +74,7 @@ def remove(name):
     if len(instances) == before:
         return False
     save(instances)
-    logger.info("Removed instance from store: %s", name)
+    logger.info("Removed instance from store: %s", _safe_log(name))
     return True
 
 
@@ -86,5 +91,5 @@ def update(name, fields):
             break
     if found:
         save(instances)
-        logger.info("Updated instance in store: %s", name)
+        logger.info("Updated instance in store: %s", _safe_log(name))
     return found
