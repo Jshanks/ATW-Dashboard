@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ci-pipeline
+  cancel-in-progress: false
+
 jobs:
   gitleaks:
     name: Detect Secrets
