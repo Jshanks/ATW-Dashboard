@@ -15,7 +15,8 @@ COPY backend/ ./backend/
 COPY frontend/ ./frontend/
 COPY config.example.yml ./config.example.yml
 
-RUN adduser -D -S appuser && \
+RUN addgroup -S appuser && \
+    adduser -S -G appuser appuser && \
     mkdir -p /app/data && \
     chown -R appuser:appuser /app
 
