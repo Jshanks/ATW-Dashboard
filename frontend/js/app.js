@@ -13,7 +13,8 @@
     var pauseState = {};
 
     var activityChart = null;
-    var CHART_REFRESH_INTERVAL = 30000;
+    var CHART_REBUILD_INTERVAL = 3600000; // 1 hour
+    var lastChartRebuild = Date.now(); 
     var pingIntervalId = null;
     var instanceFingerprints = {};
 
@@ -59,11 +60,11 @@
     var btnBannerResume = document.getElementById("btn-banner-resume");
 
     // ---- Utility ----
+    var _escapeDiv = document.createElement("div");
     function escapeHtml(str) {
         if (!str) return "";
-        var div = document.createElement("div");
-        div.textContent = str;
-        return div.innerHTML;
+        _escapeDiv.textContent = str;
+        return _escapeDiv.innerHTML;
     }
     function formatTime(isoStr) {
         try { return new Date(isoStr).toLocaleTimeString(); }
@@ -82,10 +83,12 @@
         toast.textContent = message;
         container.appendChild(toast);
         setTimeout(function () {
-            toast.style.opacity = "0";
-            toast.style.transition = "opacity 0.3s ease";
-            setTimeout(function () { toast.remove(); }, 300);
-        }, 4000);
+        toast.style.opacity = "0";
+        toast.style.transition = "opacity 0.3s ease";
+        setTimeout(function () {
+            if (toast.parentNode) toast.parentNode.removeChild(toast);
+        }, 300);
+    }, 4000);
     }
     function fmtBytes(bps) {
         if (bps < 1024) return bps.toFixed(0) + " B/s";
@@ -161,16 +164,25 @@ function findCardByName(name) {
             wsStatusText.textContent = "Connected";
         };
         ws.onmessage = function (event) {
-            try {
-                var data = JSON.parse(event.data);
-                if (data.type === "pong") return;
-                dashboardState = data;
-                render();
-                if (data.history) applyHistoryData(data.history);
-                if (data.tracker_stats !== undefined) applyTrackerData(data);
-                if (data.pause_status) applyPauseData(data.pause_status);
-            } catch (e) { console.error("WS parse error:", e); }
-        };
+    try {
+        var data = JSON.parse(event.data);
+        if (data.type === "pong") return;
+        if (data.history) {
+            applyHistoryData(data.history);
+            data.history = null;
+        }
+        if (data.tracker_stats !== undefined) {
+            applyTrackerData(data);
+            data.tracker_stats = null;
+        }
+        if (data.pause_status) {
+            applyPauseData(data.pause_status);
+            data.pause_status = null;
+        }
+        dashboardState = data;
+        render();
+    } catch (e) { console.error("WS parse error:", e); }
+};
         ws.onclose = function () {
             wsIndicator.className = "w-2 h-2 rounded-full bg-red-500";
             wsStatusText.textContent = "Disconnected";
@@ -376,7 +388,17 @@ function findCardByName(name) {
         activityChart.data.datasets[1].data = itemPoints;
         activityChart.data.datasets[0].barThickness = "flex";
         activityChart.data.datasets[0].maxBarThickness = Math.max(4, Math.min(20, Math.floor(800 / Math.max(buckets.length, 1))));
-        activityChart.update("none");
+        if (Date.now() - lastChartRebuild > CHART_REBUILD_INTERVAL) {
+            activityChart.destroy();
+            initChart();
+            activityChart.data.datasets[0].data = dataPoints;
+            activityChart.data.datasets[1].data = itemPoints;
+            activityChart.data.datasets[0].barThickness = "flex";
+            activityChart.data.datasets[0].maxBarThickness = Math.max(4, Math.min(20, Math.floor(800 / Math.max(buckets.length, 1))));
+            lastChartRebuild = Date.now();
+    }
+activityChart.update("none");
+
         updateCumulativeStats(cumulativeBytes, cumulativeItems);
     }
 
