@@ -378,12 +378,15 @@ function findCardByName(name) {
         var dataPoints = [], itemPoints = [];
         var cumulativeBytes = 0, cumulativeItems = 0;
         for (var i = 0; i < buckets.length; i++) {
-            var ts = buckets[i].t * 1000;
-            dataPoints.push({ x: ts, y: buckets[i].bytes });
-            itemPoints.push({ x: ts, y: buckets[i].items });
-            cumulativeBytes += buckets[i].bytes;
-            cumulativeItems += buckets[i].items;
-        }
+        var ts = buckets[i].t * 1000;
+        var trackerBytes = buckets[i].tracker_bytes || 0;
+        var localBytes = buckets[i].bytes || 0;
+        var displayBytes = trackerBytes > 0 ? trackerBytes : localBytes;
+        dataPoints.push({ x: ts, y: displayBytes });
+        itemPoints.push({ x: ts, y: buckets[i].items });
+        cumulativeBytes += displayBytes;
+        cumulativeItems += buckets[i].items;
+    }
         activityChart.data.datasets[0].data = dataPoints;
         activityChart.data.datasets[1].data = itemPoints;
         activityChart.data.datasets[0].barThickness = "flex";

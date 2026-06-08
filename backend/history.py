@@ -51,8 +51,8 @@ def record(instance_name, total_bytes):
         _bucketed_dirty = True
 
 
-def record_tracker(items_done):
-    """Record a tracker items snapshot."""
+def record_tracker(items_delta, bytes_delta=0):
+    """Record tracker deltas (items and bytes) for the current poll cycle."""
     global _tracker_last_sample
     now = time.time()
     mono = time.monotonic()
@@ -60,7 +60,7 @@ def record_tracker(items_done):
     with _lock:
         if mono - _tracker_last_sample < TRACKER_SAMPLE_INTERVAL:
             return
-        _tracker_history.append((now, items_done))
+        _tracker_history.append((now, items_delta, bytes_delta))
         _tracker_last_sample = mono
         global _bucketed_dirty
         _bucketed_dirty = True
@@ -103,7 +103,7 @@ def get_bucketed():
         bucket_start = int(cutoff // interval_secs) * interval_secs
         t = bucket_start
         while t <= now:
-            buckets[t] = [0, 0]
+            buckets[t] = [0, 0, 0]  # [instance_bytes, tracker_items, tracker_bytes]
             t += interval_secs
 
         for name, samples in _history.items():
@@ -122,20 +122,16 @@ def get_bucketed():
                             buckets[bucket_key][0] += delta_bytes
                 prev = sample
 
-        prev = None
         for sample in _tracker_history:
-            ts, items_done = sample
+            ts = sample[0]
+            items_delta = sample[1]
+            bytes_delta = sample[2] if len(sample) > 2 else 0
             if ts < cutoff:
-                prev = sample
                 continue
-            if prev is not None:
-                gap = ts - prev[0]
-                if gap <= MAX_DELTA_GAP:
-                    delta_items = max(0, items_done - prev[1])
-                    bucket_key = int(ts // interval_secs) * interval_secs
-                    if bucket_key in buckets:
-                        buckets[bucket_key][1] += delta_items
-            prev = sample
+            bucket_key = int(ts // interval_secs) * interval_secs
+            if bucket_key in buckets:
+                buckets[bucket_key][1] += max(0, items_delta)
+                buckets[bucket_key][2] += max(0, bytes_delta)
 
         result = []
         for ts in sorted(buckets.keys()):
@@ -143,6 +139,7 @@ def get_bucketed():
                 "t": ts,
                 "bytes": buckets[ts][0],
                 "items": buckets[ts][1],
+                "tracker_bytes": buckets[ts][2],
             })
 
         _bucketed_cache = {
@@ -239,7 +236,11 @@ def load():
         tracker_samples = data.get("tracker", [])
         for s in tracker_samples:
             if isinstance(s, (list, tuple)) and len(s) >= 2 and s[0] >= cutoff:
-                _tracker_history.append(tuple(s))
+                # Normalize old 2-element tuples to 3-element
+                if len(s) == 2:
+                    _tracker_history.append((s[0], s[1], 0))
+                else:
+                    _tracker_history.append(tuple(s))
 
     logger.info("History loaded: %d instances, %d samples, %d tracker points",
                 loaded_instances, loaded_samples, len(_tracker_history))

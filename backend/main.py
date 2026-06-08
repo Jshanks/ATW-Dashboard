@@ -77,6 +77,10 @@ def _load_tracker_baselines():
     try:
         with open(TRACKER_BASELINE_FILE, "r") as fh:
             _tracker_baselines = json.load(fh)
+        # Migrate old format (bare int) to new format (dict with items + bytes)
+        for slug, val in list(_tracker_baselines.items()):
+            if isinstance(val, (int, float)):
+                _tracker_baselines[slug] = {"items": val, "bytes": 0}
         logger.info("Loaded tracker baselines for %d project(s)", len(_tracker_baselines))
     except Exception as exc:
         logger.warning("Failed to load tracker baselines: %s", exc)
@@ -134,18 +138,16 @@ def _get_tracker_pair():
 
 
 async def _tracker_poll_loop():
-    """Poll the ArchiveTeam tracker for per-project item deltas.
+    """Poll the ArchiveTeam tracker for per-project item and byte deltas.
 
-    Iterates ALL active project/downloader pairs (not just the first),
-    tracks baselines per-project to avoid cross-project delta inflation,
-    and caps deltas to catch anomalies.
+    Iterates ALL active project/downloader pairs, tracks baselines
+    per-project, caps deltas to catch anomalies, and records aggregated
+    deltas for the 24h history chart.
     """
     while True:
         try:
             await asyncio.sleep(60)
 
-            # Gather every unique project_slug → downloader pair across
-            # all online warriors (replaces _get_tracker_pair's single-pair approach)
             active_pairs = {}
             for client in clients.values():
                 warrior_status = client.status
@@ -160,6 +162,8 @@ async def _tracker_poll_loop():
                 continue
 
             baselines_changed = False
+            total_items_delta = 0
+            total_bytes_delta = 0
 
             for project_slug, downloader_name in active_pairs.items():
                 project_stats = await tracker.get_project_data(project_slug)
@@ -170,36 +174,58 @@ async def _tracker_poll_loop():
                     project_stats, downloader_name, project_slug
                 )
                 items_done = user_stats.get("user_items_done", 0)
+                bytes_used = user_stats.get("user_bytes", 0)
 
-                if items_done <= 0:
+                if items_done <= 0 and bytes_used <= 0:
                     continue
 
-                previous_items = _tracker_baselines.get(project_slug, 0)
+                baseline = _tracker_baselines.get(project_slug, {"items": 0, "bytes": 0})
+                if isinstance(baseline, (int, float)):
+                    baseline = {"items": baseline, "bytes": 0}
 
+                previous_items = baseline.get("items", 0)
+                previous_bytes = baseline.get("bytes", 0)
+
+                # Calculate items delta
                 if previous_items > 0 and items_done >= previous_items:
-                    delta = items_done - previous_items
-                    if 0 < delta <= MAX_TRACKER_DELTA_PER_POLL:
-                        history.record_tracker(delta)
-                        logger.debug(
-                            "Recorded tracker delta: %d items for %s (total: %d)",
-                            delta, project_slug, items_done,
-                        )
-                    elif delta > MAX_TRACKER_DELTA_PER_POLL:
+                    items_delta = items_done - previous_items
+                    if 0 < items_delta <= MAX_TRACKER_DELTA_PER_POLL:
+                        total_items_delta += items_delta
+                    elif items_delta > MAX_TRACKER_DELTA_PER_POLL:
                         logger.warning(
-                            "Tracker delta %d for project '%s' exceeds sanity cap %d "
-                            "— resetting baseline without recording",
-                            delta, project_slug, MAX_TRACKER_DELTA_PER_POLL,
+                            "Tracker items delta %d for '%s' exceeds cap %d — resetting baseline",
+                            items_delta, project_slug, MAX_TRACKER_DELTA_PER_POLL,
                         )
                 elif previous_items > 0 and items_done < previous_items:
-                    # Tracker count went backwards (project reset / data correction)
                     logger.info(
                         "Tracker items for '%s' decreased (%d → %d) — resetting baseline",
                         project_slug, previous_items, items_done,
                     )
 
-                # Always update baseline to latest value
-                _tracker_baselines[project_slug] = items_done
+                # Calculate bytes delta
+                if previous_bytes > 0 and bytes_used >= previous_bytes:
+                    bytes_delta = bytes_used - previous_bytes
+                    total_bytes_delta += bytes_delta
+                elif previous_bytes > 0 and bytes_used < previous_bytes:
+                    logger.info(
+                        "Tracker bytes for '%s' decreased (%d → %d) — resetting baseline",
+                        project_slug, previous_bytes, bytes_used,
+                    )
+
+                # Update baseline
+                _tracker_baselines[project_slug] = {
+                    "items": items_done,
+                    "bytes": bytes_used,
+                }
                 baselines_changed = True
+
+            # Record aggregated deltas once per poll cycle
+            if total_items_delta > 0 or total_bytes_delta > 0:
+                history.record_tracker(total_items_delta, total_bytes_delta)
+                logger.debug(
+                    "Recorded tracker deltas: %d items, %d bytes",
+                    total_items_delta, total_bytes_delta,
+                )
 
             if baselines_changed:
                 _save_tracker_baselines()
