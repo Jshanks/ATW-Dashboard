@@ -354,7 +354,13 @@ function findCardByName(name) {
                         backgroundColor: "#1f2937", titleColor: "#e5e7eb", bodyColor: "#d1d5db", borderColor: "#374151", borderWidth: 1,
                         callbacks: {
                             title: function(items) { if (items.length > 0) { var d = new Date(items[0].parsed.x); return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); } return ""; },
-                            label: function(ctx) { if (ctx.dataset.yAxisID === "yData") return "Data: " + fmtTotal(ctx.parsed.y); return "Items: " + fmtNum(ctx.parsed.y) + " (from tracker)"; }
+                            label: function(ctx) {
+    if (ctx.dataset.yAxisID === "yData") {
+        var source = dataSourceTracker[ctx.dataIndex] ? " (from tracker)" : "";
+        return "Data: " + fmtTotal(ctx.parsed.y) + source;
+    }
+    return "Items: " + fmtNum(ctx.parsed.y) + " (from tracker)";
+}
                         }
                     }
                 },
@@ -376,16 +382,19 @@ function findCardByName(name) {
         if (!data || !data.buckets) return;
         var buckets = data.buckets;
         var dataPoints = [], itemPoints = [];
-        var cumulativeBytes = 0, cumulativeItems = 0;
-        for (var i = 0; i < buckets.length; i++) {
-        var ts = buckets[i].t * 1000;
-        var trackerBytes = buckets[i].tracker_bytes || 0;
-        var localBytes = buckets[i].bytes || 0;
-        var displayBytes = trackerBytes > 0 ? trackerBytes : localBytes;
-        dataPoints.push({ x: ts, y: displayBytes });
-        itemPoints.push({ x: ts, y: buckets[i].items });
-        cumulativeBytes += displayBytes;
-        cumulativeItems += buckets[i].items;
+    	var cumulativeBytes = 0, cumulativeItems = 0;
+    	var dataSourceTracker = [];
+    	for (var i = 0; i < buckets.length; i++) {
+        	var ts = buckets[i].t * 1000;
+        	var trackerBytes = buckets[i].tracker_bytes || 0;
+        	var localBytes = buckets[i].bytes || 0;
+        	var isTracker = trackerBytes > 0;
+        	var displayBytes = isTracker ? trackerBytes : localBytes;
+        	dataPoints.push({ x: ts, y: displayBytes });
+        	dataSourceTracker.push(isTracker);
+        	itemPoints.push({ x: ts, y: buckets[i].items });
+        	cumulativeBytes += displayBytes;
+        	cumulativeItems += buckets[i].items;
     }
         activityChart.data.datasets[0].data = dataPoints;
         activityChart.data.datasets[1].data = itemPoints;
