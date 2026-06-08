@@ -17,6 +17,7 @@
     var lastChartRebuild = Date.now(); 
     var pingIntervalId = null;
     var instanceFingerprints = {};
+    var dataSourceTracker = [];
 
     var grid = document.getElementById("instance-grid");
     var totalOnlineEl = document.getElementById("total-online");
@@ -383,7 +384,7 @@ function findCardByName(name) {
         var buckets = data.buckets;
         var dataPoints = [], itemPoints = [];
     	var cumulativeBytes = 0, cumulativeItems = 0;
-    	var dataSourceTracker = [];
+    	dataSourceTracker = [];
     	for (var i = 0; i < buckets.length; i++) {
         	var ts = buckets[i].t * 1000;
         	var trackerBytes = buckets[i].tracker_bytes || 0;
