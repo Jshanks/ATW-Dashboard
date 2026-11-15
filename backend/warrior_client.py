@@ -120,6 +120,13 @@ class WarriorClient:
         self._item_updated = {}
         self._completed_count = 0
         self._last_refresh = 0.0
+        # v4.4.0 restart tracking. /api/stop_now briefly drops the warrior;
+        # the container's restart policy brings it back. Keep this transient
+        # state separate from connection_state so the UI can say "Restarting"
+        # instead of treating the expected disconnect as an outage.
+        self._restart_started_at = 0.0
+        self._restart_deadline = 0.0
+        self._restart_saw_offline = False
 
     def _build_url(self):
         return "http://" + self.config.host + ":" + str(self.config.port)
@@ -175,6 +182,7 @@ class WarriorClient:
     async def _poll_loop(self, interval):
         while self._running:
             try:
+                self._expire_restart_if_needed()
                 if not self._sockjs_connected:
                     self._sockjs_connected = await self._sockjs_open()
                     if self._sockjs_connected:
@@ -192,6 +200,10 @@ class WarriorClient:
                         self._reconnect_attempts = 0
                         self._status.connection_state = ConnectionState.ONLINE
                         self._status.error_message = ""
+                        if self._status.restarting and self._restart_saw_offline:
+                            elapsed = time.monotonic() - self._restart_started_at
+                            logger.info("[%s] Restart completed in %.1fs", self.config.name, elapsed)
+                            self._clear_restart_state()
                         self._status.last_seen = datetime.now(timezone.utc).isoformat()
                         self._check_stale_items()
                         continue
@@ -213,10 +225,16 @@ class WarriorClient:
         self._status.connection_state = ConnectionState.OFFLINE
         self._reconnect_attempts += 1
         self._status.reconnect_attempts = self._reconnect_attempts
-        delay = min(
-            self.reconnect_base * (2 ** (self._reconnect_attempts - 1)),
-            self.reconnect_max,
-        )
+        if self._status.restarting:
+            self._restart_saw_offline = True
+            # A restart is expected to be brief. Poll quickly instead of
+            # backing off to 60 seconds and leaving the card stale.
+            delay = min(2, self._poll_interval)
+        else:
+            delay = min(
+                self.reconnect_base * (2 ** (self._reconnect_attempts - 1)),
+                self.reconnect_max,
+            )
         logger.warning(
             "[%s] Offline - reconnect attempt %d in %ds",
             self.config.name, self._reconnect_attempts, delay,
@@ -602,6 +620,81 @@ class WarriorClient:
             # Force reconnect to get fresh state
             self._sockjs_connected = False
         return success
+
+    # ------------------------------------------------------------------
+    # Immediate restart (/api/stop_now)
+    # ------------------------------------------------------------------
+    def _clear_restart_state(self):
+        self._status.restarting = False
+        self._restart_started_at = 0.0
+        self._restart_deadline = 0.0
+        self._restart_saw_offline = False
+
+    def _expire_restart_if_needed(self):
+        if not self._status.restarting:
+            return
+        if self._restart_deadline and time.monotonic() >= self._restart_deadline:
+            logger.warning("[%s] Restart did not complete within 180s", self.config.name)
+            self._clear_restart_state()
+
+    async def restart_now(self):
+        """Immediately stop the warrior so its container restart policy relaunches it.
+
+        ArchiveTeam Warrior's /api/stop_now abandons in-progress items. This is
+        intentionally different from /api/stop, which waits for current items
+        and can hang forever on an upload that cannot complete.
+
+        A RemoteProtocolError/ReadError after the request is sent is accepted:
+        the warrior may close its HTTP server before returning a response. A
+        connection error is not accepted because the request never reached it.
+        """
+        if self._status.restarting:
+            return True
+        if not self._http_client:
+            logger.warning("[%s] Cannot restart: HTTP client is not started", self.config.name)
+            return False
+
+        accepted = False
+        try:
+            response = await self._http_client.post(
+                self._build_url() + "/api/stop_now",
+                auth=self._get_auth(), timeout=10.0,
+            )
+            accepted = response.status_code in (200, 202, 204, 302)
+            if not accepted:
+                logger.warning("[%s] stop_now got HTTP %d", self.config.name, response.status_code)
+        except (httpx.RemoteProtocolError, httpx.ReadError):
+            # Expected on some warrior builds: the process exits before it can
+            # finish the HTTP response, which is itself evidence the command ran.
+            accepted = True
+            logger.info("[%s] stop_now dropped the HTTP response (expected)", self.config.name)
+        except httpx.RequestError as error:
+            logger.error("[%s] stop_now request failed: %s", self.config.name, error)
+            return False
+
+        if not accepted:
+            return False
+
+        now = time.monotonic()
+        self._status.restarting = True
+        self._restart_started_at = now
+        self._restart_deadline = now + 180.0
+        self._restart_saw_offline = False
+
+        # These items belong to the process that was just stopped. Remove them
+        # immediately rather than showing the abandoned backlog until reconnect.
+        self._items.clear()
+        self._item_updated.clear()
+        self._status.items = []
+        self._status.bandwidth_down = 0.0
+        self._status.bandwidth_up = 0.0
+
+        # Force a fresh SockJS session and project/settings fetch. The next poll
+        # observes the expected disconnect and then retries every two seconds.
+        self._sockjs_connected = False
+        self._last_refresh = 0.0
+        logger.warning("[%s] Immediate restart requested; in-progress items abandoned", self.config.name)
+        return True
 
     async def deselect_project(self):
         # Deselect what the warrior is SET to ("auto" on Choice), not the resolved project

@@ -73,6 +73,9 @@ class WarriorStatus(BaseModel):
     bytes_downloaded: int = 0
     bytes_uploaded: int = 0
     completed_items: int = 0
+    # v4.4.0: True from a "Restart now" (/api/stop_now) until the warrior has
+    # gone offline and come back, or the restart window times out
+    restarting: bool = False
 
 
 class BulkSettingsRequest(BaseModel):
@@ -83,6 +86,10 @@ class BulkSettingsRequest(BaseModel):
 class BulkProjectRequest(BaseModel):
     instance_names: list[str] = Field(..., description="List of instance names to update")
     project_name: str = Field(..., description="Project slug to select ('auto' = ArchiveTeam's Choice)")
+
+
+class RestartRequest(BaseModel):
+    instance_names: list[str] = Field(..., description="Warriors to restart immediately (/api/stop_now)")
 
 
 class PauseRequest(BaseModel):

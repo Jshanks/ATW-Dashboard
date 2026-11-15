@@ -144,6 +144,34 @@
         </div>
     </div>
 
+    <!-- Restart Confirmation Modal (v4.4.0) -->
+    <div id="restart-modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" role="dialog" aria-modal="true" aria-labelledby="restart-title">
+        <div class="bg-gray-900 border border-red-800/70 rounded-xl p-6 w-full max-w-lg shadow-2xl">
+            <div class="flex items-start gap-3 mb-4">
+                <div class="restart-warning-icon" aria-hidden="true">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3m0 4h.01M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>
+                </div>
+                <div>
+                    <h2 id="restart-title" class="text-lg font-semibold text-white">Restart selected warriors now?</h2>
+                    <p id="restart-count-text" class="text-sm text-gray-400 mt-1"></p>
+                </div>
+            </div>
+
+            <div class="bg-red-950/40 border border-red-900/60 rounded-lg p-3 text-sm text-red-100 mb-4">
+                <p class="font-semibold">This immediately stops the warrior processes.</p>
+                <p class="text-red-200/80 mt-1">In-progress items are abandoned and returned to the tracker. The containers must have a restart policy such as <span class="font-mono">unless-stopped</span> or <span class="font-mono">always</span>.</p>
+            </div>
+
+            <p class="text-xs text-gray-500 mb-5">Requests are sent in batches of 10. Warriors that are already offline are skipped.</p>
+            <p id="restart-status" class="text-sm min-h-[1.25rem] mb-3" aria-live="polite"></p>
+
+            <div class="flex items-center justify-end gap-3">
+                <button type="button" id="btn-cancel-restart" class="bg-gray-700 hover:bg-gray-600 px-5 py-2 rounded-lg text-sm font-medium transition-colors">Cancel</button>
+                <button type="button" id="btn-confirm-restart" class="bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed px-5 py-2 rounded-lg text-sm font-semibold transition-colors">Restart now</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Add Instance Modal (v4.2.0: Single / Bulk-Import tabs, optional name, export) -->
     <div id="add-instance-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
         <div class="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
@@ -278,6 +306,7 @@
         <span class="sel-divider" aria-hidden="true"></span>
         <button type="button" id="btn-sel-settings" class="sel-btn sel-btn-primary"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg><span class="sel-label-long">Settings &amp; project</span><span class="sel-label-short">Settings</span></button>
         <button type="button" id="btn-sel-pause" class="sel-btn sel-btn-secondary"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg><span class="sel-label-long">Pause / Resume</span><span class="sel-label-short">Pause</span></button>
+        <button type="button" id="btn-sel-restart" class="sel-btn sel-btn-danger" title="Restart selected warriors now"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v6h6M20 20v-6h-6M5.6 15a7 7 0 0011.7 2.4L20 14M4 10l2.7-3.4A7 7 0 0118.4 9"/></svg><span class="sel-label-long">Restart now</span><span class="sel-label-short">Restart</span></button>
         <button type="button" id="btn-sel-clear" class="sel-btn-clear" title="Clear selection (Esc)" aria-label="Clear selection"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>
     </div>
 

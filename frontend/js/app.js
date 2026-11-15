@@ -14,6 +14,8 @@
  *         the button counts pending changes.
  * v4.3.3: mobile layout: toolbar wraps (no page overflow), selection bar
  *         pinned to the visible screen bottom.
+ * v4.4.0: immediate warrior restart, restart state on cards, and Choice
+ *         labels derived from what Choice warriors actually run.
  */
 (function () {
     "use strict";
@@ -93,6 +95,13 @@
     var selectionHint = document.getElementById("selection-hint");
     var btnSelSettings = document.getElementById("btn-sel-settings");
     var btnSelPause = document.getElementById("btn-sel-pause");
+    var btnSelRestart = document.getElementById("btn-sel-restart");
+    var restartModal = document.getElementById("restart-modal");
+    var restartCountText = document.getElementById("restart-count-text");
+    var restartStatus = document.getElementById("restart-status");
+    var btnCancelRestart = document.getElementById("btn-cancel-restart");
+    var btnConfirmRestart = document.getElementById("btn-confirm-restart");
+    var restartRequestInFlight = false;
     var btnSelClear = document.getElementById("btn-sel-clear");
 
     // ---- Selection state (v4.3.0) ----
@@ -177,7 +186,7 @@ function getInstanceFingerprint(inst) {
             itemStates += inst.items[i].state + ",";
         }
     }
-    return inst.connection_state + "|" +
+    return inst.connection_state + "|" + String(!!inst.restarting) + "|" +
         inst.project_slug + "|" +
         inst.selected_project + "|" +
         inst.bandwidth_down + "|" +
@@ -206,17 +215,30 @@ function findCardByName(name) {
     function isAutoInstance(inst) {
         return inst.selected_project === AUTO_PROJECT_SLUG;
     }
+    function getActualChoiceTargets() {
+        var targets = {};
+        (dashboardState.instances || []).forEach(function (inst) {
+            if (isAutoInstance(inst) && inst.project_slug) targets[inst.project_slug] = true;
+        });
+        return Object.keys(targets).sort();
+    }
+    function updateChoiceOptionLabel() {
+        var option = projectSelect && projectSelect.querySelector('option[value="auto"]');
+        if (!option) return;
+        var targets = getActualChoiceTargets();
+        option.textContent = "\u2605 " + AUTO_PROJECT_TITLE + (targets.length ? " (\u2192 " + targets.join(", ") + ")" : "");
+    }
 
     function passesFilter(inst) {
-        var isOnline = inst.connection_state === "online";
+        var isOnline = inst.connection_state === "online" || !!inst.restarting;
         if (viewFilter === "online") return isOnline;
-        if (viewFilter === "offline") return !isOnline;   // offline, connecting, auth_failed
+        if (viewFilter === "offline") return !isOnline;   // intentional restarts are not outages
         return true;
     }
 
     function getGroupKey(inst) {
         if (pauseState[inst.name] !== undefined) return GROUP_PAUSED;
-        if (inst.connection_state !== "online") return GROUP_OFFLINE;
+        if (inst.connection_state !== "online" && !inst.restarting) return GROUP_OFFLINE;
         if (isAutoInstance(inst)) return AUTO_PROJECT_SLUG;
         return inst.project_slug || inst.selected_project || GROUP_UNASSIGNED;
     }
@@ -468,6 +490,10 @@ function findCardByName(name) {
         updateApplyButton();
         btnPauseSelected.disabled = selectionInfo.running + selectionInfo.offline === 0;
         btnResumeSelected.disabled = selectionInfo.paused === 0;
+        var restartEligible = (dashboardState.instances || []).filter(function (inst) {
+            return selectedInstances.has(inst.name) && inst.connection_state === "online" && !inst.restarting;
+        }).length;
+        if (btnSelRestart) btnSelRestart.disabled = restartEligible === 0 || restartRequestInFlight;
     }
 
     // ---- WebSocket ----
@@ -553,6 +579,7 @@ function findCardByName(name) {
     totalItemsEl.textContent = workingItems;
     totalDlEl.textContent = fmtBytes(aggDl);
     totalUlEl.textContent = fmtBytes(aggUl);
+    updateChoiceOptionLabel();
 
     if (!state.instances || state.instances.length === 0) {
         grid.innerHTML = '<div class="col-span-full text-center text-gray-500 py-12">' +
@@ -649,10 +676,13 @@ function findCardByName(name) {
     }
 
     function renderInstanceCard(inst) {
-        var stateClass = "border-state-" + inst.connection_state;
+        var isRestarting = !!inst.restarting;
+        var stateClass = isRestarting ? "border-blue-400 restarting-card" : "border-state-" + inst.connection_state;
         var isOnline = inst.connection_state === "online";
         var isPaused = pauseState[inst.name] !== undefined;
-        var statusDot = isOnline
+        var statusDot = isRestarting
+            ? '<span class="restart-spinner" title="Restarting" aria-label="Restarting"></span>'
+            : isOnline
             ? '<span class="w-2.5 h-2.5 rounded-full bg-green-500 pulse-online" title="Online"></span>'
             : inst.connection_state === "connecting"
                 ? '<span class="w-2.5 h-2.5 rounded-full bg-yellow-500 pulse-connecting" title="Connecting"></span>'
@@ -660,7 +690,9 @@ function findCardByName(name) {
                     ? '<span class="w-2.5 h-2.5 rounded-full bg-purple-500" title="Auth Failed"></span>'
                     : '<span class="w-2.5 h-2.5 rounded-full bg-red-500" title="Offline"></span>';
         var projectBadgeHtml = "";
-        if (isOnline && isAutoInstance(inst)) {
+        if (isRestarting) {
+            projectBadgeHtml = '<span class="restart-badge">Restarting\u2026</span>';
+        } else if (isOnline && isAutoInstance(inst)) {
             // ArchiveTeam's Choice: star + the project it is actually running
             var runningSlug = inst.project_slug || "resolving\u2026";
             projectBadgeHtml = '<span class="project-badge" title="' + escapeHtml(AUTO_PROJECT_TITLE + " \u2192 " + runningSlug) + '">\u2605 ' + escapeHtml(runningSlug) + '</span>';
@@ -973,6 +1005,7 @@ activityChart.update("none");
         if (e.key !== "Escape") return;
         if (!settingsPanel.classList.contains("hidden")) { closeSettingsPanel(); return; }
         if (!pauseModal.classList.contains("hidden")) { pauseModal.classList.add("hidden"); return; }
+        if (restartModal && !restartModal.classList.contains("hidden")) { closeRestartModal(); return; }
         if (!addInstanceModal.classList.contains("hidden")) return;   // handled by the Add modal
         if (selectedInstances.size > 0) btnSelClear.click();
     });
@@ -1161,7 +1194,9 @@ function applyProjectList(data) {
         var displayName = typeof item === "string" ? item : (item.name || item.slug || String(item));
         if (slug === AUTO_PROJECT_SLUG) {
             displayName = "\u2605 " + AUTO_PROJECT_TITLE;
-            if (item.resolves_to) displayName += " (\u2192 " + item.resolves_to + ")";
+            var actualTargets = getActualChoiceTargets();
+            if (actualTargets.length) displayName += " (\u2192 " + actualTargets.join(", ") + ")";
+            else if (item.resolves_to) displayName += " (\u2192 " + item.resolves_to + ")";
         }
         if (typeof item === "object" && item.title) projectTitles[slug] = item.title;
         html += '<option value="' + escapeHtml(slug) + '">' + escapeHtml(displayName) + '</option>';
@@ -1598,6 +1633,83 @@ grid.addEventListener("click", function (e) {
         return;
     }
 });
+
+    // ---- Immediate restart (/api/stop_now) ----
+    function getRestartEligibleNames() {
+        return (dashboardState.instances || []).filter(function (inst) {
+            return selectedInstances.has(inst.name) && inst.connection_state === "online" && !inst.restarting;
+        }).map(function (inst) { return inst.name; });
+    }
+    function closeRestartModal() {
+        if (restartRequestInFlight) return;
+        restartModal.classList.add("hidden");
+        restartStatus.textContent = "";
+    }
+    function openRestartModal() {
+        var selectedCount = getSelectedNames().length;
+        var eligible = getRestartEligibleNames();
+        var skipped = selectedCount - eligible.length;
+        if (!eligible.length) { showToast("No online warriors are eligible to restart", "error"); return; }
+        restartCountText.textContent = eligible.length + " online warrior" + (eligible.length === 1 ? "" : "s") + " will restart" +
+            (skipped ? "; " + skipped + " offline or already restarting will be skipped" : "") + ".";
+        restartStatus.textContent = "";
+        btnConfirmRestart.disabled = false;
+        btnConfirmRestart.textContent = "Restart " + eligible.length + " now";
+        restartModal.classList.remove("hidden");
+        btnCancelRestart.focus();
+    }
+    btnSelRestart.addEventListener("click", openRestartModal);
+    btnCancelRestart.addEventListener("click", closeRestartModal);
+    restartModal.addEventListener("click", function (e) { if (e.target === restartModal) closeRestartModal(); });
+    btnConfirmRestart.addEventListener("click", async function () {
+        if (restartRequestInFlight) return;
+        var eligible = getRestartEligibleNames();
+        if (!eligible.length) { closeRestartModal(); return; }
+        restartRequestInFlight = true;
+        btnConfirmRestart.disabled = true;
+        btnCancelRestart.disabled = true;
+        btnConfirmRestart.textContent = "Restarting\u2026";
+        restartStatus.textContent = "Sending restart requests in batches of 10\u2026";
+        restartStatus.className = "text-sm min-h-[1.25rem] mb-3 text-yellow-400";
+        updateSelectionUI();
+        try {
+            var response = await fetch("/api/restart", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ instance_names: eligible })
+            });
+            if (!response.ok) throw new Error(await readErrorDetail(response));
+            var result = await response.json();
+            var accepted = [];
+            Object.keys(result.results || {}).forEach(function (name) {
+                if (result.results[name].status === "ok") accepted.push(name);
+            });
+            (dashboardState.instances || []).forEach(function (inst) {
+                if (accepted.indexOf(inst.name) !== -1) {
+                    inst.restarting = true; inst.items = [];
+                    inst.bandwidth_down = 0; inst.bandwidth_up = 0;
+                    selectedInstances.delete(inst.name);
+                }
+            });
+            var message = result.accepted + " restart" + (result.accepted === 1 ? "" : "s") + " accepted" +
+                (result.failed ? "; " + result.failed + " failed" : "");
+            showToast(message, result.failed ? "info" : "success");
+            restartStatus.textContent = message;
+            restartStatus.className = "text-sm min-h-[1.25rem] mb-3 " + (result.failed ? "text-amber-400" : "text-green-400");
+            render();
+            setTimeout(function () {
+                restartRequestInFlight = false; btnCancelRestart.disabled = false;
+                restartModal.classList.add("hidden"); updateSelectionUI();
+            }, result.failed ? 1800 : 500);
+            return;
+        } catch (error) {
+            restartStatus.textContent = "Restart failed: " + error.message;
+            restartStatus.className = "text-sm min-h-[1.25rem] mb-3 text-red-400";
+            showToast("Restart failed: " + error.message, "error");
+        }
+        restartRequestInFlight = false;
+        btnConfirmRestart.disabled = false; btnCancelRestart.disabled = false;
+        btnConfirmRestart.textContent = "Retry restart"; updateSelectionUI();
+    });
 
     // ---- Select all / selection bar ----
     selectAllVisible.addEventListener("click", function () {

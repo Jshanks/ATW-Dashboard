@@ -22,6 +22,7 @@ from backend.models import (
     EditInstanceRequest,
     PauseRequest,
     ResumeRequest,
+    RestartRequest,
     WarriorInstanceConfig,
     WarriorSettings,
     WarriorStatus,
@@ -408,6 +409,9 @@ def _build_dashboard_state():
     for client in clients.values():
         s = client.status
         instances.append(s)
+        if s.restarting:
+            # Expected transient state: do not count a requested restart as an outage
+            continue
         if s.connection_state == ConnectionState.ONLINE:
             total_online += 1
             total_items_active += len(
@@ -676,6 +680,74 @@ async def bulk_change_project(request: BulkProjectRequest):
         success = await clients[name].change_project(request.project_name)
         results[name] = {"status": "ok" if success else "error"}
     return {"results": results}
+
+
+# -- Immediate restart -------------------------------------------------------
+# /api/stop_now abandons in-progress items and relies on the warrior
+# container's restart policy to relaunch it. Stagger requests so restarting a
+# large fleet does not create a simultaneous reconnect / registry-download spike.
+_RESTART_BATCH_SIZE = 10
+_RESTART_BATCH_DELAY_SECONDS = 3
+_MAX_RESTART_REQUEST = 1000
+_restart_lock = asyncio.Lock()
+
+
+async def _restart_one(name):
+    client = clients.get(name)
+    if not client:
+        return name, {"status": "error", "detail": "Not found"}
+    if client.status.restarting:
+        return name, {"status": "ok", "note": "Already restarting"}
+    if client.status.connection_state != ConnectionState.ONLINE:
+        return name, {"status": "error", "detail": "Warrior is offline"}
+
+    try:
+        success = await client.restart_now()
+    except Exception as restart_error:
+        logger.error("Restart error for %s: %s", _safe_log(name), restart_error)
+        return name, {"status": "error", "detail": "Restart request failed"}
+
+    if success:
+        logger.warning("Immediate restart requested for %s", _safe_log(name))
+        return name, {"status": "ok"}
+    return name, {"status": "error", "detail": "Warrior rejected restart request"}
+
+
+@app.post("/api/restart")
+async def restart_instances(request: RestartRequest):
+    """Immediately restart selected warriors in batches of ten.
+
+    This is intentionally destructive to in-progress work. The frontend must
+    show an explicit confirmation before calling this endpoint.
+    """
+    # Preserve caller order while removing duplicates and empty names
+    instance_names = list(dict.fromkeys(name for name in request.instance_names if name))
+    if not instance_names:
+        raise HTTPException(status_code=400, detail="No warrior instances specified")
+    if len(instance_names) > _MAX_RESTART_REQUEST:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot restart more than " + str(_MAX_RESTART_REQUEST) + " warriors at once",
+        )
+    if _restart_lock.locked():
+        raise HTTPException(status_code=409, detail="Another restart operation is already running")
+
+    results = {}
+    async with _restart_lock:
+        for batch_start in range(0, len(instance_names), _RESTART_BATCH_SIZE):
+            batch_names = instance_names[batch_start:batch_start + _RESTART_BATCH_SIZE]
+            batch_results = await asyncio.gather(*(_restart_one(name) for name in batch_names))
+            for name, result in batch_results:
+                results[name] = result
+
+            # No delay after the final batch
+            if batch_start + _RESTART_BATCH_SIZE < len(instance_names):
+                await asyncio.sleep(_RESTART_BATCH_DELAY_SECONDS)
+
+    accepted = sum(1 for result in results.values() if result.get("status") == "ok")
+    failed = len(results) - accepted
+    logger.warning("Restart operation complete: %d accepted, %d failed", accepted, failed)
+    return {"results": results, "accepted": accepted, "failed": failed}
 
 
 # -- Pause / Resume --
