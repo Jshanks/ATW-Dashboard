@@ -8,6 +8,8 @@
  * v4.3.0: select warriors on the cards (checkbox, Shift-click ranges,
  *         Select all, per-group checkboxes); Bulk Settings and Pause/Resume
  *         act on that selection; single-row header.
+ * v4.3.1: Settings & Project is a modal opened from the selection bar;
+ *         header Pause/Settings buttons removed; more prominent selection bar.
  */
 (function () {
     "use strict";
@@ -54,7 +56,6 @@
     var wsIndicator = document.getElementById("ws-indicator");
     var wsStatusText = document.getElementById("ws-status-text");
     var settingsPanel = document.getElementById("settings-panel");
-    var btnSettingsPanel = document.getElementById("btn-settings-panel");
     var btnCloseSettings = document.getElementById("btn-close-settings");
     var btnApplySettings = document.getElementById("btn-apply-settings");
     var settingsForm = document.getElementById("settings-form");
@@ -73,7 +74,6 @@
     var trackerBar = document.getElementById("tracker-bar");
     var trackerContent = document.getElementById("tracker-stats-content");
     var pauseModal = document.getElementById("pause-modal");
-    var btnPauseModal = document.getElementById("btn-pause-modal");
     var btnClosePause = document.getElementById("btn-close-pause");
     var btnPauseSelected = document.getElementById("btn-pause-selected");
     var btnResumeSelected = document.getElementById("btn-resume-selected");
@@ -83,6 +83,8 @@
     var selectionCount = document.getElementById("selection-count");
     var selectionBar = document.getElementById("selection-bar");
     var selectionBarText = document.getElementById("selection-bar-text");
+    var selectionBarCount = document.getElementById("selection-bar-count");
+    var selectionHint = document.getElementById("selection-hint");
     var btnSelSettings = document.getElementById("btn-sel-settings");
     var btnSelPause = document.getElementById("btn-sel-pause");
     var btnSelClear = document.getElementById("btn-sel-clear");
@@ -430,15 +432,23 @@ function findCardByName(name) {
 
         // Floating selection bar
         if (totalSelected > 0) {
-            var barText = totalSelected + " selected";
-            if (hiddenSelected > 0) barText += " (" + hiddenSelected + " hidden by filter)";
+            var barText = "warrior" + (totalSelected === 1 ? "" : "s") + " selected";
+            if (hiddenSelected > 0) barText += " \u00B7 " + hiddenSelected + " hidden by filter";
+            selectionBarCount.textContent = totalSelected;
             selectionBarText.textContent = barText;
-            selectionBar.classList.remove("hidden");
+            if (selectionBar.classList.contains("hidden")) {
+                selectionBar.classList.remove("hidden");
+                // Restart the slide-in animation each time the bar appears
+                selectionBar.classList.remove("sel-bar-enter");
+                void selectionBar.offsetWidth;
+                selectionBar.classList.add("sel-bar-enter");
+            }
             document.body.classList.add("has-selection");
         } else {
             selectionBar.classList.add("hidden");
             document.body.classList.remove("has-selection");
         }
+        if (selectionHint) selectionHint.classList.toggle("hidden", totalSelected > 0);
 
         // Bulk Settings panel + Pause modal summaries
         var selectionInfo = describeSelection(selectedNames);
@@ -891,10 +901,6 @@ activityChart.update("none");
         pauseActionStatus.className = "text-sm mb-3";
         updateSelectionUI();
     }
-    btnPauseModal.addEventListener("click", function () {
-        loadPauseStatus();
-        setTimeout(function () { populatePauseModal(); pauseModal.classList.remove("hidden"); }, 200);
-    });
     btnClosePause.addEventListener("click", function () { pauseModal.classList.add("hidden"); });
     btnPauseSelected.addEventListener("click", async function () {
         var selected = getSelectedNames().filter(function (name) { return !pauseState[name]; });
@@ -944,15 +950,27 @@ activityChart.update("none");
 
     // ---- Settings Panel ----
     function openSettingsPanel() {
+        settingsStatus.textContent = "";
+        projectStatus.textContent = "";
         settingsPanel.classList.remove("hidden");
         updateSelectionUI();
-        settingsPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+        var firstField = document.getElementById("project-select");
+        if (firstField) firstField.focus();
     }
-    btnSettingsPanel.addEventListener("click", function () {
-        if (settingsPanel.classList.contains("hidden")) openSettingsPanel();
-        else settingsPanel.classList.add("hidden");
+    function closeSettingsPanel() { settingsPanel.classList.add("hidden"); }
+    btnCloseSettings.addEventListener("click", closeSettingsPanel);
+    // Click on the dimmed backdrop closes the modal
+    settingsPanel.addEventListener("click", function (e) { if (e.target === settingsPanel) closeSettingsPanel(); });
+    pauseModal.addEventListener("click", function (e) { if (e.target === pauseModal) pauseModal.classList.add("hidden"); });
+
+    // Esc: close the open modal; with no modal open, clear the selection
+    document.addEventListener("keydown", function (e) {
+        if (e.key !== "Escape") return;
+        if (!settingsPanel.classList.contains("hidden")) { closeSettingsPanel(); return; }
+        if (!pauseModal.classList.contains("hidden")) { pauseModal.classList.add("hidden"); return; }
+        if (!addInstanceModal.classList.contains("hidden")) return;   // handled by the Add modal
+        if (selectedInstances.size > 0) btnSelClear.click();
     });
-    btnCloseSettings.addEventListener("click", function () { settingsPanel.classList.add("hidden"); });
     btnApplySettings.addEventListener("click", async function () {
         var selected = getSelectedNames();
         if (selected.length === 0) { showToast("No warriors selected", "error"); return; }

@@ -39,14 +39,8 @@
                 <div class="hdr-stat"><span class="text-gray-400" aria-label="Download">&#x2193;</span><span id="total-dl" class="text-cyan-400 font-bold">0 B/s</span></div>
                 <div class="hdr-stat"><span class="text-gray-400" aria-label="Upload">&#x2191;</span><span id="total-ul" class="text-orange-400 font-bold">0 B/s</span></div>
                 <div class="flex items-center gap-2 shrink-0">
-                    <button id="btn-pause-modal" type="button" title="Pause / Resume selected warriors" aria-label="Pause / Resume" class="hdr-btn bg-gray-800 hover:bg-gray-700">
-                        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg><span class="hdr-label">Pause / Resume</span>
-                    </button>
-                    <button id="btn-settings-panel" type="button" title="Bulk settings for selected warriors" aria-label="Bulk Settings" class="hdr-btn bg-gray-800 hover:bg-gray-700">
-                        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg><span class="hdr-label">Bulk Settings</span>
-                    </button>
                     <button id="btn-add-instance" type="button" title="Add warrior instances" aria-label="Add Instances" class="hdr-btn bg-blue-600 hover:bg-blue-700">
-                        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg><span class="hdr-label">Add Instances</span>
+                        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg><span class="hdr-label-keep">Add Instances</span>
                     </button>
                 </div>
             </div>
@@ -76,24 +70,26 @@
         </div>
     </div>
 
-    <!-- Settings Panel -->
-    <div id="settings-panel" class="hidden bg-gray-900 border-b border-gray-800 px-6 py-6">
-        <div class="max-w-7xl mx-auto">
-            <div class="flex items-center justify-between mb-4">
-                <h2 class="text-lg font-semibold">Bulk Settings</h2>
-                <span class="text-xs text-gray-500">Select warriors on the cards below</span>
+    <!-- Settings & Project Modal (v4.3.1: opened from the selection bar) -->
+    <div id="settings-panel" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div class="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+            <div class="flex items-center justify-between mb-2">
+                <h2 id="settings-title" class="text-lg font-semibold">Settings &amp; Project</h2>
             </div>
             <p id="settings-selection-summary" class="text-sm mb-5" aria-live="polite"></p>
-            <div class="mb-4 flex items-center gap-3">
-                <label class="text-sm text-gray-400">Change Project:</label>
-                <select id="project-select" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none min-w-[200px]">
+
+            <h3 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">Project</h3>
+            <div class="flex items-center gap-3 flex-wrap">
+                <select id="project-select" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none flex-1 min-w-[220px]" aria-label="Project">
                     <option value="">-- Select Project --</option>
                 </select>
-                <button id="btn-apply-project" class="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg transition-colors text-sm font-medium">Apply Project</button>
-                <span id="project-status" class="text-sm ml-2"></span>
+                <button type="button" id="btn-apply-project" class="bg-purple-600 hover:bg-purple-700 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-2 rounded-lg transition-colors text-sm font-medium">Apply Project</button>
             </div>
-	    <p class="text-xs text-gray-500 italic mb-2">Note: Warriors will finish any in-progress items before switching to the new project.</p>
-            <form id="settings-form" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <p class="text-xs text-gray-500 italic mt-2">Warriors finish any in-progress items before switching.</p>
+            <p id="project-status" class="text-sm mt-1 min-h-[1.25rem]"></p>
+
+            <h3 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mt-5 mb-2">Warrior settings <span class="normal-case font-normal text-gray-600">(blank = leave unchanged)</span></h3>
+            <form id="settings-form" class="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div><label class="block text-sm text-gray-400 mb-1">Nickname</label><input type="text" name="downloader" placeholder="Leave blank to skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
                 <div><label class="block text-sm text-gray-400 mb-1">Concurrent Items</label>
                     <select name="concurrent_items" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
@@ -102,10 +98,10 @@
                 </div>
                 <div><label class="block text-sm text-gray-400 mb-1">Rsync Threads</label><input type="number" name="shared_rsync_threads" min="1" max="40" placeholder="Skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
             </form>
-            <div class="mt-4 flex gap-3">
-                <button id="btn-apply-settings" class="bg-green-600 hover:bg-green-700 px-6 py-2 rounded-lg transition-colors text-sm font-medium">Apply Settings</button>
-                <button id="btn-close-settings" class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded-lg transition-colors text-sm font-medium">Close</button>
-                <span id="settings-status" class="text-sm self-center ml-4"></span>
+            <div class="mt-5 flex items-center gap-3 flex-wrap">
+                <button type="button" id="btn-apply-settings" class="bg-green-600 hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed px-6 py-2 rounded-lg transition-colors text-sm font-medium">Apply Settings</button>
+                <button type="button" id="btn-close-settings" class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded-lg transition-colors text-sm font-medium">Close</button>
+                <span id="settings-status" class="text-sm"></span>
             </div>
         </div>
     </div>
@@ -254,6 +250,7 @@
                     <span>Select all</span>
                 </label>
                 <span id="selection-count" class="text-xs text-gray-500" aria-live="polite"></span>
+                <span id="selection-hint" class="sel-hint text-xs text-gray-500">Select warriors to change settings, switch projects, or pause</span>
             </div>
             <div class="flex items-center gap-2">
                 <span class="text-xs text-gray-500">Columns:</span>
@@ -267,12 +264,14 @@
         </div>
     </div>
 
-    <!-- Floating selection bar (shown while any warrior is selected) -->
+    <!-- Floating selection bar (v4.3.1: high-contrast, slides in when a warrior is selected) -->
     <div id="selection-bar" class="hidden" role="region" aria-label="Selected warriors">
-        <span id="selection-bar-text" class="text-sm text-gray-200 whitespace-nowrap"></span>
-        <button type="button" id="btn-sel-settings" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap">Settings &amp; project&hellip;</button>
-        <button type="button" id="btn-sel-pause" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap">Pause / Resume&hellip;</button>
-        <button type="button" id="btn-sel-clear" class="text-gray-400 hover:text-white px-2 py-1.5 text-xs font-medium whitespace-nowrap">Clear</button>
+        <span class="sel-count-pill"><span id="selection-bar-count">0</span></span>
+        <span id="selection-bar-text" class="sel-bar-text"></span>
+        <span class="sel-divider" aria-hidden="true"></span>
+        <button type="button" id="btn-sel-settings" class="sel-btn sel-btn-primary"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg><span>Settings &amp; project</span></button>
+        <button type="button" id="btn-sel-pause" class="sel-btn sel-btn-secondary"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg><span>Pause / Resume</span></button>
+        <button type="button" id="btn-sel-clear" class="sel-btn-clear" title="Clear selection (Esc)" aria-label="Clear selection"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>
     </div>
 
     <!-- Instance Grid -->
