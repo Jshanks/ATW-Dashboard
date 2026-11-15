@@ -95,11 +95,29 @@ class ResumeRequest(BaseModel):
 
 
 class AddInstanceRequest(BaseModel):
-    name: str
-    host: str
-    port: int = 8001
+    # Optional: when blank, the backend names the instance "host:port"
+    # (unique by definition, since duplicate host:port pairs are rejected)
+    name: Optional[str] = Field(None, max_length=100)
+    host: str = Field(..., min_length=1, max_length=253)
+    port: int = Field(8001, ge=1, le=65535)
     http_username: Optional[str] = None
     http_password: Optional[str] = None
+
+
+class BulkAddRequest(BaseModel):
+    """Bulk add / import. `text` may be any of:
+      - line syntax, one entry per line (or comma/space separated):
+            192.168.1.50                 -> port 8001
+            192.168.1.50:8002
+            192.168.1.50:8001-8099       -> port range on one host
+            192.168.1.50-60              -> last-octet IP range, port 8001
+            192.168.1.50-60:8001         -> IP range with explicit port
+      - CSV with a header row containing host (name, port optional)
+      - JSON exported from /api/instances/export
+    dry_run=True returns the preview (to_add / skipped) without changing anything.
+    """
+    text: str = Field(..., max_length=500_000)
+    dry_run: bool = True
 
 
 class EditInstanceRequest(BaseModel):
