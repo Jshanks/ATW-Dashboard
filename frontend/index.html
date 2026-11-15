@@ -2,7 +2,7 @@
 <html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>ATW Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
@@ -255,7 +255,10 @@
                 <span id="selection-count" class="text-xs text-gray-500" aria-live="polite"></span>
                 <span id="selection-hint" class="sel-hint text-xs text-gray-500">Select warriors to change settings, switch projects, or pause</span>
             </div>
-            <div class="flex items-center gap-2">
+            <!-- Show/Group controls are injected here by app.js; the row wraps on small screens -->
+            <div id="view-toolbar" class="flex items-center gap-x-4 gap-y-2 flex-wrap">
+              <!-- Column count only applies at >= 768px (phones are always one column) -->
+              <div id="columns-control" class="hidden md:flex items-center gap-2">
                 <span class="text-xs text-gray-500">Columns:</span>
                 <div id="col-selector" class="flex gap-1">
                     <button type="button" class="col-btn px-2 py-0.5 text-xs rounded bg-gray-800 text-gray-400 hover:bg-gray-700" data-cols="3">3</button>
@@ -263,6 +266,7 @@
                     <button type="button" class="col-btn px-2 py-0.5 text-xs rounded bg-gray-800 text-gray-400 hover:bg-gray-700" data-cols="5">5</button>
                     <button type="button" class="col-btn px-2 py-0.5 text-xs rounded bg-gray-800 text-gray-400 hover:bg-gray-700" data-cols="6">6</button>
                 </div>
+              </div>
             </div>
         </div>
     </div>
@@ -272,8 +276,8 @@
         <span class="sel-count-pill"><span id="selection-bar-count">0</span></span>
         <span id="selection-bar-text" class="sel-bar-text"></span>
         <span class="sel-divider" aria-hidden="true"></span>
-        <button type="button" id="btn-sel-settings" class="sel-btn sel-btn-primary"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg><span>Settings &amp; project</span></button>
-        <button type="button" id="btn-sel-pause" class="sel-btn sel-btn-secondary"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg><span>Pause / Resume</span></button>
+        <button type="button" id="btn-sel-settings" class="sel-btn sel-btn-primary"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg><span class="sel-label-long">Settings &amp; project</span><span class="sel-label-short">Settings</span></button>
+        <button type="button" id="btn-sel-pause" class="sel-btn sel-btn-secondary"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg><span class="sel-label-long">Pause / Resume</span><span class="sel-label-short">Pause</span></button>
         <button type="button" id="btn-sel-clear" class="sel-btn-clear" title="Clear selection (Esc)" aria-label="Clear selection"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>
     </div>
 

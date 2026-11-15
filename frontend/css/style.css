@@ -229,7 +229,7 @@ input[type="number"] { -moz-appearance: textfield; }
 #selection-bar {
     position: fixed;
     left: 50%;
-    bottom: 1.5rem;
+    bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
     transform: translateX(-50%);
     z-index: 40;
     display: flex;
@@ -336,9 +336,12 @@ input[type="number"] { -moz-appearance: textfield; }
     outline-offset: 2px;
 }
 
-/* Small screens: icon-only action buttons */
+.sel-label-short { display: none; }
+
+/* Small screens: short button labels, count pill only */
 @media (max-width: 639.98px) {
-    .sel-btn span { display: none; }
+    .sel-label-long { display: none; }
+    .sel-label-short { display: inline; }
     .sel-bar-text { display: none; }
     .sel-hint { display: none; }
 }
@@ -373,4 +376,54 @@ select.settings-field.is-unchanged {
 /* Options inside the open list keep normal contrast */
 select.settings-field option {
     color: #f3f4f6;            /* gray-100 */
+}
+
+/* ------------------------------------------------------------------
+   Mobile (v4.3.3)
+   ------------------------------------------------------------------ */
+/* Safety net: nothing may widen the page past the screen. A wider page
+   makes phones zoom out, and fixed elements (selection bar, toasts) then
+   sit off-screen and drift while scrolling. */
+html,
+body {
+    overflow-x: clip;
+}
+
+@media (max-width: 639.98px) {
+    /* Full-width bar pinned to the visible bottom edge, above the home indicator */
+    #selection-bar {
+        left: 0.75rem;
+        right: 0.75rem;
+        bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
+        transform: none;
+        max-width: none;
+        justify-content: space-between;
+    }
+    #selection-bar.sel-bar-enter {
+        animation-name: sel-bar-in-mobile;
+    }
+    .sel-divider {
+        display: none;
+    }
+    .sel-btn {
+        padding: 0.625rem 0.875rem;   /* larger touch targets */
+    }
+
+    /* Keep toasts above the bar instead of underneath it */
+    body.has-selection #toast-container {
+        bottom: calc(5.25rem + env(safe-area-inset-bottom, 0px));
+    }
+    #toast-container {
+        left: 0.75rem;
+        right: 0.75rem;
+        align-items: stretch;
+    }
+    .toast {
+        max-width: none;
+    }
+}
+
+@keyframes sel-bar-in-mobile {
+    from { opacity: 0; transform: translateY(1.5rem); }
+    to   { opacity: 1; transform: translateY(0); }
 }

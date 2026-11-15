@@ -12,6 +12,8 @@
  *         header Pause/Settings buttons removed; more prominent selection bar.
  * v4.3.2: one Apply for project + settings; every field starts "Unchanged";
  *         the button counts pending changes.
+ * v4.3.3: mobile layout: toolbar wraps (no page overflow), selection bar
+ *         pinned to the visible screen bottom.
  */
 (function () {
     "use strict";
@@ -1478,30 +1480,27 @@ function applyProjectList(data) {
 
     // ---- View controls (filter + grouping), injected beside the column selector ----
     function buildViewControls() {
-        if (!colBtns.length) return;
-        var columnsRow = colBtns[0].parentElement;
-        var hostRow = columnsRow.parentElement || columnsRow;
+        var viewToolbar = document.getElementById("view-toolbar");
+        var columnsControl = document.getElementById("columns-control");
+        if (!viewToolbar) return;
         var controls = document.createElement("div");
         controls.id = "view-controls";
-        controls.className = "flex items-center gap-1 mr-4";
+        // Two nowrap clusters inside a wrapping row, so phones get two short lines
+        controls.className = "flex items-center gap-x-4 gap-y-2 flex-wrap";
         var buttonClass = "view-btn px-2 py-0.5 text-xs rounded bg-gray-800 text-gray-400 hover:bg-gray-700";
         controls.innerHTML =
-            '<span class="text-xs text-gray-500 mr-1">Show:</span>' +
-            '<button type="button" class="' + buttonClass + '" data-view-filter="all">All</button>' +
-            '<button type="button" class="' + buttonClass + '" data-view-filter="online">Online</button>' +
-            '<button type="button" class="' + buttonClass + '" data-view-filter="offline">Offline</button>' +
-            '<span class="text-xs text-gray-500 ml-3 mr-1">Group:</span>' +
-            '<button type="button" class="' + buttonClass + '" data-view-grouped="0">Flat</button>' +
-            '<button type="button" class="' + buttonClass + '" data-view-grouped="1">By project</button>';
-        // Insert before the "Columns:" label so it sits left of the column buttons
-        var columnsLabel = null;
-        for (var i = 0; i < hostRow.children.length; i++) {
-            if ((hostRow.children[i].textContent || "").indexOf("Columns") !== -1 &&
-                hostRow.children[i].contains(colBtns[0]) === false) { columnsLabel = hostRow.children[i]; break; }
-        }
-        if (columnsLabel) hostRow.insertBefore(controls, columnsLabel);
-        else hostRow.insertBefore(controls, hostRow.firstChild);
-        if (!hostRow.classList.contains("flex")) hostRow.classList.add("flex", "items-center", "flex-wrap");
+            '<div class="flex items-center gap-1 whitespace-nowrap">' +
+                '<span class="text-xs text-gray-500 mr-1">Show:</span>' +
+                '<button type="button" class="' + buttonClass + '" data-view-filter="all">All</button>' +
+                '<button type="button" class="' + buttonClass + '" data-view-filter="online">Online</button>' +
+                '<button type="button" class="' + buttonClass + '" data-view-filter="offline">Offline</button>' +
+            '</div>' +
+            '<div class="flex items-center gap-1 whitespace-nowrap">' +
+                '<span class="text-xs text-gray-500 mr-1">Group:</span>' +
+                '<button type="button" class="' + buttonClass + '" data-view-grouped="0">Flat</button>' +
+                '<button type="button" class="' + buttonClass + '" data-view-grouped="1">By project</button>' +
+            '</div>';
+        viewToolbar.insertBefore(controls, columnsControl || null);
 
         controls.addEventListener("click", function (e) {
             var filterBtn = e.target.closest("[data-view-filter]");
