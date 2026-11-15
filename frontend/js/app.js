@@ -10,6 +10,8 @@
  *         act on that selection; single-row header.
  * v4.3.1: Settings & Project is a modal opened from the selection bar;
  *         header Pause/Settings buttons removed; more prominent selection bar.
+ * v4.3.2: one Apply for project + settings; every field starts "Unchanged";
+ *         the button counts pending changes.
  */
 (function () {
     "use strict";
@@ -69,8 +71,10 @@
     var editInstanceForm = document.getElementById("edit-instance-form");
     var btnCancelEdit = document.getElementById("btn-cancel-edit");
     var projectSelect = document.getElementById("project-select");
-    var btnApplyProject = document.getElementById("btn-apply-project");
-    var projectStatus = document.getElementById("project-status");
+    var settingsDownloaderInput = document.getElementById("settings-downloader");
+    var settingsConcurrentSelect = document.getElementById("settings-concurrent");
+    var settingsRsyncInput = document.getElementById("settings-rsync");
+    var settingsApplyInFlight = false;
     var trackerBar = document.getElementById("tracker-bar");
     var trackerContent = document.getElementById("tracker-stats-content");
     var pauseModal = document.getElementById("pause-modal");
@@ -459,8 +463,7 @@ function findCardByName(name) {
             (selectionInfo.text ? ' <span class="text-gray-500">(' + escapeHtml(selectionInfo.text) + ')</span>' : "");
         settingsSelectionSummary.innerHTML = totalSelected ? selectedHtml : noneSelectedHtml;
         pauseSelectionSummary.innerHTML = totalSelected ? selectedHtml : noneSelectedHtml;
-        btnApplySettings.disabled = totalSelected === 0;
-        btnApplyProject.disabled = totalSelected === 0;
+        updateApplyButton();
         btnPauseSelected.disabled = selectionInfo.running + selectionInfo.offline === 0;
         btnResumeSelected.disabled = selectionInfo.paused === 0;
     }
@@ -950,12 +953,12 @@ activityChart.update("none");
 
     // ---- Settings Panel ----
     function openSettingsPanel() {
-        settingsStatus.textContent = "";
-        projectStatus.textContent = "";
+        // Every open starts from "Unchanged" so nothing carries over from last time
+        settingsForm.reset();
+        setSettingsStatus("", "");
         settingsPanel.classList.remove("hidden");
         updateSelectionUI();
-        var firstField = document.getElementById("project-select");
-        if (firstField) firstField.focus();
+        projectSelect.focus();
     }
     function closeSettingsPanel() { settingsPanel.classList.add("hidden"); }
     btnCloseSettings.addEventListener("click", closeSettingsPanel);
@@ -971,34 +974,150 @@ activityChart.update("none");
         if (!addInstanceModal.classList.contains("hidden")) return;   // handled by the Add modal
         if (selectedInstances.size > 0) btnSelClear.click();
     });
-    btnApplySettings.addEventListener("click", async function () {
+    // ---- Settings & Project: pending changes + single Apply ----
+    var MIN_RSYNC_THREADS = 1;
+    var MAX_RSYNC_THREADS = 40;
+
+    function setSettingsStatus(message, tone) {
+        var toneClass = { info: "text-yellow-400", ok: "text-green-400", warn: "text-amber-400", error: "text-red-400" }[tone] || "text-gray-400";
+        settingsStatus.textContent = message;
+        settingsStatus.className = "text-sm mt-4 min-h-[1.25rem] " + toneClass;
+    }
+
+    function getProjectLabel(slug) {
+        var option = projectSelect.querySelector('option[value="' + cssEscape(slug) + '"]');
+        return option ? option.textContent : slug;
+    }
+
+    // Read the form. Empty = unchanged. Returns { project, settings, labels[], error }
+    function collectPendingChanges() {
+        var pending = { project: "", settings: {}, labels: [], error: "" };
+
+        if (projectSelect.value) {
+            pending.project = projectSelect.value;
+            pending.labels.push("Project \u2192 " + getProjectLabel(projectSelect.value));
+        }
+
+        var nickname = settingsDownloaderInput.value.trim();
+        if (nickname) {
+            pending.settings.downloader = nickname;
+            pending.labels.push("Nickname \u2192 " + nickname);
+        }
+
+        if (settingsConcurrentSelect.value) {
+            pending.settings.concurrent_items = parseInt(settingsConcurrentSelect.value, 10);
+            pending.labels.push("Concurrent items \u2192 " + settingsConcurrentSelect.value);
+        }
+
+        var rsyncText = settingsRsyncInput.value.trim();
+        // A number input reports "" for unparseable text; badInput tells us it wasn't really empty
+        if (rsyncText || (settingsRsyncInput.validity && settingsRsyncInput.validity.badInput)) {
+            var rsyncThreads = Number(rsyncText);
+            if (!rsyncText || !Number.isInteger(rsyncThreads) || rsyncThreads < MIN_RSYNC_THREADS || rsyncThreads > MAX_RSYNC_THREADS) {
+                pending.error = "Rsync threads must be a whole number from " + MIN_RSYNC_THREADS + " to " + MAX_RSYNC_THREADS + ".";
+            } else {
+                pending.settings.shared_rsync_threads = rsyncThreads;
+                pending.labels.push("Rsync threads \u2192 " + rsyncThreads);
+            }
+        }
+        return pending;
+    }
+
+    function updateApplyButton() {
+        if (!btnApplySettings) return;
+        if (settingsApplyInFlight) return;   // keep "Applying…" until done
+        var pending = collectPendingChanges();
+        var selectedCount = selectedInstances.size;
+        var changeCount = pending.labels.length;
+
+        settingsRsyncInput.classList.toggle("border-red-500", !!pending.error);
+        // Dropdowns showing "Unchanged" use the same grey as the text-field placeholders
+        projectSelect.classList.toggle("is-unchanged", !projectSelect.value);
+        settingsConcurrentSelect.classList.toggle("is-unchanged", !settingsConcurrentSelect.value);
+        if (pending.error) {
+            btnApplySettings.disabled = true;
+            btnApplySettings.textContent = "Fix rsync threads";
+            btnApplySettings.title = pending.error;
+            return;
+        }
+        btnApplySettings.disabled = changeCount === 0 || selectedCount === 0;
+        btnApplySettings.textContent = changeCount === 0
+            ? "No changes"
+            : "Apply " + changeCount + " change" + (changeCount === 1 ? "" : "s");
+        btnApplySettings.title = changeCount === 0
+            ? "Change a field to enable Apply"
+            : pending.labels.join("\n");
+    }
+
+    settingsForm.addEventListener("input", updateApplyButton);
+    settingsForm.addEventListener("change", updateApplyButton);
+
+    function countResults(responseData) {
+        var results = (responseData && responseData.results) ? Object.values(responseData.results) : [];
+        var okCount = results.filter(function (r) { return r.status === "ok"; }).length;
+        return { ok: okCount, failed: results.length - okCount };
+    }
+
+    async function postBulk(url, body) {
+        var res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        if (!res.ok) throw new Error(await readErrorDetail(res));
+        return countResults(await res.json());
+    }
+
+    // Enter in any field or clicking Apply submits the form
+    settingsForm.addEventListener("submit", async function (e) {
+        e.preventDefault();
+        if (settingsApplyInFlight || btnApplySettings.disabled) return;
         var selected = getSelectedNames();
-        if (selected.length === 0) { showToast("No warriors selected", "error"); return; }
-        var formData = new FormData(settingsForm);
-        var settings = {};
-        var d = formData.get("downloader");
-        var c = formData.get("concurrent_items");
-        var r = formData.get("shared_rsync_threads");
-        if (d) settings.downloader = d;
-        if (c) settings.concurrent_items = parseInt(c);
-        if (r) settings.shared_rsync_threads = parseInt(r);
-        if (Object.keys(settings).length === 0) { showToast("No settings to apply", "error"); return; }
-        settingsStatus.textContent = "Applying...";
-        settingsStatus.className = "text-sm self-center ml-4 text-yellow-400";
+        if (selected.length === 0) { setSettingsStatus("No warriors selected.", "error"); return; }
+        var pending = collectPendingChanges();
+        if (pending.error) { setSettingsStatus(pending.error, "error"); return; }
+        if (!pending.labels.length) return;
+
+        var hasSettings = Object.keys(pending.settings).length > 0;
+        var outcomeParts = [];
+        var anyProblem = false;
+
+        settingsApplyInFlight = true;
+        btnApplySettings.disabled = true;
+        btnApplySettings.textContent = "Applying\u2026";
+        setSettingsStatus("Applying to " + selected.length + " warrior" + (selected.length === 1 ? "" : "s") + "\u2026", "info");
+
         try {
-            var res = await fetch("/api/settings/bulk", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ instance_names: selected, settings: settings }),
-            });
-            var data = await res.json();
-            var ok = Object.values(data.results).filter(function (r) { return r.status === "ok"; }).length;
-            var fail = Object.values(data.results).filter(function (r) { return r.status !== "ok"; }).length;
-            settingsStatus.textContent = ok + " updated" + (fail > 0 ? ", " + fail + " failed" : "");
-            settingsStatus.className = "text-sm self-center ml-4 " + (fail > 0 ? "text-yellow-400" : "text-green-400");
-            showToast("Settings applied to " + ok + " instance(s)", fail > 0 ? "error" : "success");
-        } catch (e) {
-            settingsStatus.textContent = "Error: " + e.message;
-            settingsStatus.className = "text-sm self-center ml-4 text-red-400";
+            // Settings first, then the project switch
+            if (hasSettings) {
+                try {
+                    var settingsResult = await postBulk("/api/settings/bulk", { instance_names: selected, settings: pending.settings });
+                    outcomeParts.push("Settings: " + settingsResult.ok + " updated" + (settingsResult.failed ? ", " + settingsResult.failed + " failed" : ""));
+                    if (settingsResult.failed) anyProblem = true;
+                } catch (settingsError) {
+                    outcomeParts.push("Settings failed: " + settingsError.message);
+                    anyProblem = true;
+                }
+            }
+            if (pending.project) {
+                try {
+                    var projectResult = await postBulk("/api/project/bulk", { instance_names: selected, project_name: pending.project });
+                    outcomeParts.push("Project: " + projectResult.ok + " switched" + (projectResult.failed ? ", " + projectResult.failed + " failed" : ""));
+                    if (projectResult.failed) anyProblem = true;
+                } catch (projectError) {
+                    outcomeParts.push("Project switch failed: " + projectError.message);
+                    anyProblem = true;
+                }
+            }
+        } finally {
+            settingsApplyInFlight = false;
+        }
+
+        var outcomeText = outcomeParts.join(" \u00B7 ");
+        if (anyProblem) {
+            // Stay open so the user can see what failed and retry
+            setSettingsStatus(outcomeText, "warn");
+            updateApplyButton();
+            showToast(outcomeText, "error");
+        } else {
+            showToast(outcomeText, "success");
+            closeSettingsPanel();
         }
     });
     // ---- Projects (sessionStorage cached) ----
@@ -1032,7 +1151,8 @@ function loadProjects() {
 function applyProjectList(data) {
     if (!Array.isArray(data)) return;
     // Backend already orders the list: ArchiveTeam's Choice first, then A-Z
-    var html = '<option value="">-- Select Project --</option>';
+    var previousValue = projectSelect.value;   // keep a choice made before a refresh
+    var html = '<option value="">Unchanged</option>';
     for (var i = 0; i < data.length; i++) {
         var item = data[i];
         var slug = typeof item === "string" ? item : (item.slug || item.name || String(item));
@@ -1045,30 +1165,10 @@ function applyProjectList(data) {
         html += '<option value="' + escapeHtml(slug) + '">' + escapeHtml(displayName) + '</option>';
     }
     projectSelect.innerHTML = html;
+    projectSelect.value = previousValue;
+    if (projectSelect.value !== previousValue) projectSelect.value = "";
+    updateApplyButton();
 }
-    btnApplyProject.addEventListener("click", async function () {
-        var slug = projectSelect.value;
-        if (!slug) { showToast("Select a project first", "error"); return; }
-        var selected = getSelectedNames();
-        if (selected.length === 0) { showToast("No warriors selected", "error"); return; }
-        projectStatus.textContent = "Applying...";
-        projectStatus.className = "text-sm ml-2 text-yellow-400";
-        try {
-            var res = await fetch("/api/project/bulk", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ instance_names: selected, project_name: slug }),
-            });
-            var data = await res.json();
-            var ok = Object.values(data.results).filter(function (r) { return r.status === "ok"; }).length;
-            projectStatus.textContent = ok + " updated";
-            projectStatus.className = "text-sm ml-2 text-green-400";
-            showToast("Project applied to " + ok + " instance(s)", "success");
-        } catch (e) {
-            projectStatus.textContent = "Error";
-            projectStatus.className = "text-sm ml-2 text-red-400";
-        }
-    });
-
     // ---- Add Instance(s) ----
     var addTabButtons = addInstanceModal.querySelectorAll("[data-add-tab]");
     var addPanes = addInstanceModal.querySelectorAll("[data-add-pane]");

@@ -355,3 +355,22 @@ body.has-selection main {
         display: none;
     }
 }
+
+/* ------------------------------------------------------------------
+   Settings & Project modal (v4.3.2)
+   "Unchanged" looks identical in text inputs (placeholder) and in
+   dropdowns (first option), so every field reads the same at rest.
+   ------------------------------------------------------------------ */
+.settings-field::placeholder {
+    color: #6b7280;            /* gray-500 */
+    opacity: 1;
+}
+
+select.settings-field.is-unchanged {
+    color: #6b7280;
+}
+
+/* Options inside the open list keep normal contrast */
+select.settings-field option {
+    color: #f3f4f6;            /* gray-100 */
+}

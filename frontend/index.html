@@ -70,40 +70,43 @@
         </div>
     </div>
 
-    <!-- Settings & Project Modal (v4.3.1: opened from the selection bar) -->
+    <!-- Settings & Project Modal (v4.3.2: one Apply for project + settings; every field starts "Unchanged") -->
     <div id="settings-panel" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-        <div class="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-            <div class="flex items-center justify-between mb-2">
-                <h2 id="settings-title" class="text-lg font-semibold">Settings &amp; Project</h2>
-            </div>
+        <form id="settings-form" novalidate class="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+            <h2 id="settings-title" class="text-lg font-semibold mb-1">Settings &amp; Project</h2>
             <p id="settings-selection-summary" class="text-sm mb-5" aria-live="polite"></p>
 
             <h3 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">Project</h3>
-            <div class="flex items-center gap-3 flex-wrap">
-                <select id="project-select" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none flex-1 min-w-[220px]" aria-label="Project">
-                    <option value="">-- Select Project --</option>
-                </select>
-                <button type="button" id="btn-apply-project" class="bg-purple-600 hover:bg-purple-700 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-2 rounded-lg transition-colors text-sm font-medium">Apply Project</button>
-            </div>
-            <p class="text-xs text-gray-500 italic mt-2">Warriors finish any in-progress items before switching.</p>
-            <p id="project-status" class="text-sm mt-1 min-h-[1.25rem]"></p>
+            <select id="project-select" name="project" class="settings-field w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none" aria-label="Project">
+                <option value="">Unchanged</option>
+            </select>
+            <p class="text-xs text-gray-500 mt-1.5">Warriors finish in-progress items before switching.</p>
 
-            <h3 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mt-5 mb-2">Warrior settings <span class="normal-case font-normal text-gray-600">(blank = leave unchanged)</span></h3>
-            <form id="settings-form" class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div><label class="block text-sm text-gray-400 mb-1">Nickname</label><input type="text" name="downloader" placeholder="Leave blank to skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
-                <div><label class="block text-sm text-gray-400 mb-1">Concurrent Items</label>
-                    <select name="concurrent_items" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
-                        <option value="">Skip</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option>
+            <h3 class="text-xs font-semibold uppercase tracking-wider text-gray-500 mt-5 mb-2">Warrior settings</h3>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                    <label for="settings-downloader" class="block text-sm text-gray-400 mb-1">Nickname</label>
+                    <input type="text" id="settings-downloader" name="downloader" maxlength="100" autocomplete="off" spellcheck="false" placeholder="Unchanged" class="settings-field w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
+                </div>
+                <div>
+                    <label for="settings-concurrent" class="block text-sm text-gray-400 mb-1">Concurrent Items</label>
+                    <select id="settings-concurrent" name="concurrent_items" class="settings-field w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
+                        <option value="">Unchanged</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option>
                     </select>
                 </div>
-                <div><label class="block text-sm text-gray-400 mb-1">Rsync Threads</label><input type="number" name="shared_rsync_threads" min="1" max="40" placeholder="Skip" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
-            </form>
-            <div class="mt-5 flex items-center gap-3 flex-wrap">
-                <button type="button" id="btn-apply-settings" class="bg-green-600 hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed px-6 py-2 rounded-lg transition-colors text-sm font-medium">Apply Settings</button>
-                <button type="button" id="btn-close-settings" class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded-lg transition-colors text-sm font-medium">Close</button>
-                <span id="settings-status" class="text-sm"></span>
+                <div>
+                    <label for="settings-rsync" class="block text-sm text-gray-400 mb-1">Rsync Threads <span class="text-gray-600">(1&ndash;40)</span></label>
+                    <input type="number" id="settings-rsync" name="shared_rsync_threads" min="1" max="40" step="1" inputmode="numeric" placeholder="Unchanged" class="settings-field w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none">
+                </div>
             </div>
-        </div>
+
+            <p id="settings-status" class="text-sm mt-4 min-h-[1.25rem]" aria-live="polite"></p>
+
+            <div class="mt-2 flex items-center justify-end gap-3">
+                <button type="button" id="btn-close-settings" class="bg-gray-700 hover:bg-gray-600 px-5 py-2 rounded-lg transition-colors text-sm font-medium">Cancel</button>
+                <button type="submit" id="btn-apply-settings" disabled class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed px-5 py-2 rounded-lg transition-colors text-sm font-semibold min-w-[9rem]">No changes</button>
+            </div>
+        </form>
     </div>
 
     <!-- Pause / Resume Modal -->
