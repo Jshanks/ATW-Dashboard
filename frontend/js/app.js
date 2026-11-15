@@ -5,6 +5,9 @@
  *         group-by-project view (Choice first, then A-Z, then paused/offline).
  * v4.2.0: optional instance name, bulk add / CSV / JSON import with preview,
  *         export link.
+ * v4.3.0: select warriors on the cards (checkbox, Shift-click ranges,
+ *         Select all, per-group checkboxes); Bulk Settings and Pause/Resume
+ *         act on that selection; single-row header.
  */
 (function () {
     "use strict";
@@ -56,8 +59,7 @@
     var btnApplySettings = document.getElementById("btn-apply-settings");
     var settingsForm = document.getElementById("settings-form");
     var settingsStatus = document.getElementById("settings-status");
-    var instanceCheckboxes = document.getElementById("instance-checkboxes");
-    var selectAllCheckbox = document.getElementById("select-all");
+    var settingsSelectionSummary = document.getElementById("settings-selection-summary");
     var addInstanceModal = document.getElementById("add-instance-modal");
     var btnAddInstance = document.getElementById("btn-add-instance");
     var btnCancelAdd = document.getElementById("btn-cancel-add");
@@ -75,8 +77,22 @@
     var btnClosePause = document.getElementById("btn-close-pause");
     var btnPauseSelected = document.getElementById("btn-pause-selected");
     var btnResumeSelected = document.getElementById("btn-resume-selected");
-    var pauseSelectAll = document.getElementById("pause-select-all");
-    var pauseInstanceList = document.getElementById("pause-instance-list");
+    var pauseSelectionSummary = document.getElementById("pause-selection-summary");
+    var connectionBadge = document.getElementById("connection-badge");
+    var selectAllVisible = document.getElementById("select-all-visible");
+    var selectionCount = document.getElementById("selection-count");
+    var selectionBar = document.getElementById("selection-bar");
+    var selectionBarText = document.getElementById("selection-bar-text");
+    var btnSelSettings = document.getElementById("btn-sel-settings");
+    var btnSelPause = document.getElementById("btn-sel-pause");
+    var btnSelClear = document.getElementById("btn-sel-clear");
+
+    // ---- Selection state (v4.3.0) ----
+    // Not persisted: a page refresh starts with nothing selected, so a bulk
+    // action can never hit warriors that were selected in an earlier session.
+    var selectedInstances = new Set();
+    var lastClickedInstance = null;   // anchor for Shift-click ranges
+    var lastGroups = [];              // groups from the latest render (grouped view)
     var pauseDuration = document.getElementById("pause-duration");
     var pauseActionStatus = document.getElementById("pause-action-status");
     var pauseBanner = document.getElementById("pause-banner");
@@ -264,10 +280,12 @@ function findCardByName(name) {
             : (group.key === GROUP_OFFLINE ? "text-red-400"
             : (group.key === GROUP_PAUSED ? "text-amber-400" : "text-blue-300"));
         return '<div class="group-header flex items-center gap-3 pt-2 pb-1 border-b border-gray-800" style="grid-column: 1 / -1;" data-group-header="' + escapeHtml(group.key) + '">' +
+            '<input type="checkbox" data-select-group="' + escapeHtml(group.key) + '" class="rounded" title="Select every warrior in this group" aria-label="Select all in ' + escapeHtml(getGroupLabel(group.key, group.members)) + '">' +
             '<button type="button" data-toggle-group="' + escapeHtml(group.key) + '" class="flex items-center gap-2 text-sm font-semibold ' + accentClass + ' hover:text-white" aria-expanded="' + (isCollapsed ? "false" : "true") + '">' +
             '<span class="text-gray-500 w-3 inline-block">' + chevron + '</span>' +
             '<span data-group-label>' + escapeHtml(getGroupLabel(group.key, group.members)) + '</span></button>' +
             '<span class="text-xs" data-group-stats>' + getGroupStatsHtml(group.members) + '</span>' +
+            '<span class="text-xs text-blue-400" data-group-selected></span>' +
             '</div>';
     }
 
@@ -288,7 +306,162 @@ function findCardByName(name) {
         return key;
     }
 
+    // ---- Selection helpers ----
+    function getVisibleInstances() {
+        var instances = dashboardState.instances || [];
+        return instances.filter(passesFilter);
+    }
+
+    // Names that are selected AND still exist, in dashboard order
+    function getSelectedNames() {
+        var instances = dashboardState.instances || [];
+        var names = [];
+        for (var i = 0; i < instances.length; i++) {
+            if (selectedInstances.has(instances[i].name)) names.push(instances[i].name);
+        }
+        return names;
+    }
+
+    function countSelectedIn(instanceList) {
+        var count = 0;
+        for (var i = 0; i < instanceList.length; i++) {
+            if (selectedInstances.has(instanceList[i].name)) count++;
+        }
+        return count;
+    }
+
+    // Select all of the given instances, or clear them if they are all selected already
+    function toggleSelectionFor(instanceList) {
+        if (!instanceList.length) return;
+        var selectAll = countSelectedIn(instanceList) < instanceList.length;
+        for (var i = 0; i < instanceList.length; i++) {
+            if (selectAll) selectedInstances.add(instanceList[i].name);
+            else selectedInstances.delete(instanceList[i].name);
+            syncCardSelection(instanceList[i].name);
+        }
+        updateSelectionUI();
+    }
+
+    function setInstanceSelected(name, isSelected) {
+        if (isSelected) selectedInstances.add(name);
+        else selectedInstances.delete(name);
+        syncCardSelection(name);
+    }
+
+    // Update one card's checkbox and highlight without re-rendering it
+    function syncCardSelection(name) {
+        var card = findCardByName(name);
+        if (!card) return;   // collapsed group or hidden by filter
+        var isSelected = selectedInstances.has(name);
+        card.classList.toggle("card-selected", isSelected);
+        var checkbox = card.querySelector("input[data-select-instance]");
+        if (checkbox) checkbox.checked = isSelected;
+    }
+
+    // Drop selections for warriors that no longer exist
+    function pruneSelection() {
+        var existingNames = new Set((dashboardState.instances || []).map(function (i) { return i.name; }));
+        selectedInstances.forEach(function (name) {
+            if (!existingNames.has(name)) selectedInstances.delete(name);
+        });
+        if (lastClickedInstance && !existingNames.has(lastClickedInstance)) lastClickedInstance = null;
+    }
+
+    // Drop selections hidden by the Show filter (called when the filter changes)
+    function pruneSelectionToVisible() {
+        var visibleNames = new Set(getVisibleInstances().map(function (i) { return i.name; }));
+        selectedInstances.forEach(function (name) {
+            if (!visibleNames.has(name)) selectedInstances.delete(name);
+        });
+    }
+
+    function setCheckboxState(checkbox, selectedCount, totalCount) {
+        if (!checkbox) return;
+        checkbox.checked = totalCount > 0 && selectedCount === totalCount;
+        checkbox.indeterminate = selectedCount > 0 && selectedCount < totalCount;
+        checkbox.disabled = totalCount === 0;
+    }
+
+    function describeSelection(selectedNames) {
+        var running = 0, paused = 0, offline = 0;
+        var instancesByName = {};
+        (dashboardState.instances || []).forEach(function (i) { instancesByName[i.name] = i; });
+        for (var i = 0; i < selectedNames.length; i++) {
+            var inst = instancesByName[selectedNames[i]];
+            if (!inst) continue;
+            if (pauseState[inst.name] !== undefined) paused++;
+            else if (inst.connection_state === "online") running++;
+            else offline++;
+        }
+        var parts = [];
+        if (running) parts.push(running + " running");
+        if (paused) parts.push(paused + " paused");
+        if (offline) parts.push(offline + " offline");
+        return { running: running, paused: paused, offline: offline, text: parts.join(" \u00B7 ") };
+    }
+
+    // Refresh every selection-dependent control (cheap; safe to call often)
+    function updateSelectionUI() {
+        var visibleInstances = getVisibleInstances();
+        var visibleSelected = countSelectedIn(visibleInstances);
+        var selectedNames = getSelectedNames();
+        var totalSelected = selectedNames.length;
+        var hiddenSelected = totalSelected - visibleSelected;
+
+        setCheckboxState(selectAllVisible, visibleSelected, visibleInstances.length);
+        selectionCount.textContent = totalSelected
+            ? totalSelected + " of " + (dashboardState.instances || []).length + " selected"
+            : "";
+
+        // Group header checkboxes and "N selected" labels
+        if (viewGrouped) {
+            for (var g = 0; g < lastGroups.length; g++) {
+                var header = grid.querySelector('[data-group-header="' + cssEscape(lastGroups[g].key) + '"]');
+                if (!header) continue;
+                var groupSelected = countSelectedIn(lastGroups[g].members);
+                setCheckboxState(header.querySelector("input[data-select-group]"), groupSelected, lastGroups[g].members.length);
+                var groupSelectedLabel = header.querySelector("[data-group-selected]");
+                if (groupSelectedLabel) {
+                    groupSelectedLabel.textContent = groupSelected
+                        ? groupSelected + " of " + lastGroups[g].members.length + " selected" : "";
+                }
+            }
+        }
+
+        // Floating selection bar
+        if (totalSelected > 0) {
+            var barText = totalSelected + " selected";
+            if (hiddenSelected > 0) barText += " (" + hiddenSelected + " hidden by filter)";
+            selectionBarText.textContent = barText;
+            selectionBar.classList.remove("hidden");
+            document.body.classList.add("has-selection");
+        } else {
+            selectionBar.classList.add("hidden");
+            document.body.classList.remove("has-selection");
+        }
+
+        // Bulk Settings panel + Pause modal summaries
+        var selectionInfo = describeSelection(selectedNames);
+        var noneSelectedHtml = '<span class="text-amber-400">No warriors selected.</span> ' +
+            '<span class="text-gray-500">Tick the checkbox on each card, Shift-click for a range, or use <strong>Select all</strong>.</span>';
+        var selectedHtml = '<span class="text-gray-300">Applies to <strong class="text-white">' + totalSelected +
+            ' selected warrior' + (totalSelected === 1 ? "" : "s") + '</strong></span>' +
+            (selectionInfo.text ? ' <span class="text-gray-500">(' + escapeHtml(selectionInfo.text) + ')</span>' : "");
+        settingsSelectionSummary.innerHTML = totalSelected ? selectedHtml : noneSelectedHtml;
+        pauseSelectionSummary.innerHTML = totalSelected ? selectedHtml : noneSelectedHtml;
+        btnApplySettings.disabled = totalSelected === 0;
+        btnApplyProject.disabled = totalSelected === 0;
+        btnPauseSelected.disabled = selectionInfo.running + selectionInfo.offline === 0;
+        btnResumeSelected.disabled = selectionInfo.paused === 0;
+    }
+
     // ---- WebSocket ----
+    function setConnectionStatus(text) {
+        wsStatusText.textContent = text;
+        // Status text is visually hidden on narrower headers; keep it as a tooltip
+        if (connectionBadge) connectionBadge.title = "Dashboard connection: " + text;
+    }
+
     function connectWebSocket() {
         var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         var wsUrl = protocol + "//" + window.location.host + "/ws";
@@ -296,7 +469,7 @@ function findCardByName(name) {
         ws.onopen = function () {
             wsReconnectDelay = 1000;
             wsIndicator.className = "w-2 h-2 rounded-full bg-green-500 pulse-online";
-            wsStatusText.textContent = "Connected";
+            setConnectionStatus("Connected");
         };
         ws.onmessage = function (event) {
     try {
@@ -320,12 +493,12 @@ function findCardByName(name) {
 };
         ws.onclose = function () {
             wsIndicator.className = "w-2 h-2 rounded-full bg-red-500";
-            wsStatusText.textContent = "Disconnected";
+            setConnectionStatus("Disconnected");
             scheduleReconnect();
         };
         ws.onerror = function () {
             wsIndicator.className = "w-2 h-2 rounded-full bg-red-500";
-            wsStatusText.textContent = "Error";
+            setConnectionStatus("Error");
         };
         if (pingIntervalId !== null) { clearInterval(pingIntervalId); }
         pingIntervalId = setInterval(function () {
@@ -337,7 +510,7 @@ function findCardByName(name) {
     function scheduleReconnect() {
         setTimeout(function () {
             wsIndicator.className = "w-2 h-2 rounded-full bg-yellow-500 pulse-connecting";
-            wsStatusText.textContent = "Reconnecting...";
+            setConnectionStatus("Reconnecting...");
             connectWebSocket();
         }, wsReconnectDelay);
         wsReconnectDelay = Math.min(wsReconnectDelay * 2, MAX_WS_RECONNECT);
@@ -372,6 +545,9 @@ function findCardByName(name) {
             '<p class="text-sm mt-2">Click <strong>Add Instance</strong> to connect your first warrior.</p></div>';
         instanceFingerprints = {};
         knownInstances = new Set();
+        selectedInstances.clear();
+        lastGroups = [];
+        updateSelectionUI();
         return;
     }
 
@@ -379,10 +555,11 @@ function findCardByName(name) {
     var structureChanged = !setsEqual(currentNames, knownInstances);
     if (structureChanged) {
         knownInstances = currentNames;
-        updateInstanceCheckboxes(state.instances);
+        pruneSelection();
     }
 
     var groups = viewGrouped ? buildGroups(state.instances) : [];
+    lastGroups = groups;
     var layoutKey = computeLayoutKey(state.instances, groups);
 
     if (structureChanged || layoutKey !== lastLayoutKey) {
@@ -417,6 +594,7 @@ function findCardByName(name) {
         }
         grid.innerHTML = html;
         lastLayoutKey = layoutKey;
+        updateSelectionUI();
         return;
     }
 
@@ -447,6 +625,7 @@ function findCardByName(name) {
             if (labelSpan && labelSpan.textContent !== newLabel) labelSpan.textContent = newLabel;
         }
     }
+    updateSelectionUI();
 }
 
     function cssEscape(value) {
@@ -508,11 +687,21 @@ function findCardByName(name) {
         }
         var errorMsg = inst.error_message ? '<p class="text-xs text-red-400 mt-2 truncate" title="' + escapeHtml(inst.error_message) + '">' + escapeHtml(inst.error_message) + '</p>' : "";
         var reconnectInfo = !isOnline && inst.reconnect_attempts > 0 ? '<span class="text-xs text-gray-500 ml-1">(attempt ' + inst.reconnect_attempts + ')</span>' : "";
-        var editBtn = '<button data-edit-instance="' + escapeHtml(inst.name) + '" class="text-gray-600 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Edit"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg></button>';
-        var removeBtn = '<button data-remove-instance="' + escapeHtml(inst.name) + '" class="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Remove"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>';
-        return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group" data-instance-name="' + escapeHtml(inst.name) + '">' +
-            '<div class="absolute top-2 right-2 flex items-center gap-1.5">' + projectBadgeHtml + editBtn + removeBtn + '</div>' +
-            '<div class="flex items-center gap-2 mb-2">' + statusDot + '<h3 class="font-semibold text-sm">' + escapeHtml(inst.name) + '</h3>' + reconnectInfo + '</div>' +
+        var editBtn = '<button data-edit-instance="' + escapeHtml(inst.name) + '" class="text-gray-600 hover:text-blue-400 " title="Edit" aria-label="Edit ' + escapeHtml(inst.name) + '"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg></button>';
+        var removeBtn = '<button data-remove-instance="' + escapeHtml(inst.name) + '" class="text-gray-600 hover:text-red-400 " title="Remove" aria-label="Remove ' + escapeHtml(inst.name) + '"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>';
+        var isSelected = selectedInstances.has(inst.name);
+        var selectBox = '<label class="card-select-hit" title="Select (Shift-click to select a range)">' +
+            '<input type="checkbox" class="rounded" data-select-instance="' + escapeHtml(inst.name) + '"' + (isSelected ? " checked" : "") +
+            ' aria-label="Select ' + escapeHtml(inst.name) + '"></label>';
+        return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group' + (isSelected ? " card-selected" : "") + '" data-instance-name="' + escapeHtml(inst.name) + '">' +
+            // Name row: the name truncates instead of running under the badge/buttons
+            // (host:port default names are long on narrow cards)
+            '<div class="flex items-center gap-2 ' + (projectBadgeHtml ? "mb-1.5" : "mb-2") + '">' + selectBox + statusDot +
+                '<h3 class="font-semibold text-sm truncate min-w-0" title="' + escapeHtml(inst.name) + '">' + escapeHtml(inst.name) + '</h3>' + reconnectInfo +
+            '</div>' +
+            // Edit/remove overlay the end of the name row on hover, so they never take width from the name
+            '<div class="card-actions absolute top-3 right-3 flex items-center gap-1.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">' + editBtn + removeBtn + '</div>' +
+            (projectBadgeHtml ? '<div class="mb-2 flex">' + projectBadgeHtml + '</div>' : '') +
             '<div class="text-xs text-gray-400 space-y-0.5">' +
 '<p><span class="text-gray-500">URL:</span> <a href="' + escapeHtml(inst.url) + '" target="_blank" class="text-blue-400 hover:text-blue-300 hover:underline">' + escapeHtml(inst.url) + '</a></p>' +
             (isOnline && !isPaused ? '<p><span class="text-gray-500">Items:</span> ' + itemsLine + '</p>' + doneHtml + bwHtml : "") +
@@ -698,43 +887,18 @@ activityChart.update("none");
         pauseBanner.classList.remove("hidden");
     }
     function populatePauseModal() {
-        var instances = dashboardState.instances || [];
-        var html = "";
-        for (var i = 0; i < instances.length; i++) {
-            var inst = instances[i];
-            var isPaused = pauseState[inst.name] !== undefined;
-            var statusHtml = "";
-            if (isPaused) {
-                var ps = pauseState[inst.name];
-                statusHtml = ps.remaining_seconds !== null
-                    ? '<span class="text-amber-400 text-xs">\u23F8 ' + fmtCountdown(ps.remaining_seconds) + ' remaining</span>'
-                    : '<span class="text-amber-400 text-xs">\u23F8 Paused indefinitely</span>';
-            } else if (inst.connection_state === "online") {
-                statusHtml = '<span class="text-green-400 text-xs">\u25CF Running</span>';
-            } else {
-                statusHtml = '<span class="text-gray-500 text-xs">\u25CB ' + inst.connection_state.replace("_", " ") + '</span>';
-            }
-            html += '<label class="flex items-center justify-between bg-gray-800 px-3 py-2 rounded-lg cursor-pointer hover:bg-gray-700 transition-colors">' +
-                '<div class="flex items-center gap-2"><input type="checkbox" class="pause-instance-cb rounded" value="' + escapeHtml(inst.name) + '" checked>' +
-                '<span class="text-sm">' + escapeHtml(inst.name) + '</span></div>' + statusHtml + '</label>';
-        }
-        pauseInstanceList.innerHTML = html;
         pauseActionStatus.textContent = "";
         pauseActionStatus.className = "text-sm mb-3";
+        updateSelectionUI();
     }
     btnPauseModal.addEventListener("click", function () {
         loadPauseStatus();
         setTimeout(function () { populatePauseModal(); pauseModal.classList.remove("hidden"); }, 200);
     });
     btnClosePause.addEventListener("click", function () { pauseModal.classList.add("hidden"); });
-    pauseSelectAll.addEventListener("change", function () {
-        var checked = pauseSelectAll.checked;
-        document.querySelectorAll(".pause-instance-cb").forEach(function (cb) { cb.checked = checked; });
-    });
     btnPauseSelected.addEventListener("click", async function () {
-        var selected = [];
-        document.querySelectorAll(".pause-instance-cb:checked").forEach(function (cb) { if (!pauseState[cb.value]) selected.push(cb.value); });
-        if (selected.length === 0) { showToast("No running instances selected", "error"); return; }
+        var selected = getSelectedNames().filter(function (name) { return !pauseState[name]; });
+        if (selected.length === 0) { showToast("No running warriors selected", "error"); return; }
         var durVal = pauseDuration.value;
         var duration = durVal ? parseFloat(durVal) : null;
         pauseActionStatus.textContent = "Pausing...";
@@ -747,13 +911,12 @@ activityChart.update("none");
             pauseActionStatus.textContent = ok + " paused" + (fail > 0 ? ", " + fail + " failed" : "");
             pauseActionStatus.className = "text-sm mb-3 " + (fail > 0 ? "text-yellow-400" : "text-green-400");
             showToast("Paused " + ok + " instance(s)", fail > 0 ? "error" : "success");
-            loadPauseStatus(); setTimeout(populatePauseModal, 500);
+            loadPauseStatus(); setTimeout(updateSelectionUI, 500);  // keep the result message visible
         } catch (e) { pauseActionStatus.textContent = "Failed: " + e.message; pauseActionStatus.className = "text-sm mb-3 text-red-400"; }
     });
     btnResumeSelected.addEventListener("click", async function () {
-        var selected = [];
-        document.querySelectorAll(".pause-instance-cb:checked").forEach(function (cb) { if (pauseState[cb.value]) selected.push(cb.value); });
-        if (selected.length === 0) { showToast("No paused instances selected", "error"); return; }
+        var selected = getSelectedNames().filter(function (name) { return !!pauseState[name]; });
+        if (selected.length === 0) { showToast("No paused warriors selected", "error"); return; }
         pauseActionStatus.textContent = "Resuming...";
         pauseActionStatus.className = "text-sm mb-3 text-yellow-400";
         try {
@@ -764,7 +927,7 @@ activityChart.update("none");
             pauseActionStatus.textContent = ok + " resumed" + (fail > 0 ? ", " + fail + " failed" : "");
             pauseActionStatus.className = "text-sm mb-3 " + (fail > 0 ? "text-yellow-400" : "text-green-400");
             showToast("Resumed " + ok + " instance(s)", fail > 0 ? "error" : "success");
-            loadPauseStatus(); setTimeout(populatePauseModal, 500);
+            loadPauseStatus(); setTimeout(updateSelectionUI, 500);  // keep the result message visible
         } catch (e) { pauseActionStatus.textContent = "Failed: " + e.message; pauseActionStatus.className = "text-sm mb-3 text-red-400"; }
     });
     btnBannerResume.addEventListener("click", async function () {
@@ -780,16 +943,19 @@ activityChart.update("none");
     });
 
     // ---- Settings Panel ----
-    btnSettingsPanel.addEventListener("click", function () { settingsPanel.classList.toggle("hidden"); });
-    btnCloseSettings.addEventListener("click", function () { settingsPanel.classList.add("hidden"); });
-    selectAllCheckbox.addEventListener("change", function () {
-        var checked = selectAllCheckbox.checked;
-        document.querySelectorAll(".instance-checkbox").forEach(function (cb) { cb.checked = checked; });
+    function openSettingsPanel() {
+        settingsPanel.classList.remove("hidden");
+        updateSelectionUI();
+        settingsPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    btnSettingsPanel.addEventListener("click", function () {
+        if (settingsPanel.classList.contains("hidden")) openSettingsPanel();
+        else settingsPanel.classList.add("hidden");
     });
+    btnCloseSettings.addEventListener("click", function () { settingsPanel.classList.add("hidden"); });
     btnApplySettings.addEventListener("click", async function () {
-        var selected = [];
-        document.querySelectorAll(".instance-checkbox:checked").forEach(function (cb) { selected.push(cb.value); });
-        if (selected.length === 0) { showToast("No instances selected", "error"); return; }
+        var selected = getSelectedNames();
+        if (selected.length === 0) { showToast("No warriors selected", "error"); return; }
         var formData = new FormData(settingsForm);
         var settings = {};
         var d = formData.get("downloader");
@@ -817,16 +983,6 @@ activityChart.update("none");
             settingsStatus.className = "text-sm self-center ml-4 text-red-400";
         }
     });
-    function updateInstanceCheckboxes(instances) {
-        var html = "";
-        for (var i = 0; i < instances.length; i++) {
-            html += '<label class="flex items-center gap-2 bg-gray-800 px-3 py-1.5 rounded-lg text-sm cursor-pointer">' +
-                '<input type="checkbox" class="instance-checkbox rounded" value="' + escapeHtml(instances[i].name) + '" checked>' +
-                escapeHtml(instances[i].name) + '</label>';
-        }
-        instanceCheckboxes.innerHTML = html;
-    }
-
     // ---- Projects (sessionStorage cached) ----
 var PROJECTS_CACHE_KEY = "atw-projects-cache-v2";  // v2: sorted list with Choice entry
 var PROJECTS_CACHE_TTL = 600000; // 10 minutes in ms
@@ -875,9 +1031,8 @@ function applyProjectList(data) {
     btnApplyProject.addEventListener("click", async function () {
         var slug = projectSelect.value;
         if (!slug) { showToast("Select a project first", "error"); return; }
-        var selected = [];
-        document.querySelectorAll(".instance-checkbox:checked").forEach(function (cb) { selected.push(cb.value); });
-        if (selected.length === 0) { showToast("No instances selected", "error"); return; }
+        var selected = getSelectedNames();
+        if (selected.length === 0) { showToast("No warriors selected", "error"); return; }
         projectStatus.textContent = "Applying...";
         projectStatus.className = "text-sm ml-2 text-yellow-400";
         try {
@@ -1235,6 +1390,7 @@ function applyProjectList(data) {
             if (filterBtn) {
                 viewFilter = filterBtn.dataset.viewFilter;
                 localStorage.setItem(VIEW_FILTER_KEY, viewFilter);
+                pruneSelectionToVisible();   // Select-all semantics follow the filter
                 updateViewButtons();
                 render();
                 return;
@@ -1269,6 +1425,42 @@ function applyProjectList(data) {
 
     // ---- Event delegation for instance cards ----
 grid.addEventListener("click", function (e) {
+    // Card checkbox (label clicks are forwarded to the input by the browser)
+    var cardCheckbox = e.target.closest("input[data-select-instance]");
+    if (cardCheckbox) {
+        var clickedName = cardCheckbox.dataset.selectInstance;
+        var newState = cardCheckbox.checked;
+        if (e.shiftKey && lastClickedInstance && lastClickedInstance !== clickedName) {
+            // Range in on-screen order (collapsed/filtered cards are not in the DOM)
+            var orderedNames = Array.prototype.map.call(
+                grid.querySelectorAll("input[data-select-instance]"),
+                function (input) { return input.dataset.selectInstance; }
+            );
+            var anchorIndex = orderedNames.indexOf(lastClickedInstance);
+            var clickedIndex = orderedNames.indexOf(clickedName);
+            if (anchorIndex !== -1 && clickedIndex !== -1) {
+                var rangeStart = Math.min(anchorIndex, clickedIndex);
+                var rangeEnd = Math.max(anchorIndex, clickedIndex);
+                for (var r = rangeStart; r <= rangeEnd; r++) setInstanceSelected(orderedNames[r], newState);
+            } else {
+                setInstanceSelected(clickedName, newState);
+            }
+        } else {
+            setInstanceSelected(clickedName, newState);
+        }
+        lastClickedInstance = clickedName;
+        updateSelectionUI();
+        return;
+    }
+    // Group header checkbox: select/clear every member, including collapsed ones
+    var groupCheckbox = e.target.closest("input[data-select-group]");
+    if (groupCheckbox) {
+        var selectedGroupKey = groupCheckbox.dataset.selectGroup;
+        for (var g = 0; g < lastGroups.length; g++) {
+            if (lastGroups[g].key === selectedGroupKey) { toggleSelectionFor(lastGroups[g].members); break; }
+        }
+        return;
+    }
     var groupToggle = e.target.closest("[data-toggle-group]");
     if (groupToggle) {
         var groupKey = groupToggle.dataset.toggleGroup;
@@ -1289,6 +1481,22 @@ grid.addEventListener("click", function (e) {
         return;
     }
 });
+
+    // ---- Select all / selection bar ----
+    selectAllVisible.addEventListener("click", function () {
+        toggleSelectionFor(getVisibleInstances());
+    });
+    btnSelClear.addEventListener("click", function () {
+        selectedInstances.forEach(function (name) { selectedInstances.delete(name); syncCardSelection(name); });
+        lastClickedInstance = null;
+        updateSelectionUI();
+    });
+    btnSelSettings.addEventListener("click", openSettingsPanel);
+    btnSelPause.addEventListener("click", function () {
+        loadPauseStatus();
+        populatePauseModal();
+        pauseModal.classList.remove("hidden");
+    });
 
     // ---- Init ----
     // ---- Version Badge (sessionStorage cached) ----
