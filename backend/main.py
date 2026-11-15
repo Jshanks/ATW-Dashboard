@@ -27,6 +27,7 @@ from backend.models import (
 )
 from backend.warrior_client import WarriorClient
 from backend import store
+from backend.store import _safe_log
 from backend import projects
 from backend import tracker
 from backend import history
@@ -50,6 +51,8 @@ tracker_task = None
 auto_resume_task = None
 
 # Pause state: {instance_name: {"project_slug": str, "paused_at": float, "resume_at": float|None}}
+# "project_slug" here is the project to RESUME with: the warrior's selected_project,
+# so a warrior on ArchiveTeam's Choice resumes as "auto", not pinned to the resolved project.
 _pause_state = {}
 
 # Supplementary WS broadcast intervals (seconds)
@@ -147,6 +150,13 @@ async def _tracker_poll_loop():
     while True:
         try:
             await asyncio.sleep(60)
+
+            # Keep WarriorHQ's ArchiveTeam's Choice target fresh (served from the
+            # 30-minute cache; only hits WarriorHQ when the cache has expired)
+            try:
+                await projects.get_projects()
+            except Exception as projects_error:
+                logger.debug("Project list refresh failed: %s", projects_error)
 
             active_pairs = {}
             for client in clients.values():
@@ -250,14 +260,19 @@ async def _auto_resume_loop():
                     to_resume.append(name)
 
             for name in to_resume:
-                slug = _pause_state[name].get("project_slug", "")
-                if name in clients and slug:
+                # Remove the entry first so a failure can never cause a retry loop every 30s
+                paused_entry = _pause_state.pop(name, {})
+                slug = paused_entry.get("project_slug", "")
+                if name not in clients or not slug:
+                    continue
+                try:
                     success = await clients[name].select_project(slug)
                     if success:
                         logger.info("Auto-resumed %s with project %s", _safe_log(name), _safe_log(slug))
                     else:
                         logger.warning("Auto-resume failed for %s", _safe_log(name))
-                del _pause_state[name]
+                except Exception as resume_error:
+                    logger.warning("Auto-resume error for %s: %s", _safe_log(name), resume_error)
 
             if to_resume:
                 _save_pause_state()
@@ -594,7 +609,9 @@ async def pause_instances(request: PauseRequest):
             continue
 
         client = clients[name]
-        slug = client.status.project_slug
+        # Save what the warrior is SET to ("auto" on ArchiveTeam's Choice), so
+        # resume restores Choice instead of pinning the resolved project
+        slug = client.status.selected_project or client.status.project_slug
 
         if not slug:
             results[name] = {"status": "error", "detail": "No project selected"}

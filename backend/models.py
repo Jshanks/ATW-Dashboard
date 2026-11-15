@@ -1,8 +1,9 @@
 """Pydantic models for the ATW Dashboard."""
-
 from __future__ import annotations
+
 from enum import Enum
 from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -55,7 +56,13 @@ class WarriorStatus(BaseModel):
     connection_state: ConnectionState = ConnectionState.OFFLINE
     reconnect_attempts: int = 0
     current_project: str = ""
+    # Project the warrior is actually running right now (resolved slug, e.g. "telegram").
+    # Used for tracker stats, history deltas, and the card badge.
     project_slug: str = ""
+    # Project the warrior is *set to* (what the user chose). Usually equals
+    # project_slug, but is "auto" when the warrior is on ArchiveTeam's Choice.
+    # Used for pause/resume and for grouping cards by project.
+    selected_project: str = ""
     downloader: str = ""
     concurrent_items: int = 0
     items: list[ItemStatus] = []
@@ -75,7 +82,7 @@ class BulkSettingsRequest(BaseModel):
 
 class BulkProjectRequest(BaseModel):
     instance_names: list[str] = Field(..., description="List of instance names to update")
-    project_name: str = Field(..., description="Project slug to select")
+    project_name: str = Field(..., description="Project slug to select ('auto' = ArchiveTeam's Choice)")
 
 
 class PauseRequest(BaseModel):

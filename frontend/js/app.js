@@ -1,5 +1,8 @@
 /**
- * ATW Dashboard -- Frontend Application v3.0
+ * ATW Dashboard -- Frontend Application
+ *
+ * v4.1.0: ArchiveTeam's Choice support, online/offline filter,
+ *         group-by-project view (Choice first, then A-Z, then paused/offline).
  */
 (function () {
     "use strict";
@@ -18,6 +21,24 @@
     var pingIntervalId = null;
     var instanceFingerprints = {};
     var dataSourceTracker = [];
+
+    // ---- View options (filter / grouping), persisted in localStorage ----
+    var AUTO_PROJECT_SLUG = "auto";
+    var AUTO_PROJECT_TITLE = "ArchiveTeam's Choice";
+    var VIEW_FILTER_KEY = "atw-view-filter";        // "all" | "online" | "offline"
+    var VIEW_GROUPED_KEY = "atw-view-grouped";      // "1" | "0"
+    var COLLAPSED_GROUPS_KEY = "atw-collapsed-groups";
+    var GROUP_PAUSED = "__paused";
+    var GROUP_OFFLINE = "__offline";
+    var GROUP_UNASSIGNED = "__unassigned";
+    var viewFilter = localStorage.getItem(VIEW_FILTER_KEY) || "all";
+    if (viewFilter !== "all" && viewFilter !== "online" && viewFilter !== "offline") viewFilter = "all";
+    var viewGrouped = localStorage.getItem(VIEW_GROUPED_KEY) === "1";
+    var collapsedGroups = {};
+    try { collapsedGroups = JSON.parse(localStorage.getItem(COLLAPSED_GROUPS_KEY) || "{}") || {}; }
+    catch (ignored) { collapsedGroups = {}; }
+    var lastLayoutKey = "";
+    var projectTitles = {};  // slug -> display title, filled from /api/projects
 
     var grid = document.getElementById("instance-grid");
     var totalOnlineEl = document.getElementById("total-online");
@@ -132,6 +153,7 @@ function getInstanceFingerprint(inst) {
     }
     return inst.connection_state + "|" +
         inst.project_slug + "|" +
+        inst.selected_project + "|" +
         inst.bandwidth_down + "|" +
         inst.bandwidth_up + "|" +
         inst.bytes_downloaded + "|" +
@@ -153,6 +175,116 @@ function findCardByName(name) {
     }
     return null;
 }
+
+    // ---- Filter / grouping helpers ----
+    function isAutoInstance(inst) {
+        return inst.selected_project === AUTO_PROJECT_SLUG;
+    }
+
+    function passesFilter(inst) {
+        var isOnline = inst.connection_state === "online";
+        if (viewFilter === "online") return isOnline;
+        if (viewFilter === "offline") return !isOnline;   // offline, connecting, auth_failed
+        return true;
+    }
+
+    function getGroupKey(inst) {
+        if (pauseState[inst.name] !== undefined) return GROUP_PAUSED;
+        if (inst.connection_state !== "online") return GROUP_OFFLINE;
+        if (isAutoInstance(inst)) return AUTO_PROJECT_SLUG;
+        return inst.project_slug || inst.selected_project || GROUP_UNASSIGNED;
+    }
+
+    function groupSortRank(groupKey) {
+        if (groupKey === AUTO_PROJECT_SLUG) return 0;
+        if (groupKey === GROUP_UNASSIGNED) return 2;
+        if (groupKey === GROUP_PAUSED) return 3;
+        if (groupKey === GROUP_OFFLINE) return 4;
+        return 1;  // real projects, sorted A-Z among themselves
+    }
+
+    function compareGroupKeys(a, b) {
+        var rankDifference = groupSortRank(a) - groupSortRank(b);
+        if (rankDifference !== 0) return rankDifference;
+        return a.toLowerCase() < b.toLowerCase() ? -1 : (a.toLowerCase() > b.toLowerCase() ? 1 : 0);
+    }
+
+    function getGroupLabel(groupKey, members) {
+        if (groupKey === AUTO_PROJECT_SLUG) {
+            // Show what Choice is currently running (from the members themselves)
+            var runningSlugs = {};
+            for (var i = 0; i < members.length; i++) {
+                if (members[i].project_slug) runningSlugs[members[i].project_slug] = true;
+            }
+            var runningList = Object.keys(runningSlugs).sort();
+            return "\u2605 " + AUTO_PROJECT_TITLE + (runningList.length ? " \u2192 " + runningList.join(", ") : "");
+        }
+        if (groupKey === GROUP_PAUSED) return "\u23F8 Paused";
+        if (groupKey === GROUP_OFFLINE) return "Offline / Connecting";
+        if (groupKey === GROUP_UNASSIGNED) return "No project selected";
+        return groupKey;
+    }
+
+    // Returns [{ key, members: [inst...] }] in display order, filter applied
+    function buildGroups(instances) {
+        var groupsByKey = {};
+        for (var i = 0; i < instances.length; i++) {
+            var inst = instances[i];
+            if (!passesFilter(inst)) continue;
+            var key = getGroupKey(inst);
+            if (!groupsByKey[key]) groupsByKey[key] = [];
+            groupsByKey[key].push(inst);
+        }
+        var orderedKeys = Object.keys(groupsByKey).sort(compareGroupKeys);
+        return orderedKeys.map(function (key) { return { key: key, members: groupsByKey[key] }; });
+    }
+
+    function getGroupStatsHtml(members) {
+        var onlineCount = 0, downTotal = 0, upTotal = 0;
+        for (var i = 0; i < members.length; i++) {
+            if (members[i].connection_state === "online") onlineCount++;
+            downTotal += members[i].bandwidth_down || 0;
+            upTotal += members[i].bandwidth_up || 0;
+        }
+        var html = '<span class="text-gray-400">' + members.length + ' warrior' + (members.length === 1 ? "" : "s") + '</span>';
+        if (onlineCount > 0) {
+            html += '<span class="text-gray-600 mx-1">&middot;</span>' +
+                '<span class="text-cyan-400">' + fmtBytes(downTotal) + ' &#x2193;</span> ' +
+                '<span class="text-orange-400">' + fmtBytes(upTotal) + ' &#x2191;</span>';
+        }
+        return html;
+    }
+
+    function renderGroupHeader(group) {
+        var isCollapsed = !!collapsedGroups[group.key];
+        var chevron = isCollapsed ? "\u25B8" : "\u25BE";
+        var accentClass = group.key === AUTO_PROJECT_SLUG ? "text-amber-300"
+            : (group.key === GROUP_OFFLINE ? "text-red-400"
+            : (group.key === GROUP_PAUSED ? "text-amber-400" : "text-blue-300"));
+        return '<div class="group-header flex items-center gap-3 pt-2 pb-1 border-b border-gray-800" style="grid-column: 1 / -1;" data-group-header="' + escapeHtml(group.key) + '">' +
+            '<button type="button" data-toggle-group="' + escapeHtml(group.key) + '" class="flex items-center gap-2 text-sm font-semibold ' + accentClass + ' hover:text-white" aria-expanded="' + (isCollapsed ? "false" : "true") + '">' +
+            '<span class="text-gray-500 w-3 inline-block">' + chevron + '</span>' +
+            '<span data-group-label>' + escapeHtml(getGroupLabel(group.key, group.members)) + '</span></button>' +
+            '<span class="text-xs" data-group-stats>' + getGroupStatsHtml(group.members) + '</span>' +
+            '</div>';
+    }
+
+    // Layout key changes whenever card ORDER/VISIBILITY must change -> full rebuild
+    function computeLayoutKey(instances, groups) {
+        var key = viewFilter + "|" + (viewGrouped ? "g" : "f") + "|";
+        if (viewGrouped) {
+            for (var g = 0; g < groups.length; g++) {
+                key += groups[g].key + (collapsedGroups[groups[g].key] ? "(c)" : "") + ":";
+                for (var m = 0; m < groups[g].members.length; m++) key += groups[g].members[m].name + ",";
+                key += ";";
+            }
+        } else {
+            for (var i = 0; i < instances.length; i++) {
+                if (passesFilter(instances[i])) key += instances[i].name + ",";
+            }
+        }
+        return key;
+    }
 
     // ---- WebSocket ----
     function connectWebSocket() {
@@ -243,34 +375,82 @@ function findCardByName(name) {
 
     var currentNames = new Set(state.instances.map(function (i) { return i.name; }));
     var structureChanged = !setsEqual(currentNames, knownInstances);
-
     if (structureChanged) {
-        // Full rebuild when instances added or removed
-        var html = "";
-        instanceFingerprints = {};
-        for (var idx = 0; idx < state.instances.length; idx++) {
-            html += renderInstanceCard(state.instances[idx]);
-            instanceFingerprints[state.instances[idx].name] = getInstanceFingerprint(state.instances[idx]);
-        }
-        grid.innerHTML = html;
         knownInstances = currentNames;
         updateInstanceCheckboxes(state.instances);
-    } else {
-        // Targeted update — only touch cards whose data actually changed
-        for (var idx = 0; idx < state.instances.length; idx++) {
-            var inst = state.instances[idx];
-            var fingerprint = getInstanceFingerprint(inst);
-            if (instanceFingerprints[inst.name] === fingerprint) {
-                continue; // Nothing changed — skip entirely
+    }
+
+    var groups = viewGrouped ? buildGroups(state.instances) : [];
+    var layoutKey = computeLayoutKey(state.instances, groups);
+
+    if (structureChanged || layoutKey !== lastLayoutKey) {
+        // Full rebuild: instances added/removed, filter/grouping changed,
+        // a warrior moved between groups, or a group was collapsed/expanded
+        var html = "";
+        instanceFingerprints = {};
+        var visibleCount = 0;
+        if (viewGrouped) {
+            for (var g = 0; g < groups.length; g++) {
+                html += renderGroupHeader(groups[g]);
+                if (collapsedGroups[groups[g].key]) continue;
+                for (var m = 0; m < groups[g].members.length; m++) {
+                    html += renderInstanceCard(groups[g].members[m]);
+                    visibleCount++;
+                }
             }
-            var card = findCardByName(inst.name);
-            if (card) {
-                card.outerHTML = renderInstanceCard(inst);
+        } else {
+            for (var idx = 0; idx < state.instances.length; idx++) {
+                if (!passesFilter(state.instances[idx])) continue;
+                html += renderInstanceCard(state.instances[idx]);
+                visibleCount++;
             }
-            instanceFingerprints[inst.name] = fingerprint;
+        }
+        // Fingerprint every instance (hidden ones too) so targeted updates stay quiet
+        for (var f = 0; f < state.instances.length; f++) {
+            instanceFingerprints[state.instances[f].name] = getInstanceFingerprint(state.instances[f]);
+        }
+        if (visibleCount === 0 && !(viewGrouped && groups.length > 0)) {
+            html = '<div class="text-center text-gray-500 py-12" style="grid-column: 1 / -1;">' +
+                '<p class="text-sm">No warriors match the <strong>' + escapeHtml(viewFilter) + '</strong> filter.</p></div>';
+        }
+        grid.innerHTML = html;
+        lastLayoutKey = layoutKey;
+        return;
+    }
+
+    // Targeted update — only touch cards whose data actually changed
+    for (var idx2 = 0; idx2 < state.instances.length; idx2++) {
+        var changedInst = state.instances[idx2];
+        var fingerprint = getInstanceFingerprint(changedInst);
+        if (instanceFingerprints[changedInst.name] === fingerprint) {
+            continue; // Nothing changed — skip entirely
+        }
+        var card = findCardByName(changedInst.name);
+        if (card) {
+            card.outerHTML = renderInstanceCard(changedInst);
+        }
+        instanceFingerprints[changedInst.name] = fingerprint;
+    }
+
+    // Refresh group header labels/stats in place (cheap: one per group)
+    if (viewGrouped) {
+        for (var h = 0; h < groups.length; h++) {
+            var header = grid.querySelector('[data-group-header="' + cssEscape(groups[h].key) + '"]');
+            if (!header) continue;
+            var statsSpan = header.querySelector("[data-group-stats]");
+            var newStats = getGroupStatsHtml(groups[h].members);
+            if (statsSpan && statsSpan.innerHTML !== newStats) statsSpan.innerHTML = newStats;
+            var labelSpan = header.querySelector("[data-group-label]");
+            var newLabel = getGroupLabel(groups[h].key, groups[h].members);
+            if (labelSpan && labelSpan.textContent !== newLabel) labelSpan.textContent = newLabel;
         }
     }
 }
+
+    function cssEscape(value) {
+        if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(value);
+        return String(value).replace(/["\\]/g, "\\$&");
+    }
 
     function renderInstanceCard(inst) {
         var stateClass = "border-state-" + inst.connection_state;
@@ -284,7 +464,11 @@ function findCardByName(name) {
                     ? '<span class="w-2.5 h-2.5 rounded-full bg-purple-500" title="Auth Failed"></span>'
                     : '<span class="w-2.5 h-2.5 rounded-full bg-red-500" title="Offline"></span>';
         var projectBadgeHtml = "";
-        if (isOnline && inst.project_slug) {
+        if (isOnline && isAutoInstance(inst)) {
+            // ArchiveTeam's Choice: star + the project it is actually running
+            var runningSlug = inst.project_slug || "resolving\u2026";
+            projectBadgeHtml = '<span class="project-badge" title="' + escapeHtml(AUTO_PROJECT_TITLE + " \u2192 " + runningSlug) + '">\u2605 ' + escapeHtml(runningSlug) + '</span>';
+        } else if (isOnline && inst.project_slug) {
             projectBadgeHtml = '<span class="project-badge" title="' + escapeHtml(inst.current_project || inst.project_slug) + '">' + escapeHtml(inst.project_slug) + '</span>';
         }
         if (isPaused) {
@@ -495,6 +679,7 @@ activityChart.update("none");
         if (!data) return;
         pauseState = data.paused || {};
         updatePauseBanner();
+        if (viewGrouped) render();  // paused warriors move to the Paused group
     }
     function updatePauseBanner() {
         var count = Object.keys(pauseState).length;
@@ -641,7 +826,7 @@ activityChart.update("none");
     }
 
     // ---- Projects (sessionStorage cached) ----
-var PROJECTS_CACHE_KEY = "atw-projects-cache";
+var PROJECTS_CACHE_KEY = "atw-projects-cache-v2";  // v2: sorted list with Choice entry
 var PROJECTS_CACHE_TTL = 600000; // 10 minutes in ms
 
 function loadProjects() {
@@ -670,11 +855,17 @@ function loadProjects() {
 
 function applyProjectList(data) {
     if (!Array.isArray(data)) return;
+    // Backend already orders the list: ArchiveTeam's Choice first, then A-Z
     var html = '<option value="">-- Select Project --</option>';
     for (var i = 0; i < data.length; i++) {
         var item = data[i];
         var slug = typeof item === "string" ? item : (item.slug || item.name || String(item));
         var displayName = typeof item === "string" ? item : (item.name || item.slug || String(item));
+        if (slug === AUTO_PROJECT_SLUG) {
+            displayName = "\u2605 " + AUTO_PROJECT_TITLE;
+            if (item.resolves_to) displayName += " (\u2192 " + item.resolves_to + ")";
+        }
+        if (typeof item === "object" && item.title) projectTitles[slug] = item.title;
         html += '<option value="' + escapeHtml(slug) + '">' + escapeHtml(displayName) + '</option>';
     }
     projectSelect.innerHTML = html;
@@ -806,8 +997,81 @@ function applyProjectList(data) {
     // Apply saved preference on load
     applyGridColumns(localStorage.getItem(GRID_COL_KEY) || "4");
 
+    // ---- View controls (filter + grouping), injected beside the column selector ----
+    function buildViewControls() {
+        if (!colBtns.length) return;
+        var columnsRow = colBtns[0].parentElement;
+        var hostRow = columnsRow.parentElement || columnsRow;
+        var controls = document.createElement("div");
+        controls.id = "view-controls";
+        controls.className = "flex items-center gap-1 mr-4";
+        var buttonClass = "view-btn px-2 py-0.5 text-xs rounded bg-gray-800 text-gray-400 hover:bg-gray-700";
+        controls.innerHTML =
+            '<span class="text-xs text-gray-500 mr-1">Show:</span>' +
+            '<button type="button" class="' + buttonClass + '" data-view-filter="all">All</button>' +
+            '<button type="button" class="' + buttonClass + '" data-view-filter="online">Online</button>' +
+            '<button type="button" class="' + buttonClass + '" data-view-filter="offline">Offline</button>' +
+            '<span class="text-xs text-gray-500 ml-3 mr-1">Group:</span>' +
+            '<button type="button" class="' + buttonClass + '" data-view-grouped="0">Flat</button>' +
+            '<button type="button" class="' + buttonClass + '" data-view-grouped="1">By project</button>';
+        // Insert before the "Columns:" label so it sits left of the column buttons
+        var columnsLabel = null;
+        for (var i = 0; i < hostRow.children.length; i++) {
+            if ((hostRow.children[i].textContent || "").indexOf("Columns") !== -1 &&
+                hostRow.children[i].contains(colBtns[0]) === false) { columnsLabel = hostRow.children[i]; break; }
+        }
+        if (columnsLabel) hostRow.insertBefore(controls, columnsLabel);
+        else hostRow.insertBefore(controls, hostRow.firstChild);
+        if (!hostRow.classList.contains("flex")) hostRow.classList.add("flex", "items-center", "flex-wrap");
+
+        controls.addEventListener("click", function (e) {
+            var filterBtn = e.target.closest("[data-view-filter]");
+            if (filterBtn) {
+                viewFilter = filterBtn.dataset.viewFilter;
+                localStorage.setItem(VIEW_FILTER_KEY, viewFilter);
+                updateViewButtons();
+                render();
+                return;
+            }
+            var groupBtn = e.target.closest("[data-view-grouped]");
+            if (groupBtn) {
+                viewGrouped = groupBtn.dataset.viewGrouped === "1";
+                localStorage.setItem(VIEW_GROUPED_KEY, viewGrouped ? "1" : "0");
+                updateViewButtons();
+                render();
+            }
+        });
+        updateViewButtons();
+    }
+
+    function updateViewButtons() {
+        var buttons = document.querySelectorAll("#view-controls .view-btn");
+        for (var i = 0; i < buttons.length; i++) {
+            var button = buttons[i];
+            var isActive = button.dataset.viewFilter !== undefined
+                ? button.dataset.viewFilter === viewFilter
+                : (button.dataset.viewGrouped === "1") === viewGrouped;
+            button.classList.toggle("bg-blue-600", isActive);
+            button.classList.toggle("text-white", isActive);
+            button.classList.toggle("bg-gray-800", !isActive);
+            button.classList.toggle("text-gray-400", !isActive);
+            button.setAttribute("aria-pressed", isActive ? "true" : "false");
+        }
+    }
+
+    buildViewControls();
+
     // ---- Event delegation for instance cards ----
 grid.addEventListener("click", function (e) {
+    var groupToggle = e.target.closest("[data-toggle-group]");
+    if (groupToggle) {
+        var groupKey = groupToggle.dataset.toggleGroup;
+        if (collapsedGroups[groupKey]) delete collapsedGroups[groupKey];
+        else collapsedGroups[groupKey] = true;
+        localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify(collapsedGroups));
+        render();
+        return;
+    }
     var editBtn = e.target.closest("[data-edit-instance]");
     if (editBtn) {
         editInstance(editBtn.dataset.editInstance);

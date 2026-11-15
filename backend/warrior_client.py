@@ -1,4 +1,14 @@
-"""Async client for communicating with ArchiveTeam Warrior instances."""
+"""Async client for communicating with ArchiveTeam Warrior instances.
+
+Project tracking uses two fields on WarriorStatus:
+  selected_project - what the warrior is SET to (e.g. "auto" for ArchiveTeam's
+                     Choice). Read from the "Your current project" section of
+                     /api/all-projects, which reports "auto" while on Choice.
+  project_slug     - what the warrior is actually RUNNING (e.g. "telegram").
+                     Read from the project.refresh event; when that is
+                     unavailable or reports "auto", falls back to WarriorHQ's
+                     current auto_project target.
+"""
 
 import asyncio
 import json
@@ -20,6 +30,7 @@ from backend.models import (
     WarriorSettings,
     WarriorStatus,
 )
+from backend.projects import AUTO_PROJECT_SLUG, get_auto_project_target, is_auto
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +132,23 @@ class WarriorClient:
     @property
     def status(self):
         return self._status
+
+    def _apply_running_slug(self, slug):
+        """Set project_slug to the project actually being run.
+
+        A real slug is used as-is. "auto" is never stored here, because the
+        tracker and history code need a real project; it is resolved to
+        WarriorHQ's current auto_project target instead. If that target is
+        unknown, the existing value is left alone rather than set to "auto".
+        """
+        if not slug or not isinstance(slug, str):
+            return
+        if is_auto(slug):
+            resolved_slug = get_auto_project_target()
+            if resolved_slug:
+                self._status.project_slug = resolved_slug
+            return
+        self._status.project_slug = slug
 
     async def start(self, poll_interval=5):
         self._running = True
@@ -249,11 +277,19 @@ class WarriorClient:
             next_heading = re.search(r'<h3[\s>]', html[section_start:], re.IGNORECASE)
             section = html[section_start:section_start + next_heading.start()] if next_heading else html[section_start:]
 
-            # Extract project slug from <input name="project_name" value="...">
+            # Extract project slug from <input name="project_name" value="...">.
+            # On ArchiveTeam's Choice this is "auto", not the resolved project.
             slug = _extract_input_value(section, "project_name")
             if slug:
-                self._status.project_slug = slug
-                logger.info("[%s] Project slug: %s", self.config.name, self._status.project_slug)
+                self._status.selected_project = slug
+                self._apply_running_slug(slug)
+                logger.info(
+                    "[%s] Selected project: %s (running: %s)",
+                    self.config.name, slug, self._status.project_slug or "unknown",
+                )
+            else:
+                # Heading present but no project form = no project selected (e.g. paused)
+                self._status.selected_project = ""
 
             # Extract display name from the first <h4>
             h4_match = re.search(r'<h4[^>]*>(.*?)</h4>', section, re.IGNORECASE | re.DOTALL)
@@ -379,9 +415,8 @@ class WarriorClient:
         project = msg.get("project", {})
         if isinstance(project, dict):
             # Extract slug directly from project data (reliable, no HTML parsing)
-            slug = project.get("name", "")
-            if slug and isinstance(slug, str):
-                self._status.project_slug = slug
+            # (on Choice, "auto" is resolved via WarriorHQ instead of stored)
+            self._apply_running_slug(project.get("name", ""))
 
             # Extract display name from HTML as fallback
             if not self._status.current_project:
@@ -550,17 +585,27 @@ class WarriorClient:
         return await self._post_settings(config_data)
 
     async def change_project(self, project_name):
-        success = await self._post_settings({"selected_project": project_name})
+        if is_auto(project_name):
+            # Use the same endpoint the warrior's own UI uses for ArchiveTeam's Choice
+            success = await self.select_project(AUTO_PROJECT_SLUG)
+        else:
+            success = await self._post_settings({"selected_project": project_name})
         if success:
-            # Optimistically set slug so badge updates immediately
-            self._status.project_slug = project_name
+            # Optimistically update so the badge and grouping change immediately
+            self._status.selected_project = project_name
+            if is_auto(project_name):
+                # Resolved target, or blank until project.refresh reports it
+                self._status.project_slug = get_auto_project_target()
+            else:
+                self._status.project_slug = project_name
             self._status.current_project = ""
             # Force reconnect to get fresh state
             self._sockjs_connected = False
         return success
 
     async def deselect_project(self):
-        slug = self._status.project_slug
+        # Deselect what the warrior is SET to ("auto" on Choice), not the resolved project
+        slug = self._status.selected_project or self._status.project_slug
         if not slug:
             logger.warning("[%s] No project slug to deselect", self.config.name)
             return False
