@@ -63,7 +63,7 @@
                 </button>
                 <button id="btn-add-instance" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg transition-colors flex items-center gap-2">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-                    Add Instance
+                    Add Instances
                 </button>
             </div>
         </div>
@@ -167,21 +167,84 @@
         </div>
     </div>
 
-    <!-- Add Instance Modal -->
-    <div id="add-instance-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-        <div class="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-md">
-            <h2 class="text-lg font-semibold mb-4">Add Warrior Instance</h2>
-            <form id="add-instance-form" class="space-y-3">
-                <div><label class="block text-sm text-gray-400 mb-1">Name</label><input type="text" name="name" required placeholder="warrior-1" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
-                <div><label class="block text-sm text-gray-400 mb-1">Host</label><input type="text" name="host" required placeholder="192.168.1.100" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
-                <div><label class="block text-sm text-gray-400 mb-1">Port</label><input type="number" name="port" value="8001" required class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
-                <div><label class="block text-sm text-gray-400 mb-1">HTTP Username (optional)</label><input type="text" name="http_username" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
-                <div><label class="block text-sm text-gray-400 mb-1">HTTP Password (optional)</label><input type="password" name="http_password" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
-                <div class="flex gap-3 pt-2">
-                    <button type="submit" class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded-lg text-sm font-medium transition-colors">Add</button>
-                    <button type="button" id="btn-cancel-add" class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded-lg text-sm font-medium transition-colors">Cancel</button>
+    <!-- Add Instance Modal (v4.2.0: Single / Bulk-Import tabs, optional name, export) -->
+    <div id="add-instance-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+        <div class="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+            <div class="flex items-center justify-between mb-4 gap-3">
+                <h2 class="text-lg font-semibold">Add Warrior Instances</h2>
+                <!-- Plain download link: works even without JavaScript -->
+                <a id="btn-export-instances" href="/api/instances/export" download
+                   class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5"
+                   title="Download all configured warriors as JSON (no passwords)">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3"/></svg>
+                    Export
+                </a>
+            </div>
+
+            <!-- Tabs -->
+            <div class="flex gap-1 mb-4 border-b border-gray-800" role="tablist">
+                <button type="button" role="tab" data-add-tab="single" aria-selected="true"
+                        class="add-tab px-4 py-2 text-sm font-medium border-b-2 border-blue-500 text-white -mb-px">Single</button>
+                <button type="button" role="tab" data-add-tab="bulk" aria-selected="false"
+                        class="add-tab px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-400 hover:text-gray-200 -mb-px">Bulk / Import</button>
+            </div>
+
+            <!-- Single -->
+            <div data-add-pane="single">
+                <form id="add-instance-form" class="space-y-3">
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div class="sm:col-span-2"><label class="block text-sm text-gray-400 mb-1">Host</label><input type="text" name="host" required placeholder="192.168.1.100" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                        <div><label class="block text-sm text-gray-400 mb-1">Port</label><input type="number" name="port" value="8001" min="1" max="65535" required class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                    </div>
+                    <div><label class="block text-sm text-gray-400 mb-1">Name <span class="text-gray-600">(optional &mdash; defaults to host:port)</span></label><input type="text" name="name" maxlength="100" placeholder="192.168.1.100:8001" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                    <details class="text-sm">
+                        <summary class="cursor-pointer text-gray-500 hover:text-gray-300 select-none">HTTP authentication (optional)</summary>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+                            <div><label class="block text-sm text-gray-400 mb-1">HTTP Username</label><input type="text" name="http_username" autocomplete="off" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                            <div><label class="block text-sm text-gray-400 mb-1">HTTP Password</label><input type="password" name="http_password" autocomplete="new-password" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none"></div>
+                        </div>
+                    </details>
+                    <div class="flex gap-3 pt-2">
+                        <button type="submit" class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded-lg text-sm font-medium transition-colors">Add</button>
+                        <button type="button" id="btn-cancel-add" class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded-lg text-sm font-medium transition-colors">Cancel</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Bulk / Import -->
+            <div data-add-pane="bulk" class="hidden space-y-3">
+                <div class="text-xs text-gray-500 bg-gray-950/60 border border-gray-800 rounded-lg p-3 font-mono leading-relaxed">
+                    <div class="text-gray-400 font-sans mb-1">One entry per line (commas/spaces also work, <span class="font-mono">#</span> starts a comment):</div>
+                    192.168.1.50:8001-8099 &nbsp;<span class="text-gray-600"># 99 warriors on one host</span><br>
+                    10.0.0.50-60 &nbsp;<span class="text-gray-600"># .50 through .60, port 8001</span><br>
+                    10.0.0.70:8002 &nbsp;<span class="text-gray-600"># single host and port</span>
+                    <div class="text-gray-400 font-sans mt-1">Or load a CSV (header with a <span class="font-mono">host</span> column; <span class="font-mono">name</span>, <span class="font-mono">port</span> optional) or a dashboard export (.json).</div>
                 </div>
-            </form>
+                <textarea id="bulk-add-text" rows="8" spellcheck="false" placeholder="192.168.1.50:8001-8099"
+                          class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none font-mono" aria-label="Warriors to add"></textarea>
+                <div class="flex items-center gap-3 flex-wrap">
+                    <label class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 px-3 py-1.5 rounded-lg cursor-pointer transition-colors">
+                        Load file&hellip;
+                        <input type="file" id="bulk-add-file" accept=".json,.csv,.txt,application/json,text/csv,text/plain" class="hidden">
+                    </label>
+                    <span id="bulk-add-file-name" class="text-xs text-gray-500"></span>
+                </div>
+
+                <!-- Preview (filled by app.js) -->
+                <div id="bulk-add-preview" class="hidden border border-gray-800 rounded-lg" aria-live="polite">
+                    <div id="bulk-add-summary" class="px-3 py-2 text-sm border-b border-gray-800"></div>
+                    <div class="max-h-56 overflow-y-auto text-xs font-mono">
+                        <div id="bulk-add-list-add" class="px-3 py-2"></div>
+                        <div id="bulk-add-list-skip" class="px-3 py-2 border-t border-gray-800"></div>
+                    </div>
+                </div>
+
+                <div class="flex gap-3 pt-1">
+                    <button type="button" id="btn-bulk-preview" class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded-lg text-sm font-medium transition-colors">Preview</button>
+                    <button type="button" id="btn-bulk-confirm" disabled class="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed px-6 py-2 rounded-lg text-sm font-medium transition-colors">Add 0 warriors</button>
+                    <button type="button" id="btn-cancel-bulk" class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded-lg text-sm font-medium transition-colors ml-auto">Cancel</button>
+                </div>
+            </div>
         </div>
     </div>
 

@@ -8,12 +8,13 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from backend.config import DashboardConfig
 from backend.models import (
     AddInstanceRequest,
+    BulkAddRequest,
     BulkProjectRequest,
     BulkSettingsRequest,
     ConnectionState,
@@ -31,6 +32,7 @@ from backend.store import _safe_log
 from backend import projects
 from backend import tracker
 from backend import history
+from backend import instance_import
 
 log_level = os.environ.get("LOG_LEVEL", "info").upper()
 logging.basicConfig(
@@ -454,6 +456,19 @@ async def list_instances():
     return _build_dashboard_state().model_dump()
 
 
+# Must be declared BEFORE /api/instances/{name}, or "export" is treated as a name
+@app.get("/api/instances/export")
+async def export_instances(include_credentials: bool = False):
+    """Download all instance configs as JSON (credentials omitted by default)."""
+    export_document = instance_import.build_export(store.get_all(), include_credentials=include_credentials)
+    file_name = "atw-instances-" + time.strftime("%Y%m%d-%H%M%S") + ".json"
+    return Response(
+        content=json.dumps(export_document, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="' + file_name + '"'},
+    )
+
+
 @app.get("/api/instances/{name}")
 async def get_instance(name):
     if name not in clients:
@@ -461,19 +476,110 @@ async def get_instance(name):
     return clients[name].status.model_dump()
 
 
+# Bulk adds start warrior connections in small batches so 99 new warriors
+# don't all open HTTP sessions in the same instant
+_BULK_START_BATCH_SIZE = 10
+_BULK_START_BATCH_DELAY_SECONDS = 0.5
+_bulk_add_lock = asyncio.Lock()
+
+
+def _create_client(instance_config):
+    return WarriorClient(instance_config, reconnect_base=config.reconnect_base, reconnect_max=config.reconnect_max)
+
+
 @app.post("/api/instances")
 async def add_instance(request: AddInstanceRequest):
-    if request.name in clients:
-        raise HTTPException(status_code=409, detail="Instance already exists: " + request.name)
+    # Validate and normalize through the same parser bulk import uses
+    single_entry = {"name": request.name or "", "host": request.host, "port": request.port}
+    try:
+        parse_result = instance_import.parse_bulk_input(json.dumps([single_entry]), store.get_all())
+    except instance_import.ImportError_ as import_error:
+        raise HTTPException(status_code=400, detail=str(import_error))
+    if parse_result["skipped"]:
+        reason = parse_result["skipped"][0]["reason"]
+        status_code = 409 if ("already" in reason or "in use" in reason) else 400
+        raise HTTPException(status_code=status_code, detail=reason)
+
+    new_entry = parse_result["to_add"][0]
+    instance_name = new_entry["name"]
+    if instance_name in clients:  # also guards against a stale store/clients mismatch
+        raise HTTPException(status_code=409, detail="Instance already exists: " + instance_name)
+
     inst_config = WarriorInstanceConfig(
-        name=request.name, host=request.host, port=request.port,
+        name=instance_name, host=new_entry["host"], port=new_entry["port"],
         http_username=request.http_username, http_password=request.http_password,
     )
-    client = WarriorClient(inst_config, reconnect_base=config.reconnect_base, reconnect_max=config.reconnect_max)
-    clients[request.name] = client
+    client = _create_client(inst_config)
+    clients[instance_name] = client
     await client.start(poll_interval=config.poll_interval)
     store.add(inst_config.model_dump())
-    return {"status": "ok", "instance": request.name}
+    return {"status": "ok", "instance": instance_name}
+
+
+@app.post("/api/instances/bulk")
+async def bulk_add_instances(request: BulkAddRequest):
+    """Bulk add / import. dry_run=True (default) returns the preview only."""
+    async with _bulk_add_lock:  # two concurrent imports can't both pass the duplicate check
+        try:
+            parse_result = instance_import.parse_bulk_input(request.text, store.get_all())
+        except instance_import.ImportError_ as import_error:
+            raise HTTPException(status_code=400, detail=str(import_error))
+
+        # Hide credentials in the preview/response
+        preview_to_add = [
+            {"name": entry["name"], "host": entry["host"], "port": entry["port"]}
+            for entry in parse_result["to_add"]
+        ]
+        response_body = {
+            "dry_run": request.dry_run,
+            "format": parse_result["format"],
+            "to_add": preview_to_add,
+            "skipped": parse_result["skipped"],
+            "added_count": 0,
+        }
+        if request.dry_run or not parse_result["to_add"]:
+            return response_body
+
+        new_configs = []
+        for entry in parse_result["to_add"]:
+            if entry["name"] in clients:
+                continue  # defensive: clients/store drift
+            new_configs.append(WarriorInstanceConfig(
+                name=entry["name"], host=entry["host"], port=entry["port"],
+                http_username=entry.get("http_username"), http_password=entry.get("http_password"),
+            ))
+
+        # Persist once for the whole batch
+        saved_instances = store.get_all()
+        saved_instances.extend(instance_config.model_dump() for instance_config in new_configs)
+        store.save(saved_instances)
+
+        # Register clients now (cards appear as "connecting"), start them in batches
+        new_clients = []
+        for instance_config in new_configs:
+            client = _create_client(instance_config)
+            clients[instance_config.name] = client
+            new_clients.append(client)
+
+        response_body["added_count"] = len(new_clients)
+        logger.info("Bulk import (%s): added %d, skipped %d",
+                    parse_result["format"], len(new_clients), len(parse_result["skipped"]))
+
+    asyncio.create_task(_start_clients_in_batches(new_clients))
+    return response_body
+
+
+async def _start_clients_in_batches(new_clients):
+    for batch_start in range(0, len(new_clients), _BULK_START_BATCH_SIZE):
+        for client in new_clients[batch_start:batch_start + _BULK_START_BATCH_SIZE]:
+            # Skip clients removed again before their turn came
+            if clients.get(client.config.name) is not client:
+                continue
+            try:
+                await client.start(poll_interval=config.poll_interval)
+            except Exception as start_error:
+                logger.warning("Failed to start %s: %s", _safe_log(client.config.name), start_error)
+        await asyncio.sleep(_BULK_START_BATCH_DELAY_SECONDS)
 
 
 @app.put("/api/instances/{name}")
@@ -507,8 +613,11 @@ async def edit_instance(name, request: EditInstanceRequest):
 async def remove_instance(name):
     if name not in clients:
         raise HTTPException(status_code=404, detail="Instance not found: " + name)
-    await clients[name].stop()
-    del clients[name]
+    removed_client = clients.pop(name)
+    try:
+        await removed_client.stop()
+    except Exception as stop_error:  # e.g. bulk-added client not started yet
+        logger.debug("Stop during remove of %s: %s", _safe_log(name), stop_error)
     store.remove(name)
     history.remove(name)
     _pause_state.pop(name, None)

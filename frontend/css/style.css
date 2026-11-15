@@ -98,3 +98,35 @@ input[type="number"]::-webkit-outer-spin-button {
     margin: 0;
 }
 input[type="number"] { -moz-appearance: textfield; }
+
+/* ------------------------------------------------------------------
+   Header stats: fixed-width value slots (v4.2.0)
+   The header row uses flex-wrap, so any change in the stats' width
+   (e.g. "238.6 KB/s" -> "11.12 MB/s") could push the row onto a second
+   line and back again. Reserving a constant width for each value, with
+   equal-width digits, keeps the header width independent of the numbers.
+   ------------------------------------------------------------------ */
+#total-online,
+#total-offline,
+#total-items,
+#total-dl,
+#total-ul {
+    display: inline-block;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Counts: up to 4 digits (9999) without changing width */
+#total-online,
+#total-offline,
+#total-items {
+    min-width: 4ch;
+}
+
+/* Bandwidth: widest output of fmtBytes() is "1024.00 MB/s" (12 chars).
+   Right-aligned so the unit stays in place as digits change. */
+#total-dl,
+#total-ul {
+    min-width: 12ch;
+    text-align: right;
+}

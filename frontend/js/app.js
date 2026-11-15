@@ -3,6 +3,8 @@
  *
  * v4.1.0: ArchiveTeam's Choice support, online/offline filter,
  *         group-by-project view (Choice first, then A-Z, then paused/offline).
+ * v4.2.0: optional instance name, bulk add / CSV / JSON import with preview,
+ *         export link.
  */
 (function () {
     "use strict";
@@ -894,21 +896,225 @@ function applyProjectList(data) {
         }
     });
 
-    // ---- Add Instance ----
-    btnAddInstance.addEventListener("click", function () { addInstanceModal.classList.remove("hidden"); });
-    btnCancelAdd.addEventListener("click", function () { addInstanceModal.classList.add("hidden"); });
+    // ---- Add Instance(s) ----
+    var addTabButtons = addInstanceModal.querySelectorAll("[data-add-tab]");
+    var addPanes = addInstanceModal.querySelectorAll("[data-add-pane]");
+    var bulkAddText = document.getElementById("bulk-add-text");
+    var bulkAddFile = document.getElementById("bulk-add-file");
+    var bulkAddFileName = document.getElementById("bulk-add-file-name");
+    var bulkAddPreview = document.getElementById("bulk-add-preview");
+    var bulkAddSummary = document.getElementById("bulk-add-summary");
+    var bulkAddListAdd = document.getElementById("bulk-add-list-add");
+    var bulkAddListSkip = document.getElementById("bulk-add-list-skip");
+    var btnBulkPreview = document.getElementById("btn-bulk-preview");
+    var btnBulkConfirm = document.getElementById("btn-bulk-confirm");
+    var btnCancelBulk = document.getElementById("btn-cancel-bulk");
+    var BULK_PREVIEW_LIST_LIMIT = 200;   // rows shown per list; counts are always exact
+    var MAX_IMPORT_FILE_BYTES = 450000;  // backend accepts up to 500,000 characters
+    var bulkPreviewedText = null;        // text the current preview belongs to
+
+    function showAddTab(tabName) {
+        for (var i = 0; i < addTabButtons.length; i++) {
+            var isActive = addTabButtons[i].dataset.addTab === tabName;
+            addTabButtons[i].setAttribute("aria-selected", isActive ? "true" : "false");
+            addTabButtons[i].classList.toggle("border-blue-500", isActive);
+            addTabButtons[i].classList.toggle("text-white", isActive);
+            addTabButtons[i].classList.toggle("border-transparent", !isActive);
+            addTabButtons[i].classList.toggle("text-gray-400", !isActive);
+        }
+        for (var j = 0; j < addPanes.length; j++) {
+            addPanes[j].classList.toggle("hidden", addPanes[j].dataset.addPane !== tabName);
+        }
+    }
+    for (var tabIndex = 0; tabIndex < addTabButtons.length; tabIndex++) {
+        addTabButtons[tabIndex].addEventListener("click", function () { showAddTab(this.dataset.addTab); });
+    }
+
+    function resetBulkAdd() {
+        bulkAddText.value = "";
+        bulkAddFile.value = "";
+        bulkAddFileName.textContent = "";
+        clearBulkPreview();
+    }
+
+    function clearBulkPreview() {
+        bulkPreviewedText = null;
+        bulkAddPreview.classList.add("hidden");
+        bulkAddSummary.innerHTML = "";
+        bulkAddListAdd.innerHTML = "";
+        bulkAddListSkip.innerHTML = "";
+        setConfirmButton(0);
+    }
+
+    function setConfirmButton(addCount) {
+        btnBulkConfirm.disabled = addCount < 1;
+        btnBulkConfirm.textContent = "Add " + addCount + " warrior" + (addCount === 1 ? "" : "s");
+    }
+
+    function closeAddModal() {
+        addInstanceModal.classList.add("hidden");
+        addInstanceForm.reset();
+        resetBulkAdd();
+        showAddTab("single");
+    }
+
+    async function readErrorDetail(response) {
+        try {
+            var errorBody = await response.json();
+            if (typeof errorBody.detail === "string") return errorBody.detail;
+            // FastAPI validation errors: [{loc, msg}, ...]
+            if (Array.isArray(errorBody.detail) && errorBody.detail.length) {
+                return errorBody.detail.map(function (item) {
+                    var field = Array.isArray(item.loc) ? item.loc[item.loc.length - 1] : "";
+                    return (field ? field + ": " : "") + item.msg;
+                }).join("; ");
+            }
+        } catch (ignored) { /* non-JSON error body */ }
+        return "HTTP " + response.status;
+    }
+
+    btnAddInstance.addEventListener("click", function () {
+        addInstanceModal.classList.remove("hidden");
+        var hostInput = addInstanceForm.querySelector('input[name="host"]');
+        if (hostInput) hostInput.focus();
+    });
+    btnCancelAdd.addEventListener("click", closeAddModal);
+    btnCancelBulk.addEventListener("click", closeAddModal);
+    addInstanceModal.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") closeAddModal();
+    });
+
+    // Single add: name is optional; the backend names it host:port when blank
     addInstanceForm.addEventListener("submit", async function (e) {
         e.preventDefault();
         var fd = new FormData(addInstanceForm);
-        var body = { name: fd.get("name"), host: fd.get("host"), port: parseInt(fd.get("port")) || 8001 };
+        var body = {
+            host: String(fd.get("host") || "").trim(),
+            port: parseInt(fd.get("port"), 10) || 8001
+        };
+        var typedName = String(fd.get("name") || "").trim();
+        if (typedName) body.name = typedName;
         if (fd.get("http_username")) body.http_username = fd.get("http_username");
         if (fd.get("http_password")) body.http_password = fd.get("http_password");
         try {
             var res = await fetch("/api/instances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-            if (res.ok) { showToast("Instance added: " + body.name, "success"); addInstanceModal.classList.add("hidden"); addInstanceForm.reset(); }
-            else { var err = await res.json(); showToast("Error: " + (err.detail || "Failed"), "error"); }
-        } catch (e) { showToast("Error: " + e.message, "error"); }
+            if (res.ok) {
+                var result = await res.json();
+                showToast("Instance added: " + (result.instance || body.host), "success");
+                closeAddModal();
+            } else {
+                showToast("Error: " + (await readErrorDetail(res)), "error");
+            }
+        } catch (err) { showToast("Error: " + err.message, "error"); }
     });
+
+    // Any edit to the bulk text invalidates the current preview
+    bulkAddText.addEventListener("input", function () {
+        if (bulkPreviewedText !== null && bulkAddText.value !== bulkPreviewedText) clearBulkPreview();
+    });
+
+    bulkAddFile.addEventListener("change", function () {
+        var selectedFile = bulkAddFile.files && bulkAddFile.files[0];
+        if (!selectedFile) return;
+        if (selectedFile.size > MAX_IMPORT_FILE_BYTES) {
+            showToast("File too large (" + fmtTotal(selectedFile.size) + "). Limit is " + fmtTotal(MAX_IMPORT_FILE_BYTES) + ".", "error");
+            bulkAddFile.value = "";
+            return;
+        }
+        var reader = new FileReader();
+        reader.onload = function () {
+            // Strip a UTF-8 BOM (Excel adds one to "CSV UTF-8" saves)
+            bulkAddText.value = String(reader.result || "").replace(/^\uFEFF/, "");
+            bulkAddFileName.textContent = selectedFile.name;
+            clearBulkPreview();
+            runBulkRequest(true);
+        };
+        reader.onerror = function () { showToast("Could not read " + selectedFile.name, "error"); };
+        reader.readAsText(selectedFile);
+    });
+
+    function renderBulkList(container, rows, rowToHtml, heading, headingClass) {
+        if (!rows.length) { container.innerHTML = ""; container.classList.add("hidden"); return; }
+        container.classList.remove("hidden");
+        var html = '<div class="font-sans font-semibold mb-1 ' + headingClass + '">' + heading + ' (' + rows.length + ')</div>';
+        var shownRows = rows.slice(0, BULK_PREVIEW_LIST_LIMIT);
+        for (var i = 0; i < shownRows.length; i++) html += rowToHtml(shownRows[i]);
+        if (rows.length > shownRows.length) {
+            html += '<div class="text-gray-500 font-sans mt-1">&hellip; and ' + (rows.length - shownRows.length) + ' more</div>';
+        }
+        container.innerHTML = html;
+    }
+
+    function renderBulkPreview(result) {
+        var addRows = result.to_add || [];
+        var skipRows = result.skipped || [];
+        var formatLabel = { lines: "text", csv: "CSV", json: "JSON" }[result.format] || result.format;
+        bulkAddPreview.classList.remove("hidden");
+        bulkAddSummary.innerHTML =
+            '<span class="text-green-400 font-semibold">' + addRows.length + ' to add</span>' +
+            '<span class="text-gray-600 mx-2">&middot;</span>' +
+            '<span class="' + (skipRows.length ? "text-amber-400" : "text-gray-500") + '">' + skipRows.length + ' skipped</span>' +
+            '<span class="text-gray-600 mx-2">&middot;</span>' +
+            '<span class="text-gray-500">read as ' + escapeHtml(formatLabel) + '</span>';
+        renderBulkList(bulkAddListAdd, addRows, function (row) {
+            var defaultName = (row.host.indexOf(":") !== -1 ? "[" + row.host + "]" : row.host) + ":" + row.port;
+            var customName = row.name && row.name !== defaultName
+                ? ' <span class="text-gray-500">(' + escapeHtml(row.name) + ')</span>' : "";
+            return '<div class="text-gray-300">+ ' + escapeHtml(defaultName) + customName + '</div>';
+        }, "Will add", "text-green-400");
+        renderBulkList(bulkAddListSkip, skipRows, function (row) {
+            var target = row.host ? escapeHtml(row.host + (row.port ? ":" + row.port : "")) : escapeHtml(row.source);
+            return '<div class="text-gray-400">&ndash; ' + target + ' <span class="text-amber-400/80">' + escapeHtml(row.reason) + '</span></div>';
+        }, "Skipped", "text-amber-400");
+    }
+
+    var bulkRequestInFlight = false;
+    async function runBulkRequest(isDryRun) {
+        if (bulkRequestInFlight) return;
+        var inputText = bulkAddText.value;
+        if (!inputText.trim()) { showToast("Paste warriors or load a file first", "error"); return; }
+        if (!isDryRun && inputText !== bulkPreviewedText) {
+            // Text changed after preview: preview again instead of adding blind
+            clearBulkPreview();
+            return runBulkRequest(true);
+        }
+        bulkRequestInFlight = true;
+        btnBulkPreview.disabled = true;
+        btnBulkConfirm.disabled = true;
+        try {
+            var res = await fetch("/api/instances/bulk", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: inputText, dry_run: isDryRun })
+            });
+            if (!res.ok) {
+                clearBulkPreview();
+                showToast("Import error: " + (await readErrorDetail(res)), "error");
+                return;
+            }
+            var result = await res.json();
+            if (isDryRun) {
+                bulkPreviewedText = inputText;
+                renderBulkPreview(result);
+                setConfirmButton((result.to_add || []).length);
+            } else {
+                var skippedCount = (result.skipped || []).length;
+                showToast("Added " + result.added_count + " warrior" + (result.added_count === 1 ? "" : "s") +
+                    (skippedCount ? " (" + skippedCount + " skipped)" : ""), "success");
+                closeAddModal();
+            }
+        } catch (err) {
+            showToast("Import error: " + err.message, "error");
+        } finally {
+            bulkRequestInFlight = false;
+            btnBulkPreview.disabled = false;
+            if (bulkPreviewedText !== null && bulkAddText.value === bulkPreviewedText) {
+                btnBulkConfirm.disabled = btnBulkConfirm.textContent === "Add 0 warriors";
+            }
+        }
+    }
+    btnBulkPreview.addEventListener("click", function () { runBulkRequest(true); });
+    btnBulkConfirm.addEventListener("click", function () { runBulkRequest(false); });
 
     // ---- Edit Instance ----
     btnCancelEdit.addEventListener("click", function () { editInstanceModal.classList.add("hidden"); });
