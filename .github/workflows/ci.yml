@@ -1,0 +1,199 @@
+# ---------------------------------------------------------------------------
+# ATW Dashboard CI
+#
+# Replaces codeql.yml, trivy.yml, gitleaks.yml and docker-publish.yml.
+#
+#   push main        -> scans only (CodeQL, Trivy, Gitleaks). No image.
+#   push tag v*      -> scans, then build + push image (only if scans pass)
+#   pull_request     -> scans only; a newer push to the PR cancels the old run
+#   weekly schedule  -> scans only (catches new CVEs in unchanged code)
+#   manual run       -> scans; publishes only when run against a v* tag
+#
+# One run per push, queued per branch/tag, so main and tag runs no longer
+# cancel each other.
+# ---------------------------------------------------------------------------
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly Monday 6am UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Only PRs cancel superseded runs; main/tag runs always finish
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # -------------------------------------------------------------------------
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ['python', 'javascript']
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4.39.3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4.39.3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  # -------------------------------------------------------------------------
+  trivy-fs:
+    name: Trivy filesystem scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          vuln-type: 'library'
+          severity: 'CRITICAL,HIGH'
+          format: 'sarif'
+          output: 'trivy-fs-results.sarif'
+
+      - name: Upload Trivy FS results to GitHub Security
+        uses: github/codeql-action/upload-sarif@dc73d59c2d7bd4f8194098a91219eeee6d8a1719
+        if: always()
+        with:
+          sarif_file: 'trivy-fs-results.sarif'
+          category: 'trivy-filesystem'
+
+  # -------------------------------------------------------------------------
+  trivy-image:
+    name: Trivy container scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Build Docker image (scan only, not pushed)
+        run: docker build -t atw-dashboard:scan .
+
+      - name: Run Trivy image scan
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
+        with:
+          image-ref: 'atw-dashboard:scan'
+          severity: 'CRITICAL,HIGH'
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+
+      - name: Upload Trivy image results to GitHub Security
+        uses: github/codeql-action/upload-sarif@dc73d59c2d7bd4f8194098a91219eeee6d8a1719
+        if: always()
+        with:
+          sarif_file: 'trivy-image-results.sarif'
+          category: 'trivy-container'
+
+  # -------------------------------------------------------------------------
+  # Skipped on tag pushes: a tag points at a commit that was already scanned
+  # by the main-branch run, and gitleaks-action only targets branch/PR events.
+  gitleaks:
+    name: Gitleaks secret scan
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0  # full history for scanning
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # -------------------------------------------------------------------------
+  # Release: v* tags only, and only when every scan passed
+  publish:
+    name: Build and publish image
+    needs: [codeql, trivy-fs, trivy-image, gitleaks]
+    if: >
+      always() &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.codeql.result == 'success' &&
+      needs.trivy-fs.result == 'success' &&
+      needs.trivy-image.result == 'success' &&
+      (needs.gitleaks.result == 'success' || needs.gitleaks.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Determine version
+        id: version
+        run: echo "version=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
