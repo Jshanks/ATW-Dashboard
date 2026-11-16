@@ -39,6 +39,9 @@
                 <div class="hdr-stat"><span class="text-gray-400" aria-label="Download">&#x2193;</span><span id="total-dl" class="text-cyan-400 font-bold">0 B/s</span></div>
                 <div class="hdr-stat"><span class="text-gray-400" aria-label="Upload">&#x2191;</span><span id="total-ul" class="text-orange-400 font-bold">0 B/s</span></div>
                 <div class="flex items-center gap-2 shrink-0">
+                    <button id="btn-project-health" type="button" title="Open project health monitoring" aria-label="Project Health" class="hdr-btn bg-indigo-600 hover:bg-indigo-700">
+                        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="hdr-label-keep">Project Health</span>
+                    </button>
                     <button id="btn-add-instance" type="button" title="Add warrior instances" aria-label="Add Instances" class="hdr-btn bg-blue-600 hover:bg-blue-700">
                         <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg><span class="hdr-label-keep">Add Instances</span>
                     </button>
@@ -319,6 +322,80 @@
             </div>
         </div>
     </main>
+
+    <!-- Project Health Modal (v4.5.0: monitor-only and manual failover) -->
+    <div id="project-health-modal" class="hidden fixed inset-0 bg-black/70 z-50 p-3 sm:p-6 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="project-health-title">
+        <div class="project-health-shell bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-6xl mx-auto my-2 sm:my-6">
+            <div class="sticky top-0 z-10 flex items-start justify-between gap-4 px-5 sm:px-6 py-4 bg-gray-900 border-b border-gray-800 rounded-t-xl">
+                <div>
+                    <div class="flex items-center gap-3 flex-wrap">
+                        <h2 id="project-health-title" class="text-xl font-bold text-white">Project Health</h2>
+                        <span class="px-2 py-1 rounded-full text-xs font-semibold bg-blue-950 text-blue-300 border border-blue-800">Monitor-only</span>
+                        <span class="px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">Manual failover only</span>
+                    </div>
+                    <p class="mt-1 text-sm text-gray-400">Tracks project activity and prepares a reviewed failover plan. No automatic project switching is enabled in v4.5.0.</p>
+                </div>
+                <button id="btn-close-project-health" type="button" class="text-gray-400 hover:text-white p-2 rounded-lg hover:bg-gray-800" aria-label="Close Project Health">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+
+            <div class="p-5 sm:p-6 space-y-6">
+                <div id="project-health-message" class="hidden rounded-lg border px-4 py-3 text-sm" role="status" aria-live="polite"></div>
+
+                <section aria-labelledby="project-health-status-title">
+                    <div class="flex items-center justify-between gap-3 mb-3">
+                        <h3 id="project-health-status-title" class="text-base font-semibold text-white">Current status</h3>
+                        <button id="btn-refresh-project-health" type="button" class="text-sm px-3 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 border border-gray-700">Refresh</button>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                        <div class="project-health-card"><span class="project-health-label">Primary state</span><span id="project-health-primary-state" class="project-health-value">Not configured</span></div>
+                        <div class="project-health-card"><span class="project-health-label">Baseline coverage</span><span id="project-health-coverage" class="project-health-value">0%</span><span id="project-health-baseline-detail" class="project-health-subvalue">Requires 24 hours at 90% coverage</span></div>
+                        <div class="project-health-card"><span class="project-health-label">Item activity ratio</span><span id="project-health-item-ratio" class="project-health-value">Unavailable</span></div>
+                        <div class="project-health-card"><span class="project-health-label">Byte activity ratio</span><span id="project-health-byte-ratio" class="project-health-value">Unavailable</span></div>
+                    </div>
+                    <div id="project-health-failover-status" class="mt-3 rounded-lg border border-amber-800/60 bg-amber-950/30 px-4 py-3 text-sm text-amber-300">
+                        Failover unavailable until a complete primary-project baseline exists.
+                    </div>
+                </section>
+
+                <section class="project-health-section" aria-labelledby="project-health-policy-title">
+                    <div class="flex items-start justify-between gap-3 flex-wrap">
+                        <div><h3 id="project-health-policy-title" class="text-base font-semibold text-white">Monitoring policy</h3><p class="text-sm text-gray-400 mt-1">Choose the project being evaluated and the destination used only for an operator-confirmed failover.</p></div>
+                    </div>
+                    <form id="project-health-policy-form" class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+                        <label class="block"><span class="project-health-label">Primary project</span><select id="project-health-primary-project" required class="project-health-input"><option value="">Select primary project</option></select></label>
+                        <label class="block"><span class="project-health-label">Fallback project</span><select id="project-health-fallback-project" required class="project-health-input"><option value="">Select fallback project</option></select></label>
+                        <label class="block"><span class="project-health-label">Canary allocation</span><div class="flex items-center gap-2"><input id="project-health-canary-percent" type="number" min="1" max="100" value="5" required class="project-health-input"><span class="text-gray-400">%</span></div><span class="project-health-help">Recommended 5%; minimum 3 and maximum 10 Warriors.</span></label>
+                        <div class="md:col-span-3 flex justify-end gap-3 flex-wrap">
+                            <button id="btn-save-project-health-policy" type="submit" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm font-semibold">Save policy</button>
+                            <button id="btn-freeze-project-health-baseline" type="button" disabled class="bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed px-4 py-2 rounded-lg text-sm font-semibold">Freeze complete baseline</button>
+                        </div>
+                    </form>
+                </section>
+
+                <section class="project-health-section" aria-labelledby="project-health-groups-title">
+                    <div class="flex items-start justify-between gap-3 flex-wrap"><div><h3 id="project-health-groups-title" class="text-base font-semibold text-white">Failover group preview</h3><p class="text-sm text-gray-400 mt-1">Recommendations spread Primary canaries across unique host IPs where possible.</p></div><button id="btn-preview-project-health-groups" type="button" class="bg-gray-800 hover:bg-gray-700 border border-gray-700 px-4 py-2 rounded-lg text-sm font-semibold">Generate recommendation</button></div>
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+                        <div class="rounded-lg border border-green-900/70 bg-green-950/20 p-4"><div class="flex justify-between gap-3"><h4 class="font-semibold text-green-300">Primary canaries</h4><span id="project-health-canary-count" class="text-xs text-green-400">0 Warriors</span></div><p class="project-health-help mt-1">Remain on the primary project during manual failover.</p><div id="project-health-primary-canaries" class="project-health-group-list"><p class="text-sm text-gray-500">Generate a recommendation to preview this group.</p></div></div>
+                        <div class="rounded-lg border border-blue-900/70 bg-blue-950/20 p-4"><div class="flex justify-between gap-3"><h4 class="font-semibold text-blue-300">Fallback fleet</h4><span id="project-health-fallback-count" class="text-xs text-blue-400">0 Warriors</span></div><p class="project-health-help mt-1">Switches only after explicit manual confirmation.</p><div id="project-health-fallback-fleet" class="project-health-group-list"><p class="text-sm text-gray-500">Generate a recommendation to preview this group.</p></div></div>
+                    </div>
+                    <div class="flex justify-end mt-4"><button id="btn-save-project-health-roles" type="button" disabled class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed px-4 py-2 rounded-lg text-sm font-semibold">Save group assignments</button></div>
+                </section>
+
+                <section class="project-health-section" aria-labelledby="project-health-failover-title">
+                    <h3 id="project-health-failover-title" class="text-base font-semibold text-white">Manual failover</h3>
+                    <p class="text-sm text-gray-400 mt-1">This changes the saved Fallback fleet to the configured fallback project. Primary canaries remain on the primary project.</p>
+                    <div class="mt-4 flex flex-col sm:flex-row gap-3 sm:items-end"><label class="block flex-1"><span class="project-health-label">Confirmation</span><input id="project-health-failover-confirmation" type="text" autocomplete="off" placeholder="Type FAILOVER" class="project-health-input"><span class="project-health-help">Automatic switching is not implemented. This action requires an operator.</span></label><button id="btn-execute-project-health-failover" type="button" disabled class="bg-red-700 hover:bg-red-600 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed px-5 py-2.5 rounded-lg text-sm font-semibold whitespace-nowrap">Execute manual failover</button></div>
+                </section>
+
+                <section class="project-health-section" aria-labelledby="project-health-history-title">
+                    <div class="flex items-center justify-between gap-3"><div><h3 id="project-health-history-title" class="text-base font-semibold text-white">Decision log</h3><p class="text-sm text-gray-400 mt-1">Policy, role, baseline, health-state, and manual failover decisions persist across restarts.</p></div></div>
+                    <div class="overflow-x-auto mt-3"><table class="w-full text-sm"><thead><tr class="text-left text-gray-400 border-b border-gray-800"><th class="py-2 pr-4 font-medium">Time</th><th class="py-2 pr-4 font-medium">Event</th><th class="py-2 pr-4 font-medium">Actor</th><th class="py-2 font-medium">Details</th></tr></thead><tbody id="project-health-decision-log"><tr><td colspan="4" class="py-6 text-center text-gray-500">No Project Health decisions recorded.</td></tr></tbody></table></div>
+                </section>
+            </div>
+        </div>
+    </div>
 
     <div id="toast-container" class="fixed bottom-6 right-6 flex flex-col gap-2 z-50"></div>
     <script src="/static/js/app.js"></script>

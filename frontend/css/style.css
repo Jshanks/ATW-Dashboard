@@ -483,3 +483,201 @@ body {
 @media (prefers-reduced-motion: reduce) {
     .restart-spinner { animation: none; }
 }
+
+/* --------------------------------------------------------------------------
+   Project Health modal (v4.5.0, monitor-only)
+   -------------------------------------------------------------------------- */
+.project-health-shell {
+    min-width: 0;
+}
+
+.project-health-section {
+    border: 1px solid rgb(55 65 81 / 0.85);
+    background: rgb(17 24 39 / 0.55);
+    border-radius: 0.75rem;
+    padding: 1rem;
+}
+
+.project-health-card {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.3rem;
+    border: 1px solid rgb(55 65 81 / 0.85);
+    background: rgb(17 24 39 / 0.75);
+    border-radius: 0.75rem;
+    padding: 1rem;
+}
+
+.project-health-label {
+    display: block;
+    margin-bottom: 0.35rem;
+    color: rgb(156 163 175);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.025em;
+    text-transform: uppercase;
+}
+
+.project-health-value {
+    overflow-wrap: anywhere;
+    color: rgb(243 244 246);
+    font-size: 1.05rem;
+    font-weight: 700;
+    line-height: 1.35;
+}
+
+.project-health-subvalue,
+.project-health-help {
+    color: rgb(107 114 128);
+    font-size: 0.75rem;
+    line-height: 1.45;
+}
+
+.project-health-input {
+    width: 100%;
+    min-height: 2.625rem;
+    border: 1px solid rgb(75 85 99);
+    border-radius: 0.5rem;
+    background: rgb(31 41 55);
+    color: rgb(243 244 246);
+    padding: 0.6rem 0.75rem;
+    outline: none;
+    transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.project-health-input:hover {
+    border-color: rgb(107 114 128);
+}
+
+.project-health-input:focus {
+    border-color: rgb(59 130 246);
+    box-shadow: 0 0 0 3px rgb(59 130 246 / 0.2);
+}
+
+.project-health-input:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.project-health-group-list {
+    display: flex;
+    max-height: 16rem;
+    min-height: 4.5rem;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-top: 0.8rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+}
+
+.project-health-group-item {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    border: 1px solid rgb(55 65 81 / 0.7);
+    border-radius: 0.5rem;
+    background: rgb(3 7 18 / 0.45);
+    padding: 0.55rem 0.7rem;
+}
+
+.project-health-group-item > span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.project-health-group-item > span:last-child {
+    flex: 0 0 auto;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.project-health-state-healthy {
+    color: rgb(74 222 128);
+}
+
+.project-health-state-recovering {
+    color: rgb(45 212 191);
+}
+
+.project-health-state-reduced {
+    color: rgb(250 204 21);
+}
+
+.project-health-state-stalled {
+    color: rgb(248 113 113);
+}
+
+.project-health-state-insufficient {
+    color: rgb(192 132 252);
+}
+
+.project-health-state-building {
+    color: rgb(96 165 250);
+}
+
+#project-health-decision-log td {
+    max-width: 32rem;
+    overflow-wrap: anywhere;
+}
+
+#project-health-modal button:focus-visible,
+#project-health-modal input:focus-visible,
+#project-health-modal select:focus-visible {
+    outline: 2px solid rgb(96 165 250);
+    outline-offset: 2px;
+}
+
+#project-health-modal button[data-busy="1"] {
+    cursor: wait;
+}
+
+@media (max-width: 639px) {
+    #project-health-modal {
+        padding: 0;
+    }
+
+    .project-health-shell {
+        min-height: 100dvh;
+        margin: 0;
+        border-left: 0;
+        border-right: 0;
+        border-radius: 0;
+    }
+
+    .project-health-section {
+        padding: 0.875rem;
+    }
+
+    .project-health-card {
+        padding: 0.875rem;
+    }
+
+    .project-health-group-item {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.15rem;
+    }
+
+    .project-health-group-item > span:last-child {
+        max-width: 100%;
+    }
+
+    #project-health-decision-log td,
+    #project-health-decision-log th {
+        min-width: 8rem;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .project-health-input {
+        transition: none;
+    }
+}

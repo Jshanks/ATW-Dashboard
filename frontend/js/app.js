@@ -16,6 +16,8 @@
  *         pinned to the visible screen bottom.
  * v4.4.0: immediate warrior restart, restart state on cards, and Choice
  *         labels derived from what Choice warriors actually run.
+ * v4.5.0: monitor-only Project Health policy, baseline, canary preview,
+ *         persistent decisions, and operator-confirmed manual failover.
  */
 (function () {
     "use strict";
@@ -1765,6 +1767,271 @@ function applyVersionBadge(cfg) {
         badge.classList.remove("hidden");
     }
 }
+
+    // ---- Project Health (v4.5.0, monitor-only) ----
+    var projectHealthState = null;
+    var projectHealthPreview = null;
+    var projectHealthBusy = false;
+    var projectHealthModal = document.getElementById("project-health-modal");
+    var btnProjectHealth = document.getElementById("btn-project-health");
+    var btnCloseProjectHealth = document.getElementById("btn-close-project-health");
+    var btnRefreshProjectHealth = document.getElementById("btn-refresh-project-health");
+    var projectHealthPolicyForm = document.getElementById("project-health-policy-form");
+    var primaryProjectSelect = document.getElementById("project-health-primary-project");
+    var fallbackProjectSelect = document.getElementById("project-health-fallback-project");
+    var canaryPercentInput = document.getElementById("project-health-canary-percent");
+    var btnFreezeBaseline = document.getElementById("btn-freeze-project-health-baseline");
+    var btnPreviewGroups = document.getElementById("btn-preview-project-health-groups");
+    var btnSaveRoles = document.getElementById("btn-save-project-health-roles");
+    var failoverConfirmationInput = document.getElementById("project-health-failover-confirmation");
+    var btnExecuteFailover = document.getElementById("btn-execute-project-health-failover");
+
+    function projectHealthErrorDetail(response) {
+        return response.json().then(function (data) {
+            return data && data.detail ? data.detail : "Request failed (HTTP " + response.status + ")";
+        }).catch(function () {
+            return "Request failed (HTTP " + response.status + ")";
+        });
+    }
+
+    function setProjectHealthMessage(message, type) {
+        var element = document.getElementById("project-health-message");
+        if (!element) return;
+        if (!message) {
+            element.classList.add("hidden");
+            element.textContent = "";
+            return;
+        }
+        element.className = "rounded-lg border px-4 py-3 text-sm";
+        if (type === "error") element.classList.add("border-red-800", "bg-red-950/40", "text-red-300");
+        else if (type === "success") element.classList.add("border-green-800", "bg-green-950/40", "text-green-300");
+        else element.classList.add("border-blue-800", "bg-blue-950/40", "text-blue-300");
+        element.textContent = message;
+    }
+
+    function setProjectHealthBusy(isBusy) {
+        projectHealthBusy = isBusy;
+        [btnRefreshProjectHealth, btnFreezeBaseline, btnPreviewGroups, btnSaveRoles, btnExecuteFailover].forEach(function (button) {
+            if (button) button.dataset.busy = isBusy ? "1" : "0";
+        });
+        updateProjectHealthActions();
+    }
+
+    function projectHealthRequest(url, options) {
+        options = options || {};
+        options.headers = Object.assign({ "Content-Type": "application/json" }, options.headers || {});
+        return fetch(url, options).then(function (response) {
+            if (!response.ok) return projectHealthErrorDetail(response).then(function (detail) { throw new Error(detail); });
+            return response.json();
+        });
+    }
+
+    function populateProjectHealthProjects() {
+        if (!primaryProjectSelect || !fallbackProjectSelect) return;
+        var currentPrimary = primaryProjectSelect.value;
+        var currentFallback = fallbackProjectSelect.value;
+        var slugs = Object.keys(projectTitles).filter(function (slug) { return slug && slug !== AUTO_PROJECT_SLUG; });
+        dashboardState.instances.forEach(function (instance) {
+            var slug = instance.project_slug || "";
+            if (slug && slug !== AUTO_PROJECT_SLUG && slugs.indexOf(slug) < 0) slugs.push(slug);
+        });
+        slugs.sort(function (a, b) { return String(projectTitles[a] || a).localeCompare(String(projectTitles[b] || b)); });
+        function fill(select, placeholder, selected) {
+            var html = '<option value="">' + escapeHtml(placeholder) + '</option>';
+            slugs.forEach(function (slug) {
+                html += '<option value="' + escapeHtml(slug) + '">' + escapeHtml(projectTitles[slug] || slug) + '</option>';
+            });
+            select.innerHTML = html;
+            select.value = selected || "";
+            if (selected && select.value !== selected) {
+                var option = document.createElement("option");
+                option.value = selected;
+                option.textContent = selected;
+                select.appendChild(option);
+                select.value = selected;
+            }
+        }
+        fill(primaryProjectSelect, "Select primary project", currentPrimary);
+        fill(fallbackProjectSelect, "Select fallback project", currentFallback);
+    }
+
+    function formatActivityRatio(value) {
+        if (value === null || value === undefined || !isFinite(value)) return "Unavailable";
+        return value.toFixed(2) + "x (" + Math.round(value * 100) + "%)";
+    }
+
+    function healthStateClass(state) {
+        if (state === "Healthy") return "project-health-state-healthy";
+        if (state === "Recovering") return "project-health-state-recovering";
+        if (state === "Reduced activity") return "project-health-state-reduced";
+        if (state === "Likely stalled") return "project-health-state-stalled";
+        if (state === "Insufficient volume") return "project-health-state-insufficient";
+        return "project-health-state-building";
+    }
+
+    function renderProjectHealthGroup(elementId, items) {
+        var element = document.getElementById(elementId);
+        if (!element) return;
+        if (!items || !items.length) {
+            element.innerHTML = '<p class="text-sm text-gray-500">No Warriors in this group.</p>';
+            return;
+        }
+        element.innerHTML = items.map(function (item) {
+            return '<div class="project-health-group-item"><span class="font-medium text-gray-200">' + escapeHtml(item.name) + '</span><span class="text-xs text-gray-500">' + escapeHtml(item.host || "") + '</span></div>';
+        }).join("");
+    }
+
+    function roleAssignmentsToPreview(roles) {
+        var byName = {};
+        dashboardState.instances.forEach(function (instance) { byName[instance.name] = instance; });
+        var preview = { primary_canaries: [], fallback_fleet: [] };
+        Object.keys(roles || {}).sort().forEach(function (name) {
+            var instance = byName[name] || { name: name, host: "" };
+            var item = { name: name, host: instance.host || "", project: instance.project_slug || "" };
+            if (roles[name] === "primary_canary") preview.primary_canaries.push(item);
+            else if (roles[name] === "fallback_fleet") preview.fallback_fleet.push(item);
+        });
+        return preview;
+    }
+
+    function renderProjectHealthDecisionLog(entries) {
+        var body = document.getElementById("project-health-decision-log");
+        if (!body) return;
+        if (!entries || !entries.length) {
+            body.innerHTML = '<tr><td colspan="4" class="py-6 text-center text-gray-500">No Project Health decisions recorded.</td></tr>';
+            return;
+        }
+        body.innerHTML = entries.map(function (entry) {
+            var details = entry.message || "";
+            if (entry.details && entry.details.to_state) details += " (" + entry.details.to_state + ")";
+            return '<tr class="border-b border-gray-800/70 align-top"><td class="py-3 pr-4 whitespace-nowrap text-gray-400">' + escapeHtml(new Date(entry.timestamp * 1000).toLocaleString()) + '</td><td class="py-3 pr-4 text-gray-300">' + escapeHtml(String(entry.event || "").replace(/_/g, " ")) + '</td><td class="py-3 pr-4 text-gray-400">' + escapeHtml(entry.actor || "") + '</td><td class="py-3 text-gray-300">' + escapeHtml(details) + '</td></tr>';
+        }).join("");
+    }
+
+    function renderProjectHealth(state) {
+        projectHealthState = state;
+        populateProjectHealthProjects();
+        var policy = state.policy || {};
+        primaryProjectSelect.value = policy.primary_project || "";
+        fallbackProjectSelect.value = policy.fallback_project || "";
+        canaryPercentInput.value = policy.canary_percent || 5;
+        var evaluation = (state.health || {})[policy.primary_project] || null;
+        var stateElement = document.getElementById("project-health-primary-state");
+        stateElement.textContent = evaluation ? evaluation.state : "Not configured";
+        stateElement.className = "project-health-value " + healthStateClass(evaluation ? evaluation.state : "Building baseline");
+        var readiness = evaluation ? evaluation.baseline : null;
+        document.getElementById("project-health-coverage").textContent = readiness ? readiness.coverage_percent.toFixed(1) + "%" : "0%";
+        document.getElementById("project-health-baseline-detail").textContent = readiness && readiness.complete ? "Complete 24-hour baseline" : "Requires 24 hours at 90% coverage";
+        document.getElementById("project-health-item-ratio").textContent = formatActivityRatio(evaluation && evaluation.item_activity_ratio);
+        document.getElementById("project-health-byte-ratio").textContent = formatActivityRatio(evaluation && evaluation.byte_activity_ratio);
+
+        var failover = state.failover || { available: false, message: "Failover unavailable." };
+        var failoverStatus = document.getElementById("project-health-failover-status");
+        failoverStatus.textContent = failover.message;
+        failoverStatus.className = "mt-3 rounded-lg border px-4 py-3 text-sm " + (failover.available ? "border-green-800/60 bg-green-950/30 text-green-300" : "border-amber-800/60 bg-amber-950/30 text-amber-300");
+
+        if (!projectHealthPreview) projectHealthPreview = roleAssignmentsToPreview(state.roles || {});
+        renderProjectHealthGroup("project-health-primary-canaries", projectHealthPreview.primary_canaries);
+        renderProjectHealthGroup("project-health-fallback-fleet", projectHealthPreview.fallback_fleet);
+        document.getElementById("project-health-canary-count").textContent = projectHealthPreview.primary_canaries.length + " Warriors";
+        document.getElementById("project-health-fallback-count").textContent = projectHealthPreview.fallback_fleet.length + " Warriors";
+        renderProjectHealthDecisionLog(state.decision_log || []);
+        updateProjectHealthActions();
+    }
+
+    function updateProjectHealthActions() {
+        if (!projectHealthState) return;
+        var policy = projectHealthState.policy || {};
+        var evaluation = (projectHealthState.health || {})[policy.primary_project];
+        var baselineComplete = Boolean(evaluation && evaluation.baseline && evaluation.baseline.complete);
+        btnFreezeBaseline.disabled = projectHealthBusy || !baselineComplete;
+        btnPreviewGroups.disabled = projectHealthBusy || !policy.primary_project || !policy.fallback_project;
+        btnSaveRoles.disabled = projectHealthBusy || !projectHealthPreview || !projectHealthPreview.primary_canaries.length;
+        var failoverAvailable = Boolean(projectHealthState.failover && projectHealthState.failover.available);
+        btnExecuteFailover.disabled = projectHealthBusy || !failoverAvailable || failoverConfirmationInput.value.trim() !== "FAILOVER";
+        btnRefreshProjectHealth.disabled = projectHealthBusy;
+    }
+
+    function loadProjectHealth() {
+        setProjectHealthBusy(true);
+        return projectHealthRequest("api/project-health").then(function (state) {
+            projectHealthPreview = null;
+            renderProjectHealth(state);
+            setProjectHealthMessage("", "info");
+        }).catch(function (error) {
+            setProjectHealthMessage(error.message, "error");
+        }).finally(function () { setProjectHealthBusy(false); });
+    }
+
+    function openProjectHealth() {
+        projectHealthModal.classList.remove("hidden");
+        document.body.classList.add("overflow-hidden");
+        loadProjectHealth();
+    }
+
+    function closeProjectHealth() {
+        projectHealthModal.classList.add("hidden");
+        document.body.classList.remove("overflow-hidden");
+        failoverConfirmationInput.value = "";
+    }
+
+    btnProjectHealth.addEventListener("click", openProjectHealth);
+    btnCloseProjectHealth.addEventListener("click", closeProjectHealth);
+    btnRefreshProjectHealth.addEventListener("click", loadProjectHealth);
+    projectHealthModal.addEventListener("click", function (event) { if (event.target === projectHealthModal) closeProjectHealth(); });
+    failoverConfirmationInput.addEventListener("input", updateProjectHealthActions);
+
+    projectHealthPolicyForm.addEventListener("submit", function (event) {
+        event.preventDefault();
+        var primaryProject = primaryProjectSelect.value;
+        var fallbackProject = fallbackProjectSelect.value;
+        var canaryPercent = parseInt(canaryPercentInput.value, 10);
+        if (!primaryProject || !fallbackProject) return setProjectHealthMessage("Select both a primary and fallback project.", "error");
+        if (primaryProject === fallbackProject) return setProjectHealthMessage("Primary and fallback projects must be different.", "error");
+        if (!Number.isInteger(canaryPercent) || canaryPercent < 1 || canaryPercent > 100) return setProjectHealthMessage("Canary allocation must be a whole number from 1 to 100.", "error");
+        setProjectHealthBusy(true);
+        projectHealthRequest("api/project-health/policy", { method: "PUT", body: JSON.stringify({ primary_project: primaryProject, fallback_project: fallbackProject, canary_percent: canaryPercent }) })
+            .then(function () { projectHealthPreview = null; showToast("Project Health policy saved", "success"); return loadProjectHealth(); })
+            .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
+            .finally(function () { setProjectHealthBusy(false); });
+    });
+
+    btnFreezeBaseline.addEventListener("click", function () {
+        setProjectHealthBusy(true);
+        projectHealthRequest("api/project-health/baseline/freeze", { method: "POST", body: JSON.stringify({ actor: "dashboard" }) })
+            .then(function () { showToast("Primary-project baseline frozen", "success"); return loadProjectHealth(); })
+            .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
+            .finally(function () { setProjectHealthBusy(false); });
+    });
+
+    btnPreviewGroups.addEventListener("click", function () {
+        var percent = parseInt(canaryPercentInput.value, 10);
+        setProjectHealthBusy(true);
+        projectHealthRequest("api/project-health/preview", { method: "POST", body: JSON.stringify({ canary_percent: percent }) })
+            .then(function (preview) { projectHealthPreview = preview; renderProjectHealthGroup("project-health-primary-canaries", preview.primary_canaries); renderProjectHealthGroup("project-health-fallback-fleet", preview.fallback_fleet); document.getElementById("project-health-canary-count").textContent = preview.primary_canaries.length + " Warriors"; document.getElementById("project-health-fallback-count").textContent = preview.fallback_fleet.length + " Warriors"; updateProjectHealthActions(); })
+            .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
+            .finally(function () { setProjectHealthBusy(false); });
+    });
+
+    btnSaveRoles.addEventListener("click", function () {
+        if (!projectHealthPreview) return;
+        setProjectHealthBusy(true);
+        projectHealthRequest("api/project-health/roles", { method: "PUT", body: JSON.stringify({ primary_canaries: projectHealthPreview.primary_canaries.map(function (item) { return item.name; }), fallback_fleet: projectHealthPreview.fallback_fleet.map(function (item) { return item.name; }) }) })
+            .then(function () { showToast("Project Health group assignments saved", "success"); return loadProjectHealth(); })
+            .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
+            .finally(function () { setProjectHealthBusy(false); });
+    });
+
+    btnExecuteFailover.addEventListener("click", function () {
+        if (failoverConfirmationInput.value.trim() !== "FAILOVER") return;
+        if (!window.confirm("Manually switch the saved Fallback fleet to the fallback project? Primary canaries will remain unchanged.")) return;
+        setProjectHealthBusy(true);
+        projectHealthRequest("api/project-health/failover", { method: "POST", body: JSON.stringify({ confirmation: "FAILOVER", actor: "dashboard" }) })
+            .then(function (result) { failoverConfirmationInput.value = ""; showToast("Manual failover finished: " + result.switched + " switched, " + result.failed + " failed", result.failed ? "info" : "success"); return loadProjectHealth(); })
+            .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
+            .finally(function () { setProjectHealthBusy(false); });
+    });
+
 
 loadConfigCached();
     connectWebSocket();

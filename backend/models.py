@@ -1,10 +1,10 @@
-"""Pydantic models for the ATW Dashboard."""
+"""Pydantic models for ATW Dashboard."""
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ItemState(str, Enum):
@@ -56,16 +56,13 @@ class WarriorStatus(BaseModel):
     connection_state: ConnectionState = ConnectionState.OFFLINE
     reconnect_attempts: int = 0
     current_project: str = ""
-    # Project the warrior is actually running right now (resolved slug, e.g. "telegram").
-    # Used for tracker stats, history deltas, and the card badge.
+    # Project the warrior is actually running right now (resolved slug).
     project_slug: str = ""
-    # Project the warrior is *set to* (what the user chose). Usually equals
-    # project_slug, but is "auto" when the warrior is on ArchiveTeam's Choice.
-    # Used for pause/resume and for grouping cards by project.
+    # Project the warrior is set to. This is "auto" on ArchiveTeam's Choice.
     selected_project: str = ""
     downloader: str = ""
     concurrent_items: int = 0
-    items: list[ItemStatus] = []
+    items: list[ItemStatus] = Field(default_factory=list)
     last_seen: Optional[str] = None
     error_message: str = ""
     bandwidth_down: float = 0.0
@@ -73,8 +70,6 @@ class WarriorStatus(BaseModel):
     bytes_downloaded: int = 0
     bytes_uploaded: int = 0
     completed_items: int = 0
-    # v4.4.0: True from a "Restart now" (/api/stop_now) until the warrior has
-    # gone offline and come back, or the restart window times out
     restarting: bool = False
 
 
@@ -85,16 +80,29 @@ class BulkSettingsRequest(BaseModel):
 
 class BulkProjectRequest(BaseModel):
     instance_names: list[str] = Field(..., description="List of instance names to update")
-    project_name: str = Field(..., description="Project slug to select ('auto' = ArchiveTeam's Choice)")
+    project_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        description="Project slug to select ('auto' = ArchiveTeam's Choice)",
+    )
 
 
 class RestartRequest(BaseModel):
-    instance_names: list[str] = Field(..., description="Warriors to restart immediately (/api/stop_now)")
+    instance_names: list[str] = Field(
+        ...,
+        description="Warriors to restart immediately (/api/stop_now)",
+    )
 
 
 class PauseRequest(BaseModel):
     instance_names: list[str] = Field(..., description="List of instance names to pause")
-    duration_hours: Optional[float] = Field(None, description="Hours until auto-resume. None = indefinite")
+    duration_hours: Optional[float] = Field(
+        None,
+        gt=0,
+        le=24 * 365,
+        description="Hours until auto-resume. None = indefinite",
+    )
 
 
 class ResumeRequest(BaseModel):
@@ -102,8 +110,7 @@ class ResumeRequest(BaseModel):
 
 
 class AddInstanceRequest(BaseModel):
-    # Optional: when blank, the backend names the instance "host:port"
-    # (unique by definition, since duplicate host:port pairs are rejected)
+    # Optional: when blank, the backend names the instance "host:port".
     name: Optional[str] = Field(None, max_length=100)
     host: str = Field(..., min_length=1, max_length=253)
     port: int = Field(8001, ge=1, le=65535)
@@ -112,30 +119,170 @@ class AddInstanceRequest(BaseModel):
 
 
 class BulkAddRequest(BaseModel):
-    """Bulk add / import. `text` may be any of:
-      - line syntax, one entry per line (or comma/space separated):
-            192.168.1.50                 -> port 8001
-            192.168.1.50:8002
-            192.168.1.50:8001-8099       -> port range on one host
-            192.168.1.50-60              -> last-octet IP range, port 8001
-            192.168.1.50-60:8001         -> IP range with explicit port
-      - CSV with a header row containing host (name, port optional)
-      - JSON exported from /api/instances/export
-    dry_run=True returns the preview (to_add / skipped) without changing anything.
+    """Bulk add / import request.
+
+    ``text`` may contain line syntax, CSV with a host column, or a dashboard
+    JSON export. A dry run returns the preview without changing the fleet.
     """
+
     text: str = Field(..., max_length=500_000)
     dry_run: bool = True
 
 
 class EditInstanceRequest(BaseModel):
-    host: Optional[str] = None
-    port: Optional[int] = None
+    host: Optional[str] = Field(None, min_length=1, max_length=253)
+    port: Optional[int] = Field(None, ge=1, le=65535)
     http_username: Optional[str] = None
     http_password: Optional[str] = None
 
 
 class DashboardState(BaseModel):
-    instances: list[WarriorStatus] = []
+    instances: list[WarriorStatus] = Field(default_factory=list)
     total_online: int = 0
     total_offline: int = 0
     total_items_active: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Project Health and manual failover planning (v4.5.0)
+# ---------------------------------------------------------------------------
+
+
+def _clean_name_list(values: list[str]) -> list[str]:
+    """Trim, remove blanks, and preserve order while removing duplicates."""
+    cleaned_values = []
+    seen_values = set()
+    for raw_value in values:
+        value = str(raw_value).strip()
+        if not value or value in seen_values:
+            continue
+        cleaned_values.append(value)
+        seen_values.add(value)
+    return cleaned_values
+
+
+class ProjectHealthPolicyRequest(BaseModel):
+    """Persistent monitor-only Project Health policy."""
+
+    primary_project: str = Field(..., min_length=1, max_length=200)
+    fallback_project: str = Field(..., min_length=1, max_length=200)
+    canary_percent: int = Field(
+        5,
+        ge=1,
+        le=100,
+        description=(
+            "Percentage used to calculate the canary group. The backend applies "
+            "a minimum of 3 and maximum of 10 canaries. Five percent is recommended."
+        ),
+    )
+
+    @field_validator("primary_project", "fallback_project")
+    @classmethod
+    def normalize_project_slug(cls, value: str) -> str:
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError("Project slug cannot be blank")
+        return normalized_value
+
+    @model_validator(mode="after")
+    def projects_must_be_different(self):
+        if self.primary_project == self.fallback_project:
+            raise ValueError("Primary and fallback projects must be different")
+        return self
+
+
+class ProjectHealthPreviewRequest(BaseModel):
+    """Request a fresh canary recommendation without saving assignments."""
+
+    canary_percent: Optional[int] = Field(
+        None,
+        ge=1,
+        le=100,
+        description="Temporary preview percentage; omitted uses the saved policy",
+    )
+
+
+class ProjectHealthRoleAssignmentRequest(BaseModel):
+    """Persist the reviewed Primary canary and Fallback fleet groups."""
+
+    primary_canaries: list[str] = Field(default_factory=list, max_length=10)
+    fallback_fleet: list[str] = Field(default_factory=list)
+
+    @field_validator("primary_canaries", "fallback_fleet")
+    @classmethod
+    def normalize_instance_names(cls, values: list[str]) -> list[str]:
+        return _clean_name_list(values)
+
+    @model_validator(mode="after")
+    def validate_assignments(self):
+        overlap = set(self.primary_canaries).intersection(self.fallback_fleet)
+        if overlap:
+            raise ValueError(
+                "Warriors cannot be assigned to both Primary canaries and Fallback fleet"
+            )
+        if self.fallback_fleet and not self.primary_canaries:
+            raise ValueError("At least one Primary canary is required when a fallback fleet is assigned")
+        return self
+
+
+class FreezeProjectHealthBaselineRequest(BaseModel):
+    """Freeze the complete primary-project baseline for ratio comparisons."""
+
+    actor: str = Field("dashboard", min_length=1, max_length=200)
+
+    @field_validator("actor")
+    @classmethod
+    def normalize_actor(cls, value: str) -> str:
+        normalized_value = value.strip()
+        return normalized_value or "dashboard"
+
+
+class ManualFailoverDecisionAction(str, Enum):
+    PREVIEWED = "previewed"
+    REQUESTED = "requested"
+    CONFIRMED = "confirmed"
+    CANCELLED = "cancelled"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ManualFailoverDecisionRequest(BaseModel):
+    """Record an operator decision without performing automatic switching."""
+
+    action: ManualFailoverDecisionAction
+    actor: str = Field("dashboard", min_length=1, max_length=200)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("actor")
+    @classmethod
+    def normalize_decision_actor(cls, value: str) -> str:
+        normalized_value = value.strip()
+        return normalized_value or "dashboard"
+
+
+class ManualFailoverRequest(BaseModel):
+    """Explicit operator request for a manual failover operation.
+
+    The endpoint using this model must still enforce baseline readiness and use
+    the persisted role assignments. This model does not enable background or
+    automatic switching.
+    """
+
+    confirmation: str = Field(
+        ...,
+        description="Must be exactly 'FAILOVER' to authorize the manual operation",
+    )
+    actor: str = Field("dashboard", min_length=1, max_length=200)
+
+    @field_validator("confirmation")
+    @classmethod
+    def require_explicit_confirmation(cls, value: str) -> str:
+        if value.strip() != "FAILOVER":
+            raise ValueError("Type FAILOVER to confirm the manual failover")
+        return "FAILOVER"
+
+    @field_validator("actor")
+    @classmethod
+    def normalize_failover_actor(cls, value: str) -> str:
+        normalized_value = value.strip()
+        return normalized_value or "dashboard"

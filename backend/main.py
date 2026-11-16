@@ -23,6 +23,12 @@ from backend.models import (
     PauseRequest,
     ResumeRequest,
     RestartRequest,
+    ProjectHealthPolicyRequest,
+    ProjectHealthPreviewRequest,
+    ProjectHealthRoleAssignmentRequest,
+    FreezeProjectHealthBaselineRequest,
+    ManualFailoverDecisionRequest,
+    ManualFailoverRequest,
     WarriorInstanceConfig,
     WarriorSettings,
     WarriorStatus,
@@ -34,6 +40,7 @@ from backend import projects
 from backend import tracker
 from backend import history
 from backend import instance_import
+from backend import project_health
 
 log_level = os.environ.get("LOG_LEVEL", "info").upper()
 logging.basicConfig(
@@ -177,10 +184,12 @@ async def _tracker_poll_loop():
             baselines_changed = False
             total_items_delta = 0
             total_bytes_delta = 0
+            sample_timestamp = time.time()
 
             for project_slug, downloader_name in active_pairs.items():
                 project_stats = await tracker.get_project_data(project_slug)
                 if not project_stats:
+                    # Do not convert a tracker outage into a zero-activity sample.
                     continue
 
                 user_stats = tracker.build_user_stats(
@@ -188,26 +197,24 @@ async def _tracker_poll_loop():
                 )
                 items_done = user_stats.get("user_items_done", 0)
                 bytes_used = user_stats.get("user_bytes", 0)
-
-                if items_done <= 0 and bytes_used <= 0:
-                    continue
-
                 baseline = _tracker_baselines.get(project_slug, {"items": 0, "bytes": 0})
                 if isinstance(baseline, (int, float)):
                     baseline = {"items": baseline, "bytes": 0}
 
                 previous_items = baseline.get("items", 0)
                 previous_bytes = baseline.get("bytes", 0)
+                items_delta = 0
+                bytes_delta = 0
 
-                # Calculate items delta
                 if previous_items > 0 and items_done >= previous_items:
-                    items_delta = items_done - previous_items
-                    if 0 < items_delta <= MAX_TRACKER_DELTA_PER_POLL:
+                    candidate_delta = items_done - previous_items
+                    if candidate_delta <= MAX_TRACKER_DELTA_PER_POLL:
+                        items_delta = candidate_delta
                         total_items_delta += items_delta
-                    elif items_delta > MAX_TRACKER_DELTA_PER_POLL:
+                    else:
                         logger.warning(
                             "Tracker items delta %d for '%s' exceeds cap %d — resetting baseline",
-                            items_delta, project_slug, MAX_TRACKER_DELTA_PER_POLL,
+                            candidate_delta, project_slug, MAX_TRACKER_DELTA_PER_POLL,
                         )
                 elif previous_items > 0 and items_done < previous_items:
                     logger.info(
@@ -215,7 +222,6 @@ async def _tracker_poll_loop():
                         project_slug, previous_items, items_done,
                     )
 
-                # Calculate bytes delta
                 if previous_bytes > 0 and bytes_used >= previous_bytes:
                     bytes_delta = bytes_used - previous_bytes
                     total_bytes_delta += bytes_delta
@@ -225,20 +231,16 @@ async def _tracker_poll_loop():
                         project_slug, previous_bytes, bytes_used,
                     )
 
-                # Update baseline
+                # Zero-delta samples are retained so 24-hour coverage is measurable.
+                project_health.record_project_activity(
+                    project_slug, items_delta, bytes_delta, timestamp=sample_timestamp
+                )
+                project_health.update_health_state_log(project_slug)
                 _tracker_baselines[project_slug] = {
                     "items": items_done,
                     "bytes": bytes_used,
                 }
                 baselines_changed = True
-
-            # Record aggregated deltas once per poll cycle
-            if total_items_delta > 0 or total_bytes_delta > 0:
-                history.record_tracker(total_items_delta, total_bytes_delta)
-                logger.debug(
-                    "Recorded tracker deltas: %d items, %d bytes",
-                    total_items_delta, total_bytes_delta,
-                )
 
             if baselines_changed:
                 _save_tracker_baselines()
@@ -296,6 +298,7 @@ async def lifespan(app):
     logger.info('Dashboard "%s" starting', config.title)
 
     history.load()
+    project_health.load()
     _load_pause_state()
     _load_tracker_baselines()
 
@@ -333,6 +336,7 @@ async def lifespan(app):
         await client.stop()
 
     history.force_save()
+    project_health.force_save()
     _save_pause_state()
     _save_tracker_baselines()
 
@@ -882,6 +886,152 @@ async def get_tracker_stats_endpoint():
 @app.get("/api/history")
 async def get_history():
     return history.get_bucketed()
+
+
+# -- Project Health (v4.5.0, monitor-only) --
+@app.get("/api/project-health")
+async def get_project_health_status():
+    return project_health.get_status(client.status for client in clients.values())
+
+
+@app.get("/api/project-health/history")
+async def get_project_health_history(project: str = ""):
+    return project_health.get_project_history(project.strip())
+
+
+@app.put("/api/project-health/policy")
+async def update_project_health_policy(request: ProjectHealthPolicyRequest):
+    try:
+        policy = project_health.configure_policy(
+            request.primary_project, request.fallback_project, request.canary_percent
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {"status": "ok", "policy": policy}
+
+
+@app.post("/api/project-health/preview")
+async def preview_project_health_groups(request: ProjectHealthPreviewRequest):
+    recommendation = project_health.recommend_canaries(
+        (client.status for client in clients.values()), request.canary_percent
+    )
+    project_health.log_manual_failover_decision(
+        "previewed",
+        details={
+            "canary_percent": recommendation["configured_percent"],
+            "primary_canaries": [item["name"] for item in recommendation["primary_canaries"]],
+            "fallback_fleet_count": len(recommendation["fallback_fleet"]),
+        },
+    )
+    return recommendation
+
+
+@app.put("/api/project-health/roles")
+async def save_project_health_roles(request: ProjectHealthRoleAssignmentRequest):
+    requested_names = set(request.primary_canaries).union(request.fallback_fleet)
+    unknown_names = sorted(requested_names - set(clients.keys()))
+    if unknown_names:
+        raise HTTPException(status_code=400, detail="Unknown Warrior assignment(s): " + ", ".join(unknown_names))
+    expected_count = project_health.calculate_canary_count(len(requested_names))
+    if request.primary_canaries and len(request.primary_canaries) != expected_count:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Primary canary count must match the configured allocation ({expected_count} required)",
+        )
+    roles = project_health.assign_roles(request.primary_canaries, request.fallback_fleet)
+    return {"status": "ok", "roles": roles, "failover": project_health.failover_availability()}
+
+
+@app.post("/api/project-health/baseline/freeze")
+async def freeze_project_health_baseline(request: FreezeProjectHealthBaselineRequest):
+    try:
+        baseline = project_health.freeze_primary_baseline(request.actor)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    return {"status": "ok", "baseline": baseline, "failover": project_health.failover_availability()}
+
+
+@app.post("/api/project-health/decision")
+async def record_project_health_decision(request: ManualFailoverDecisionRequest):
+    try:
+        entry = project_health.log_manual_failover_decision(
+            request.action.value, request.actor, request.details
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    return {"status": "ok", "entry": entry}
+
+
+_MANUAL_FAILOVER_BATCH_SIZE = 10
+_MANUAL_FAILOVER_BATCH_DELAY_SECONDS = 1
+_manual_failover_lock = asyncio.Lock()
+
+
+async def _switch_manual_failover_instance(name, fallback_project):
+    client = clients.get(name)
+    if not client:
+        return name, {"status": "error", "detail": "Not found"}
+    if client.status.connection_state != ConnectionState.ONLINE:
+        return name, {"status": "error", "detail": "Warrior is offline"}
+    if client.status.restarting:
+        return name, {"status": "error", "detail": "Warrior is restarting"}
+    if name in _pause_state:
+        return name, {"status": "error", "detail": "Warrior is paused"}
+    try:
+        success = await client.change_project(fallback_project)
+    except Exception as error:
+        logger.error("Manual failover error for %s: %s", _safe_log(name), error)
+        success = False
+    return name, {"status": "ok" if success else "error", "detail": "" if success else "Project switch failed"}
+
+
+@app.post("/api/project-health/failover")
+async def execute_manual_project_failover(request: ManualFailoverRequest):
+    """Switch only the saved fallback fleet. No background task calls this endpoint."""
+    availability = project_health.failover_availability()
+    if not availability["available"]:
+        raise HTTPException(status_code=409, detail=availability["message"])
+    if _manual_failover_lock.locked():
+        raise HTTPException(status_code=409, detail="Another manual failover is running")
+
+    policy = project_health.get_policy()
+    assignments = project_health.get_role_assignments()
+    fallback_names = [name for name, role in assignments.items() if role == "fallback_fleet"]
+    primary_canaries = [name for name, role in assignments.items() if role == "primary_canary"]
+    if not fallback_names:
+        raise HTTPException(status_code=409, detail="No Fallback fleet is assigned")
+
+    project_health.log_manual_failover_decision(
+        "requested", request.actor,
+        {"primary_project": policy["primary_project"], "fallback_project": policy["fallback_project"],
+         "primary_canaries": primary_canaries, "fallback_fleet": fallback_names},
+    )
+    results = {}
+    async with _manual_failover_lock:
+        project_health.log_manual_failover_decision("confirmed", request.actor, {"confirmation": request.confirmation})
+        for start in range(0, len(fallback_names), _MANUAL_FAILOVER_BATCH_SIZE):
+            batch = fallback_names[start:start + _MANUAL_FAILOVER_BATCH_SIZE]
+            for name, result in await asyncio.gather(*(
+                _switch_manual_failover_instance(name, policy["fallback_project"]) for name in batch
+            )):
+                results[name] = result
+            if start + _MANUAL_FAILOVER_BATCH_SIZE < len(fallback_names):
+                await asyncio.sleep(_MANUAL_FAILOVER_BATCH_DELAY_SECONDS)
+
+    switched = sum(1 for result in results.values() if result["status"] == "ok")
+    failed = len(results) - switched
+    project_health.log_manual_failover_decision(
+        "completed" if failed == 0 else "failed", request.actor,
+        {"switched": switched, "failed": failed, "results": results,
+         "primary_canaries_unchanged": primary_canaries},
+    )
+    return {
+        "status": "ok" if failed == 0 else "partial", "mode": "manual",
+        "automatic_switching_enabled": False,
+        "primary_canaries_unchanged": primary_canaries,
+        "fallback_project": policy["fallback_project"],
+        "switched": switched, "failed": failed, "results": results,
+    }
 
 
 # -- WebSocket --
