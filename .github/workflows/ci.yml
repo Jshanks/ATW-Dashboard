@@ -101,7 +101,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
-      - name: Display filesystem vulnerability findings
+      - name: Run blocking Trivy filesystem scan
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
         with:
           scan-type: fs
@@ -111,9 +111,10 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           format: table
-          exit-code: "0"
+          exit-code: "1"
 
-      - name: Run blocking Trivy filesystem scan
+      - name: Generate Trivy filesystem SARIF
+        if: always()
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
         with:
           scan-type: fs
@@ -125,11 +126,11 @@ jobs:
           format: sarif
           output: trivy-fs-results.sarif
           limit-severities-for-sarif: true
-          exit-code: "1"
+          exit-code: "0"
 
       - name: Upload Trivy filesystem results
-        uses: github/codeql-action/upload-sarif@dc73d59c2d7bd4f8194098a91219eeee6d8a1719
         if: always() && hashFiles('trivy-fs-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@dc73d59c2d7bd4f8194098a91219eeee6d8a1719
         with:
           sarif_file: trivy-fs-results.sarif
           category: trivy-filesystem
@@ -181,7 +182,7 @@ jobs:
             --tag atw-dashboard:scan \
             .
 
-      - name: Display test-image vulnerability findings
+      - name: Run blocking Trivy test-image scan
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
         with:
           image-ref: atw-dashboard:scan
@@ -190,9 +191,10 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           format: table
-          exit-code: "0"
+          exit-code: "1"
 
-      - name: Run blocking Trivy image scan
+      - name: Generate Trivy test-image SARIF
+        if: always()
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
         with:
           image-ref: atw-dashboard:scan
@@ -203,11 +205,11 @@ jobs:
           format: sarif
           output: trivy-image-results.sarif
           limit-severities-for-sarif: true
-          exit-code: "1"
+          exit-code: "0"
 
-      - name: Upload Trivy image results
-        uses: github/codeql-action/upload-sarif@dc73d59c2d7bd4f8194098a91219eeee6d8a1719
+      - name: Upload Trivy test-image results
         if: always() && hashFiles('trivy-image-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@dc73d59c2d7bd4f8194098a91219eeee6d8a1719
         with:
           sarif_file: trivy-image-results.sarif
           category: trivy-container
@@ -289,7 +291,7 @@ jobs:
             --tag atw-dashboard:release \
             .
 
-      - name: Display release-image vulnerability findings
+      - name: Run blocking Trivy release-image scan
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
         with:
           image-ref: atw-dashboard:release
@@ -298,9 +300,10 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           format: table
-          exit-code: "0"
+          exit-code: "1"
 
-      - name: Run blocking Trivy release-image scan
+      - name: Generate Trivy release-image SARIF
+        if: always()
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
         with:
           image-ref: atw-dashboard:release
@@ -311,11 +314,11 @@ jobs:
           format: sarif
           output: trivy-release-results.sarif
           limit-severities-for-sarif: true
-          exit-code: "1"
+          exit-code: "0"
 
       - name: Upload Trivy release results
-        uses: github/codeql-action/upload-sarif@dc73d59c2d7bd4f8194098a91219eeee6d8a1719
         if: always() && hashFiles('trivy-release-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@dc73d59c2d7bd4f8194098a91219eeee6d8a1719
         with:
           sarif_file: trivy-release-results.sarif
           category: trivy-release-container
