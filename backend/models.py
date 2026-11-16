@@ -144,7 +144,7 @@ class DashboardState(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Project Health and manual failover planning (v4.5.1)
+# Project Health and manual failover planning (v4.5.2)
 # ---------------------------------------------------------------------------
 
 
@@ -243,18 +243,6 @@ class ProjectHealthRoleAssignmentRequest(BaseModel):
         if self.fallback_fleet and not self.primary_canaries:
             raise ValueError("At least one Primary canary is required when a fallback fleet is assigned")
         return self
-
-
-class FreezeProjectHealthBaselineRequest(BaseModel):
-    """Freeze the complete primary-project baseline for ratio comparisons."""
-
-    actor: str = Field("dashboard", min_length=1, max_length=200)
-
-    @field_validator("actor")
-    @classmethod
-    def normalize_actor(cls, value: str) -> str:
-        normalized_value = value.strip()
-        return normalized_value or "dashboard"
 
 
 class ManualFailoverDecisionAction(str, Enum):

@@ -1,6 +1,6 @@
 """Persistent project-health monitoring and manual failover planning for ATW Dashboard.
 
-v4.5.1 remains intentionally monitor-only. This module records per-project tracker
+v4.5.2 remains intentionally monitor-only. This module records per-project tracker
 activity, evaluates project health, recommends representative canaries, persists
 the configured policy and role assignments, and keeps an auditable decision log.
 It never changes a Warrior project on its own.
@@ -45,8 +45,8 @@ MAXIMUM_CANARY_COUNT = 10
 MINIMUM_BASELINE_ITEMS_PER_HOUR = 1.0
 MINIMUM_BASELINE_BYTES_PER_HOUR = 1024 * 1024
 
-# Ratios compare the latest complete hour with the frozen configured baseline's
-# average hourly rate. Both item and byte ratios participate in classification.
+# Ratios compare the latest complete hour with the rolling configured baseline,
+# excluding that recent hour so current activity does not grade itself.
 HEALTHY_RATIO = 0.75
 REDUCED_RATIO = 0.35
 STALLED_RATIO = 0.10
@@ -133,7 +133,7 @@ def _serialize_locked() -> dict[str, Any]:
         "history": history_data,
         "policy": copy.deepcopy(_policy),
         "role_assignments": copy.deepcopy(_role_assignments),
-        "frozen_baseline": copy.deepcopy(_frozen_baseline),
+        "baseline_mode": "rolling_excluding_recent_hour",
         "decision_log": list(_decision_log),
     }
 
@@ -333,48 +333,6 @@ def get_baseline_readiness(project_slug: str, now: float | None = None) -> dict[
     }
 
 
-def freeze_primary_baseline(actor: str = "dashboard") -> dict[str, Any]:
-    """Freeze the current complete primary-project baseline for later comparisons."""
-    global _frozen_baseline
-    with _lock:
-        primary_project = _policy.get("primary_project", "")
-    readiness = get_baseline_readiness(primary_project) if primary_project else {
-        "complete": False,
-        "coverage_percent": 0.0,
-    }
-    if not primary_project:
-        raise ValueError("A primary project must be configured before freezing a baseline")
-    if not readiness.get("complete"):
-        raise ValueError(
-            "A complete configured minimum primary-project baseline with at least 90% coverage is required"
-        )
-    frozen_at = time.time()
-    baseline = {
-        "project": primary_project,
-        "frozen_at": frozen_at,
-        "coverage": readiness["coverage"],
-        "coverage_percent": readiness["coverage_percent"],
-        "baseline_hours": readiness["minimum"]["hours"],
-        "baseline_phase": readiness["phase"],
-        "sample_count": readiness["sample_count"],
-        "items_total": readiness["items_total"],
-        "bytes_total": readiness["bytes_total"],
-        "items_per_hour": readiness["items_per_hour"],
-        "bytes_per_hour": readiness["bytes_per_hour"],
-        "sufficient_volume": readiness["sufficient_volume"],
-    }
-    with _lock:
-        _frozen_baseline = baseline
-        _append_decision_locked(
-            "baseline_frozen",
-            "Primary-project baseline frozen for health comparisons",
-            actor,
-            {"baseline": copy.deepcopy(baseline)},
-        )
-    force_save()
-    return copy.deepcopy(baseline)
-
-
 def _ratio(current_value: float, baseline_value: float) -> float | None:
     if baseline_value <= 0:
         return None
@@ -419,19 +377,25 @@ def _last_health_state_locked(project_slug: str) -> str | None:
 
 
 def evaluate_project_health(project_slug: str, now: float | None = None) -> dict[str, Any]:
-    """Evaluate a project's current state against the frozen primary baseline."""
+    """Evaluate current activity against a rolling baseline excluding the latest hour."""
     current_time = float(now if now is not None else time.time())
     readiness = get_baseline_readiness(project_slug, current_time)
     with _lock:
-        frozen_baseline = copy.deepcopy(_frozen_baseline)
         previous_state = _last_health_state_locked(project_slug)
-    baseline = frozen_baseline
-    if not baseline or baseline.get("project") != project_slug:
-        baseline = {
-            "items_per_hour": readiness["items_per_hour"] if readiness["complete"] else 0.0,
-            "bytes_per_hour": readiness["bytes_per_hour"] if readiness["complete"] else 0.0,
-            "sufficient_volume": readiness["sufficient_volume"],
-        }
+
+    policy = get_policy()
+    baseline_hours = (
+        policy["full_baseline_hours"]
+        if readiness["full_complete"]
+        else policy["minimum_baseline_hours"]
+    )
+    baseline_end = current_time - RECENT_WINDOW_SECONDS
+    rolling_baseline = _window_readiness(project_slug, baseline_hours, baseline_end)
+    baseline_ready = readiness["complete"] and rolling_baseline["complete"]
+    comparison_readiness = copy.deepcopy(readiness)
+    comparison_readiness["complete"] = baseline_ready
+    comparison_readiness["sufficient_volume"] = rolling_baseline["sufficient_volume"]
+
     recent_samples = _window_samples(
         project_slug,
         current_time - RECENT_WINDOW_SECONDS,
@@ -440,14 +404,21 @@ def evaluate_project_health(project_slug: str, now: float | None = None) -> dict
     recent_items = sum(sample[1] for sample in recent_samples)
     recent_bytes = sum(sample[2] for sample in recent_samples)
     recent_coverage = _coverage(len(recent_samples), RECENT_WINDOW_SECONDS)
-    item_ratio = _ratio(recent_items, float(baseline.get("items_per_hour", 0.0)))
-    byte_ratio = _ratio(recent_bytes, float(baseline.get("bytes_per_hour", 0.0)))
-    state = _classify_state(readiness, item_ratio, byte_ratio, previous_state)
+    item_ratio = _ratio(
+        recent_items,
+        rolling_baseline["items_per_hour"] if baseline_ready else 0.0,
+    )
+    byte_ratio = _ratio(
+        recent_bytes,
+        rolling_baseline["bytes_per_hour"] if baseline_ready else 0.0,
+    )
+    state = _classify_state(comparison_readiness, item_ratio, byte_ratio, previous_state)
     return {
         "project": project_slug,
         "state": state,
         "baseline": readiness,
-        "frozen_baseline": frozen_baseline,
+        "rolling_baseline": rolling_baseline,
+        "baseline_mode": "rolling_excluding_recent_hour",
         "recent": {
             "window_seconds": RECENT_WINDOW_SECONDS,
             "coverage": recent_coverage,
@@ -459,7 +430,6 @@ def evaluate_project_health(project_slug: str, now: float | None = None) -> dict
         "byte_activity_ratio": byte_ratio,
         "limiting_activity_ratio": _minimum_ratio(item_ratio, byte_ratio),
     }
-
 
 def update_health_state_log(project_slug: str) -> dict[str, Any]:
     """Evaluate health and log a state transition when the visible state changes."""
@@ -495,7 +465,7 @@ def configure_policy(
     actor: str = "dashboard",
 ) -> dict[str, Any]:
     """Persist primary/fallback policy. Automation remains disabled."""
-    global _policy, _frozen_baseline
+    global _policy
     primary = _normalize_project_slug(primary_project)
     fallback = _normalize_project_slug(fallback_project)
     if not primary:
@@ -531,8 +501,6 @@ def configure_policy(
             "manual_failover_only": True,
             "updated_at": time.time(),
         }
-        if _frozen_baseline and _frozen_baseline.get("project") != primary:
-            _frozen_baseline = None
         _append_decision_locked(
             "policy_updated",
             "Project health policy updated",

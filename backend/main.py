@@ -26,7 +26,6 @@ from backend.models import (
     ProjectHealthPolicyRequest,
     ProjectHealthPreviewRequest,
     ProjectHealthRoleAssignmentRequest,
-    FreezeProjectHealthBaselineRequest,
     ManualFailoverDecisionRequest,
     ManualFailoverRequest,
     WarriorInstanceConfig,
@@ -888,7 +887,7 @@ async def get_history():
     return history.get_bucketed()
 
 
-# -- Project Health (v4.5.0, monitor-only) --
+# -- Project Health (v4.5.2, monitor-only, rolling baseline) --
 @app.get("/api/project-health")
 async def get_project_health_status():
     return project_health.get_status(client.status for client in clients.values())
@@ -944,15 +943,6 @@ async def save_project_health_roles(request: ProjectHealthRoleAssignmentRequest)
         )
     roles = project_health.assign_roles(request.primary_canaries, request.fallback_fleet)
     return {"status": "ok", "roles": roles, "failover": project_health.failover_availability()}
-
-
-@app.post("/api/project-health/baseline/freeze")
-async def freeze_project_health_baseline(request: FreezeProjectHealthBaselineRequest):
-    try:
-        baseline = project_health.freeze_primary_baseline(request.actor)
-    except ValueError as error:
-        raise HTTPException(status_code=409, detail=str(error))
-    return {"status": "ok", "baseline": baseline, "failover": project_health.failover_availability()}
 
 
 @app.post("/api/project-health/decision")

@@ -19,6 +19,7 @@
  * v4.5.0: monitor-only Project Health policy, baseline, canary preview,
  *         persistent decisions, and operator-confirmed manual failover.
  * v4.5.1: editable minimum/full baseline windows and header progress indicator.
+ * v4.5.2: rolling health baseline and whole-card Warrior selection.
  */
 (function () {
     "use strict";
@@ -92,6 +93,8 @@
     var connectionBadge = document.getElementById("connection-badge");
     var selectAllVisible = document.getElementById("select-all-visible");
     var selectionCount = document.getElementById("selection-count");
+    var selectionToolbarInline = document.getElementById("selection-toolbar-inline");
+    var clearSelectionInline = document.getElementById("clear-selection-inline");
     var selectionBar = document.getElementById("selection-bar");
     var selectionBarText = document.getElementById("selection-bar-text");
     var selectionBarCount = document.getElementById("selection-bar-count");
@@ -313,12 +316,12 @@ function findCardByName(name) {
             : (group.key === GROUP_OFFLINE ? "text-red-400"
             : (group.key === GROUP_PAUSED ? "text-amber-400" : "text-blue-300"));
         return '<div class="group-header flex items-center gap-3 pt-2 pb-1 border-b border-gray-800" style="grid-column: 1 / -1;" data-group-header="' + escapeHtml(group.key) + '">' +
-            '<input type="checkbox" data-select-group="' + escapeHtml(group.key) + '" class="rounded" title="Select every warrior in this group" aria-label="Select all in ' + escapeHtml(getGroupLabel(group.key, group.members)) + '">' +
             '<button type="button" data-toggle-group="' + escapeHtml(group.key) + '" class="flex items-center gap-2 text-sm font-semibold ' + accentClass + ' hover:text-white" aria-expanded="' + (isCollapsed ? "false" : "true") + '">' +
             '<span class="text-gray-500 w-3 inline-block">' + chevron + '</span>' +
             '<span data-group-label>' + escapeHtml(getGroupLabel(group.key, group.members)) + '</span></button>' +
             '<span class="text-xs" data-group-stats>' + getGroupStatsHtml(group.members) + '</span>' +
             '<span class="text-xs text-blue-400" data-group-selected></span>' +
+            '<button type="button" data-select-group="' + escapeHtml(group.key) + '" class="group-select-btn ml-auto text-xs text-indigo-300 hover:text-indigo-200">Select group</button>' +
             '</div>';
     }
 
@@ -381,14 +384,15 @@ function findCardByName(name) {
         syncCardSelection(name);
     }
 
-    // Update one card's checkbox and highlight without re-rendering it
+    // Update one card's visual and accessible selection state without re-rendering it
     function syncCardSelection(name) {
         var card = findCardByName(name);
-        if (!card) return;   // collapsed group or hidden by filter
+        if (!card) return;
         var isSelected = selectedInstances.has(name);
         card.classList.toggle("card-selected", isSelected);
-        var checkbox = card.querySelector("input[data-select-instance]");
-        if (checkbox) checkbox.checked = isSelected;
+        card.setAttribute("aria-selected", isSelected ? "true" : "false");
+        var indicator = card.querySelector("[data-selection-indicator]");
+        if (indicator) indicator.classList.toggle("hidden", !isSelected);
     }
 
     // Drop selections for warriors that no longer exist
@@ -406,13 +410,6 @@ function findCardByName(name) {
         selectedInstances.forEach(function (name) {
             if (!visibleNames.has(name)) selectedInstances.delete(name);
         });
-    }
-
-    function setCheckboxState(checkbox, selectedCount, totalCount) {
-        if (!checkbox) return;
-        checkbox.checked = totalCount > 0 && selectedCount === totalCount;
-        checkbox.indeterminate = selectedCount > 0 && selectedCount < totalCount;
-        checkbox.disabled = totalCount === 0;
     }
 
     function describeSelection(selectedNames) {
@@ -441,7 +438,9 @@ function findCardByName(name) {
         var totalSelected = selectedNames.length;
         var hiddenSelected = totalSelected - visibleSelected;
 
-        setCheckboxState(selectAllVisible, visibleSelected, visibleInstances.length);
+        selectionToolbarInline.classList.toggle("hidden", totalSelected === 0);
+        selectionToolbarInline.classList.toggle("flex", totalSelected > 0);
+        selectAllVisible.textContent = visibleSelected === visibleInstances.length && visibleInstances.length ? "Clear visible" : "Select all visible";
         selectionCount.textContent = totalSelected
             ? totalSelected + " of " + (dashboardState.instances || []).length + " selected"
             : "";
@@ -452,7 +451,8 @@ function findCardByName(name) {
                 var header = grid.querySelector('[data-group-header="' + cssEscape(lastGroups[g].key) + '"]');
                 if (!header) continue;
                 var groupSelected = countSelectedIn(lastGroups[g].members);
-                setCheckboxState(header.querySelector("input[data-select-group]"), groupSelected, lastGroups[g].members.length);
+                var groupButton = header.querySelector("[data-select-group]");
+                if (groupButton) groupButton.textContent = groupSelected === lastGroups[g].members.length && lastGroups[g].members.length ? "Clear group" : (groupSelected ? "Select remaining" : "Select group");
                 var groupSelectedLabel = header.querySelector("[data-group-selected]");
                 if (groupSelectedLabel) {
                     groupSelectedLabel.textContent = groupSelected
@@ -740,10 +740,9 @@ function findCardByName(name) {
         var editBtn = '<button data-edit-instance="' + escapeHtml(inst.name) + '" class="text-gray-600 hover:text-blue-400 " title="Edit" aria-label="Edit ' + escapeHtml(inst.name) + '"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg></button>';
         var removeBtn = '<button data-remove-instance="' + escapeHtml(inst.name) + '" class="text-gray-600 hover:text-red-400 " title="Remove" aria-label="Remove ' + escapeHtml(inst.name) + '"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>';
         var isSelected = selectedInstances.has(inst.name);
-        var selectBox = '<label class="card-select-hit" title="Select (Shift-click to select a range)">' +
-            '<input type="checkbox" class="rounded" data-select-instance="' + escapeHtml(inst.name) + '"' + (isSelected ? " checked" : "") +
-            ' aria-label="Select ' + escapeHtml(inst.name) + '"></label>';
-        return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group' + (isSelected ? " card-selected" : "") + '" data-instance-name="' + escapeHtml(inst.name) + '">' +
+        var selectBox = '<span data-selection-indicator class="card-selection-indicator' + (isSelected ? '' : ' hidden') + '" aria-hidden="true">&#10003;</span>';
+
+        return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group' + (isSelected ? " card-selected" : "") + '" data-instance-name="' + escapeHtml(inst.name) + '" role="option" tabindex="0" aria-selected="' + (isSelected ? "true" : "false") + '">' +
             // Name row: the name truncates instead of running under the badge/buttons
             // (host:port default names are long on narrow cards)
             '<div class="flex items-center gap-2 ' + (projectBadgeHtml ? "mb-1.5" : "mb-2") + '">' + selectBox + statusDot +
@@ -1580,62 +1579,48 @@ function applyProjectList(data) {
     buildViewControls();
 
     // ---- Event delegation for instance cards ----
-grid.addEventListener("click", function (e) {
-    // Card checkbox (label clicks are forwarded to the input by the browser)
-    var cardCheckbox = e.target.closest("input[data-select-instance]");
-    if (cardCheckbox) {
-        var clickedName = cardCheckbox.dataset.selectInstance;
-        var newState = cardCheckbox.checked;
-        if (e.shiftKey && lastClickedInstance && lastClickedInstance !== clickedName) {
-            // Range in on-screen order (collapsed/filtered cards are not in the DOM)
-            var orderedNames = Array.prototype.map.call(
-                grid.querySelectorAll("input[data-select-instance]"),
-                function (input) { return input.dataset.selectInstance; }
-            );
-            var anchorIndex = orderedNames.indexOf(lastClickedInstance);
-            var clickedIndex = orderedNames.indexOf(clickedName);
-            if (anchorIndex !== -1 && clickedIndex !== -1) {
-                var rangeStart = Math.min(anchorIndex, clickedIndex);
-                var rangeEnd = Math.max(anchorIndex, clickedIndex);
-                for (var r = rangeStart; r <= rangeEnd; r++) setInstanceSelected(orderedNames[r], newState);
-            } else {
-                setInstanceSelected(clickedName, newState);
-            }
-        } else {
-            setInstanceSelected(clickedName, newState);
-        }
-        lastClickedInstance = clickedName;
-        updateSelectionUI();
-        return;
-    }
-    // Group header checkbox: select/clear every member, including collapsed ones
-    var groupCheckbox = e.target.closest("input[data-select-group]");
-    if (groupCheckbox) {
-        var selectedGroupKey = groupCheckbox.dataset.selectGroup;
-        for (var g = 0; g < lastGroups.length; g++) {
-            if (lastGroups[g].key === selectedGroupKey) { toggleSelectionFor(lastGroups[g].members); break; }
+grid.addEventListener("click", function (event) {
+    var groupButton = event.target.closest("button[data-select-group]");
+    if (groupButton) {
+        for (var groupIndex = 0; groupIndex < lastGroups.length; groupIndex++) {
+            if (lastGroups[groupIndex].key === groupButton.dataset.selectGroup) { toggleSelectionFor(lastGroups[groupIndex].members); break; }
         }
         return;
     }
-    var groupToggle = e.target.closest("[data-toggle-group]");
+    var groupToggle = event.target.closest("[data-toggle-group]");
     if (groupToggle) {
         var groupKey = groupToggle.dataset.toggleGroup;
-        if (collapsedGroups[groupKey]) delete collapsedGroups[groupKey];
-        else collapsedGroups[groupKey] = true;
-        localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify(collapsedGroups));
-        render();
-        return;
+        if (collapsedGroups[groupKey]) delete collapsedGroups[groupKey]; else collapsedGroups[groupKey] = true;
+        localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify(collapsedGroups)); render(); return;
     }
-    var editBtn = e.target.closest("[data-edit-instance]");
-    if (editBtn) {
-        editInstance(editBtn.dataset.editInstance);
-        return;
-    }
-    var removeBtn = e.target.closest("[data-remove-instance]");
-    if (removeBtn) {
-        removeInstance(removeBtn.dataset.removeInstance);
-        return;
-    }
+    var editButton = event.target.closest("[data-edit-instance]");
+    if (editButton) { editInstance(editButton.dataset.editInstance); return; }
+    var removeButton = event.target.closest("[data-remove-instance]");
+    if (removeButton) { removeInstance(removeButton.dataset.removeInstance); return; }
+    if (event.target.closest("a, button, input, select, textarea, label")) return;
+    var card = event.target.closest("[data-instance-name]");
+    if (!card) return;
+    var clickedName = card.dataset.instanceName;
+    var newState = !selectedInstances.has(clickedName);
+    if (event.shiftKey && lastClickedInstance) {
+        var orderedNames = Array.from(grid.querySelectorAll("[data-instance-name]")).map(function (item) { return item.dataset.instanceName; });
+        var anchorIndex = orderedNames.indexOf(lastClickedInstance), clickedIndex = orderedNames.indexOf(clickedName);
+        if (anchorIndex !== -1 && clickedIndex !== -1) {
+            for (var rangeIndex = Math.min(anchorIndex, clickedIndex); rangeIndex <= Math.max(anchorIndex, clickedIndex); rangeIndex++) setInstanceSelected(orderedNames[rangeIndex], newState);
+        } else setInstanceSelected(clickedName, newState);
+    } else setInstanceSelected(clickedName, newState);
+    lastClickedInstance = clickedName; updateSelectionUI();
+});
+
+grid.addEventListener("keydown", function (event) {
+    if (event.key !== " " && event.key !== "Enter") return;
+    if (event.target.closest("a, button, input, select, textarea")) return;
+    var card = event.target.closest("[data-instance-name]");
+    if (!card) return;
+    event.preventDefault();
+    var name = card.dataset.instanceName;
+    setInstanceSelected(name, !selectedInstances.has(name));
+    lastClickedInstance = name; updateSelectionUI();
 });
 
     // ---- Immediate restart (/api/stop_now) ----
@@ -1724,6 +1709,7 @@ grid.addEventListener("click", function (e) {
         lastClickedInstance = null;
         updateSelectionUI();
     });
+    clearSelectionInline.addEventListener("click", function () { btnSelClear.click(); });
     btnSelSettings.addEventListener("click", openSettingsPanel);
     btnSelPause.addEventListener("click", function () {
         loadPauseStatus();
@@ -1787,7 +1773,6 @@ function applyVersionBadge(cfg) {
     var projectHealthHeaderIndicator = document.getElementById("project-health-header-indicator");
     var projectHealthHeaderIndicatorLabel = document.getElementById("project-health-header-indicator-label");
     var projectHealthHeaderIndicatorDetail = document.getElementById("project-health-header-indicator-detail");
-    var btnFreezeBaseline = document.getElementById("btn-freeze-project-health-baseline");
     var btnPreviewGroups = document.getElementById("btn-preview-project-health-groups");
     var btnSaveRoles = document.getElementById("btn-save-project-health-roles");
     var failoverConfirmationInput = document.getElementById("project-health-failover-confirmation");
@@ -1818,7 +1803,7 @@ function applyVersionBadge(cfg) {
 
     function setProjectHealthBusy(isBusy) {
         projectHealthBusy = isBusy;
-        [btnRefreshProjectHealth, btnFreezeBaseline, btnPreviewGroups, btnSaveRoles, btnExecuteFailover].forEach(function (button) {
+        [btnRefreshProjectHealth, btnPreviewGroups, btnSaveRoles, btnExecuteFailover].forEach(function (button) {
             if (button) button.dataset.busy = isBusy ? "1" : "0";
         });
         updateProjectHealthActions();
@@ -1991,7 +1976,6 @@ function applyVersionBadge(cfg) {
         var policy = projectHealthState.policy || {};
         var evaluation = (projectHealthState.health || {})[policy.primary_project];
         var baselineComplete = Boolean(evaluation && evaluation.baseline && evaluation.baseline.complete);
-        btnFreezeBaseline.disabled = projectHealthBusy || !baselineComplete;
         btnPreviewGroups.disabled = projectHealthBusy || !policy.primary_project || !policy.fallback_project;
         btnSaveRoles.disabled = projectHealthBusy || !projectHealthPreview || !projectHealthPreview.primary_canaries.length;
         var failoverAvailable = Boolean(projectHealthState.failover && projectHealthState.failover.available);
@@ -2045,14 +2029,6 @@ function applyVersionBadge(cfg) {
         setProjectHealthBusy(true);
         projectHealthRequest("api/project-health/policy", { method: "PUT", body: JSON.stringify({ primary_project: primaryProject, fallback_project: fallbackProject, canary_percent: canaryPercent, minimum_baseline_hours: minimumBaselineHours, full_baseline_hours: fullBaselineHours }) })
             .then(function () { projectHealthPreview = null; showToast("Project Health policy saved", "success"); return loadProjectHealth(); })
-            .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
-            .finally(function () { setProjectHealthBusy(false); });
-    });
-
-    btnFreezeBaseline.addEventListener("click", function () {
-        setProjectHealthBusy(true);
-        projectHealthRequest("api/project-health/baseline/freeze", { method: "POST", body: JSON.stringify({ actor: "dashboard" }) })
-            .then(function () { showToast("Primary-project baseline frozen", "success"); return loadProjectHealth(); })
             .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
             .finally(function () { setProjectHealthBusy(false); });
     });
