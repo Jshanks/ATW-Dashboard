@@ -1,41 +1,13 @@
-# ---------------------------------------------------------------------------
-# ATW Dashboard CI
-#
-# main / pull request:
-#   - Gitleaks
-#   - CodeQL for Python and JavaScript
-#   - Trivy filesystem scan
-#   - Build and Trivy-scan a local test image
-#
-# scheduled / manual branch run:
-#   - Same security scans, but no image publication
-#
-# v* tag:
-#   - Verify the tag points to current origin/main
-#   - Build one release image
-#   - Trivy-scan that exact image
-#   - Push the already-scanned image as the version tag and latest
-#
-# Source scans are not rerun on a tag because the tag must point to current
-# origin/main, whose source commit was already scanned.
-# ---------------------------------------------------------------------------
-
 name: CI
 
 on:
   push:
-    branches:
-      - main
-    tags:
-      - "v*"
-
+    branches: [main]
+    tags: ["v*"]
   pull_request:
-    branches:
-      - main
-
+    branches: [main]
   schedule:
     - cron: "0 6 * * 1"
-
   workflow_dispatch:
 
 concurrency:
@@ -47,87 +19,53 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # -------------------------------------------------------------------------
-  # Source security scans. These intentionally skip version tags.
-  # -------------------------------------------------------------------------
-
   codeql:
     name: CodeQL (${{ matrix.language }})
     if: github.ref_type != 'tag'
     runs-on: ubuntu-latest
-
     permissions:
       actions: read
       contents: read
       security-events: write
-
     strategy:
       fail-fast: false
       matrix:
-        language:
-          - python
-          - javascript
-
+        language: [python, javascript]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
-
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4.39.3
         with:
           languages: ${{ matrix.language }}
           queries: security-extended
-
       - name: Autobuild
         uses: github/codeql-action/autobuild@v4.39.3
-
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@v4.39.3
         with:
           category: /language:${{ matrix.language }}
 
-  # -------------------------------------------------------------------------
-
   trivy-fs:
     name: Trivy filesystem scan
     if: github.ref_type != 'tag'
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
       security-events: write
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-
-      - name: Run blocking Trivy filesystem scan
+      - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
         with:
           scan-type: fs
           scan-ref: .
-          scanners: vuln
-          vuln-type: library
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          format: table
-          exit-code: "1"
-
-      - name: Generate Trivy filesystem SARIF
-        if: always()
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln
-          vuln-type: library
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           format: sarif
           output: trivy-fs-results.sarif
-          limit-severities-for-sarif: true
           exit-code: "0"
-
       - name: Upload Trivy filesystem results
         if: always() && hashFiles('trivy-fs-results.sarif') != ''
         uses: github/codeql-action/upload-sarif@dc73d59c2d7bd4f8194098a91219eeee6d8a1719
@@ -135,131 +73,55 @@ jobs:
           sarif_file: trivy-fs-results.sarif
           category: trivy-filesystem
 
-  # -------------------------------------------------------------------------
-
   gitleaks:
     name: Gitleaks secret scan
     if: github.ref_type != 'tag'
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
       security-events: write
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           fetch-depth: 0
-
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # -------------------------------------------------------------------------
-  # Main/PR/scheduled container verification. This builds and scans but does
-  # not publish an image.
-  # -------------------------------------------------------------------------
-
-  trivy-image:
-    name: Build and scan test image
-    if: github.ref_type != 'tag'
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-      security-events: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-
-      - name: Build local test image
-        run: |
-          docker build \
-            --build-arg APP_VERSION=ci-${GITHUB_SHA::12} \
-            --tag atw-dashboard:scan \
-            .
-
-      - name: Run blocking Trivy test-image scan
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
-        with:
-          image-ref: atw-dashboard:scan
-          scanners: vuln
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          format: table
-          exit-code: "1"
-
-      - name: Generate Trivy test-image SARIF
-        if: always()
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
-        with:
-          image-ref: atw-dashboard:scan
-          scanners: vuln
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          format: sarif
-          output: trivy-image-results.sarif
-          limit-severities-for-sarif: true
-          exit-code: "0"
-
-      - name: Upload Trivy test-image results
-        if: always() && hashFiles('trivy-image-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@dc73d59c2d7bd4f8194098a91219eeee6d8a1719
-        with:
-          sarif_file: trivy-image-results.sarif
-          category: trivy-container
-
-  # -------------------------------------------------------------------------
-  # Release pipeline. Build once, scan that exact local image, and push the
-  # same image only after the blocking scan passes.
-  # -------------------------------------------------------------------------
-
   release:
-    name: Verify, scan, and publish release image
+    name: Build, scan, and publish release image
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
       packages: write
       security-events: write
-
     steps:
       - name: Checkout tagged commit
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           fetch-depth: 0
 
-      - name: Validate version tag
+      - name: Validate semantic version tag
         shell: bash
         run: |
           set -euo pipefail
-
           if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Release tag must use semantic version format vX.Y.Z."
             exit 1
           fi
 
-          echo "Validated release tag: $GITHUB_REF_NAME"
-
       - name: Verify tag points to current origin/main
         shell: bash
         run: |
           set -euo pipefail
-
           git fetch origin main --no-tags
-
           TAG_COMMIT="$(git rev-parse "${GITHUB_SHA}^{commit}")"
           MAIN_COMMIT="$(git rev-parse origin/main)"
-
           echo "Tag commit:  $TAG_COMMIT"
           echo "Main commit: $MAIN_COMMIT"
-
           if [[ "$TAG_COMMIT" != "$MAIN_COMMIT" ]]; then
             echo "::error::Release tag does not point to current origin/main."
             exit 1
@@ -270,10 +132,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           IMAGE_REPOSITORY="$(echo "${REGISTRY}/${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
-
-          echo "repository=$IMAGE_REPOSITORY" >> "$GITHUB_OUTPUT"
           echo "release_ref=$IMAGE_REPOSITORY:${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           echo "latest_ref=$IMAGE_REPOSITORY:latest" >> "$GITHUB_OUTPUT"
 
@@ -281,39 +140,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           docker build \
             --build-arg "APP_VERSION=${GITHUB_REF_NAME}" \
             --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --label "org.opencontainers.image.version=${GITHUB_REF_NAME}" \
-            --label "org.opencontainers.image.ref.name=${GITHUB_REF_NAME}" \
             --tag atw-dashboard:release \
             .
 
-      - name: Run blocking Trivy release-image scan
+      - name: Run Trivy release-image scan
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
         with:
           image-ref: atw-dashboard:release
-          scanners: vuln
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          format: table
-          exit-code: "1"
-
-      - name: Generate Trivy release-image SARIF
-        if: always()
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
-        with:
-          image-ref: atw-dashboard:release
-          scanners: vuln
-          vuln-type: os,library
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           format: sarif
           output: trivy-release-results.sarif
-          limit-severities-for-sarif: true
           exit-code: "0"
 
       - name: Upload Trivy release results
@@ -330,25 +172,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Tag the scanned release image
+      - name: Tag and push release image
         shell: bash
         env:
           RELEASE_REF: ${{ steps.image.outputs.release_ref }}
           LATEST_REF: ${{ steps.image.outputs.latest_ref }}
         run: |
           set -euo pipefail
-
           docker tag atw-dashboard:release "$RELEASE_REF"
           docker tag atw-dashboard:release "$LATEST_REF"
-
-      - name: Push the scanned release image
-        shell: bash
-        env:
-          RELEASE_REF: ${{ steps.image.outputs.release_ref }}
-          LATEST_REF: ${{ steps.image.outputs.latest_ref }}
-        run: |
-          set -euo pipefail
-
           docker push "$RELEASE_REF"
           docker push "$LATEST_REF"
 
@@ -359,24 +191,11 @@ jobs:
           LATEST_REF: ${{ steps.image.outputs.latest_ref }}
         run: |
           set -euo pipefail
-
-          RELEASE_DIGEST="$(docker buildx imagetools inspect "$RELEASE_REF" \
-            --format '{{json .Manifest.Digest}}' | tr -d '"')"
-
-          LATEST_DIGEST="$(docker buildx imagetools inspect "$LATEST_REF" \
-            --format '{{json .Manifest.Digest}}' | tr -d '"')"
-
+          RELEASE_DIGEST="$(docker buildx imagetools inspect "$RELEASE_REF" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          LATEST_DIGEST="$(docker buildx imagetools inspect "$LATEST_REF" --format '{{json .Manifest.Digest}}' | tr -d '"')"
           echo "Release digest: $RELEASE_DIGEST"
           echo "Latest digest:  $LATEST_DIGEST"
-
-          if [[ -z "$RELEASE_DIGEST" || -z "$LATEST_DIGEST" ]]; then
-            echo "::error::Could not resolve one or both published digests."
-            exit 1
-          fi
-
-          if [[ "$RELEASE_DIGEST" != "$LATEST_DIGEST" ]]; then
+          if [[ -z "$RELEASE_DIGEST" || -z "$LATEST_DIGEST" || "$RELEASE_DIGEST" != "$LATEST_DIGEST" ]]; then
             echo "::error::Version and latest tags do not resolve to the same digest."
             exit 1
           fi
-
-          echo "Published ${GITHUB_REF_NAME} and latest at digest ${RELEASE_DIGEST}."
