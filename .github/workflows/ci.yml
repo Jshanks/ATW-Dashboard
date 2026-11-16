@@ -48,10 +48,7 @@ env:
 
 jobs:
   # -------------------------------------------------------------------------
-  # Source security scans
-  #
-  # These jobs intentionally skip version tags. A release tag must point to
-  # current origin/main, so rerunning identical source scans would be redundant.
+  # Source security scans. These intentionally skip version tags.
   # -------------------------------------------------------------------------
 
   codeql:
@@ -104,16 +101,30 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
+      - name: Display filesystem vulnerability findings
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          vuln-type: library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          format: table
+          exit-code: "0"
+
       - name: Run blocking Trivy filesystem scan
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
         with:
           scan-type: fs
           scan-ref: .
+          scanners: vuln
           vuln-type: library
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           format: sarif
           output: trivy-fs-results.sarif
+          limit-severities-for-sarif: true
           exit-code: "1"
 
       - name: Upload Trivy filesystem results
@@ -146,10 +157,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # -------------------------------------------------------------------------
-  # Main/PR/scheduled container verification
-  #
-  # This proves that the Dockerfile builds and checks the resulting image.
-  # It does not publish anything.
+  # Main/PR/scheduled container verification. This builds and scans but does
+  # not publish an image.
   # -------------------------------------------------------------------------
 
   trivy-image:
@@ -193,6 +202,7 @@ jobs:
           ignore-unfixed: true
           format: sarif
           output: trivy-image-results.sarif
+          limit-severities-for-sarif: true
           exit-code: "1"
 
       - name: Upload Trivy image results
@@ -203,10 +213,8 @@ jobs:
           category: trivy-container
 
   # -------------------------------------------------------------------------
-  # Release pipeline
-  #
-  # This job is the only tag job. It builds the release image once, scans that
-  # exact local image, and pushes the same image only after Trivy passes.
+  # Release pipeline. Build once, scan that exact local image, and push the
+  # same image only after the blocking scan passes.
   # -------------------------------------------------------------------------
 
   release:
@@ -302,6 +310,7 @@ jobs:
           ignore-unfixed: true
           format: sarif
           output: trivy-release-results.sarif
+          limit-severities-for-sarif: true
           exit-code: "1"
 
       - name: Upload Trivy release results
