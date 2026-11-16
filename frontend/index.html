@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
@@ -404,10 +404,9 @@
                         <p><strong class="text-white">What are canaries?</strong> Primary canaries are a small, representative group of Warriors that remain on the primary project during a manual failover. Their continued activity helps show whether the primary project has recovered while the rest of the assigned fleet runs the fallback project.</p>
                         <p>The dashboard recommends <strong class="text-white">5%</strong> of eligible Warriors, with a minimum of <strong class="text-white">3</strong> and maximum of <strong class="text-white">10</strong>. It prioritizes different host IPs so one host or network failure is less likely to distort the signal.</p>
                         <p><strong class="text-amber-300">Review before saving:</strong> IP diversity is only an approximation of infrastructure diversity. Multiple IPs can still share a physical host, ISP, VPN, storage system, or other failure domain. Prefer stable Warriors distributed across genuinely separate hosts and locations where known.</p>
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 pt-1">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
                             <div class="rounded-md border border-green-900/60 bg-green-950/20 p-3"><strong class="text-green-300">Primary canaries</strong><span class="block mt-1 text-gray-400">Stay on the primary project during failover.</span></div>
                             <div class="rounded-md border border-blue-900/60 bg-blue-950/20 p-3"><strong class="text-blue-300">Fallback fleet</strong><span class="block mt-1 text-gray-400">Moves only after explicit manual confirmation.</span></div>
-                            <div class="rounded-md border border-gray-700 bg-gray-900/60 p-3"><strong class="text-gray-200">No automatic switching</strong><span class="block mt-1 text-gray-400">Health states never move Warriors in v4.5.1.</span></div>
                         </div>
                     </div>
                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
