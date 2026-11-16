@@ -1,9 +1,9 @@
-"""Persistent project-health monitoring and manual failover planning for ATW Dashboard.
+"""Persistent Project Health monitoring, baseline management, and failover state.
 
-v4.5.2 remains intentionally monitor-only. This module records per-project tracker
-activity, evaluates project health, recommends representative canaries, persists
-the configured policy and role assignments, and keeps an auditable decision log.
-It never changes a Warrior project on its own.
+v4.6.0 adds an independent monitoring master switch, persistent automatic-failover
+policy and runtime state, and destructive primary-baseline reset. Network project
+switches remain in main.py; this module owns evaluation, prerequisites, counters,
+cooldowns, persistence, and the auditable decision log.
 """
 from __future__ import annotations
 
@@ -36,6 +36,15 @@ SAMPLE_INTERVAL_SECONDS = 60
 MINIMUM_BASELINE_COVERAGE = 0.90
 MAX_HISTORY_SAMPLES_PER_PROJECT = HISTORY_SECONDS // SAMPLE_INTERVAL_SECONDS + 10
 MAX_DECISION_LOG_ENTRIES = 500
+DEFAULT_STALLED_EVALUATIONS = 3
+MINIMUM_STALLED_EVALUATIONS = 2
+MAXIMUM_STALLED_EVALUATIONS = 10
+DEFAULT_COOLDOWN_HOURS = 6
+MINIMUM_COOLDOWN_HOURS = 1
+MAXIMUM_COOLDOWN_HOURS = 48
+DEFAULT_RESUME_STABILIZATION_MINUTES = 30
+MINIMUM_RESUME_STABILIZATION_MINUTES = 15
+MAXIMUM_RESUME_STABILIZATION_MINUTES = 120
 
 DEFAULT_CANARY_PERCENT = 5
 MINIMUM_CANARY_COUNT = 3
@@ -56,7 +65,7 @@ _lock = threading.RLock()
 _project_history: dict[str, deque] = {}
 _policy: dict[str, Any] = {}
 _role_assignments: dict[str, str] = {}
-_frozen_baseline: dict[str, Any] | None = None
+_runtime: dict[str, Any] = {}
 _decision_log: deque = deque(maxlen=MAX_DECISION_LOG_ENTRIES)
 _last_save_monotonic = 0.0
 SAVE_INTERVAL_SECONDS = 60
@@ -69,12 +78,28 @@ def _default_policy() -> dict[str, Any]:
         "canary_percent": DEFAULT_CANARY_PERCENT,
         "minimum_baseline_hours": DEFAULT_MINIMUM_BASELINE_HOURS,
         "full_baseline_hours": DEFAULT_FULL_BASELINE_HOURS,
-        "monitor_only": True,
-        "manual_failover_only": True,
+        "monitoring_enabled": True,
+        "automatic_failover_enabled": False,
+        "stalled_evaluations_required": DEFAULT_STALLED_EVALUATIONS,
+        "cooldown_hours": DEFAULT_COOLDOWN_HOURS,
+        "resume_stabilization_minutes": DEFAULT_RESUME_STABILIZATION_MINUTES,
         "updated_at": 0.0,
     }
 
 
+
+def _default_runtime() -> dict[str, Any]:
+    return {
+        "monitoring_paused_at": None,
+        "monitoring_resumed_at": None,
+        "stabilization_until": None,
+        "consecutive_stalled_evaluations": 0,
+        "cooldown_until": None,
+        "automatic_failover_state": "disabled",
+        "failover_in_progress": False,
+        "last_automatic_failover_at": None,
+        "last_automatic_result": None,
+    }
 def _normalize_project_slug(value: Any) -> str:
     if not isinstance(value, str):
         return ""
@@ -104,8 +129,23 @@ def _normalize_policy(raw: Any) -> dict[str, Any]:
     full_hours = max(minimum_hours, min(MAXIMUM_ALLOWED_BASELINE_HOURS, full_hours))
     policy["minimum_baseline_hours"] = minimum_hours
     policy["full_baseline_hours"] = full_hours
-    policy["monitor_only"] = True
-    policy["manual_failover_only"] = True
+    policy["monitoring_enabled"] = bool(raw.get("monitoring_enabled", True))
+    policy["automatic_failover_enabled"] = bool(raw.get("automatic_failover_enabled", False))
+    try:
+        stalled_required = int(raw.get("stalled_evaluations_required", DEFAULT_STALLED_EVALUATIONS))
+    except (TypeError, ValueError):
+        stalled_required = DEFAULT_STALLED_EVALUATIONS
+    policy["stalled_evaluations_required"] = max(MINIMUM_STALLED_EVALUATIONS, min(MAXIMUM_STALLED_EVALUATIONS, stalled_required))
+    try:
+        cooldown_hours = int(raw.get("cooldown_hours", DEFAULT_COOLDOWN_HOURS))
+    except (TypeError, ValueError):
+        cooldown_hours = DEFAULT_COOLDOWN_HOURS
+    policy["cooldown_hours"] = max(MINIMUM_COOLDOWN_HOURS, min(MAXIMUM_COOLDOWN_HOURS, cooldown_hours))
+    try:
+        stabilization_minutes = int(raw.get("resume_stabilization_minutes", DEFAULT_RESUME_STABILIZATION_MINUTES))
+    except (TypeError, ValueError):
+        stabilization_minutes = DEFAULT_RESUME_STABILIZATION_MINUTES
+    policy["resume_stabilization_minutes"] = max(MINIMUM_RESUME_STABILIZATION_MINUTES, min(MAXIMUM_RESUME_STABILIZATION_MINUTES, stabilization_minutes))
     try:
         policy["updated_at"] = float(raw.get("updated_at", 0.0))
     except (TypeError, ValueError):
@@ -129,11 +169,12 @@ def _serialize_locked() -> dict[str, Any]:
             list(sample) for sample in samples if sample[0] >= cutoff
         ]
     return {
-        "version": 1,
+        "version": 2,
         "history": history_data,
         "policy": copy.deepcopy(_policy),
         "role_assignments": copy.deepcopy(_role_assignments),
         "baseline_mode": "rolling_excluding_recent_hour",
+        "runtime": copy.deepcopy(_runtime),
         "decision_log": list(_decision_log),
     }
 
@@ -161,7 +202,7 @@ def save() -> None:
 
 def load() -> None:
     """Load project-health state and discard tracker samples older than 48 hours."""
-    global _policy, _role_assignments, _frozen_baseline, _decision_log
+    global _policy, _role_assignments, _runtime, _decision_log
     if not os.path.exists(STATE_FILE):
         with _lock:
             _policy = _default_policy()
@@ -206,8 +247,12 @@ def load() -> None:
             for instance_name, role in raw_assignments.items()
             if isinstance(instance_name, str) and role in ("primary_canary", "fallback_fleet")
         } if isinstance(raw_assignments, dict) else {}
-        raw_baseline = raw_state.get("frozen_baseline")
-        _frozen_baseline = raw_baseline if isinstance(raw_baseline, dict) else None
+        _runtime = _default_runtime()
+        raw_runtime = raw_state.get("runtime", {})
+        if isinstance(raw_runtime, dict):
+            for runtime_key in _runtime:
+                if runtime_key in raw_runtime:
+                    _runtime[runtime_key] = raw_runtime[runtime_key]
         raw_log = raw_state.get("decision_log", [])
         _decision_log = deque(
             (entry for entry in raw_log if isinstance(entry, dict)),
@@ -233,7 +278,7 @@ def record_project_activity(
     required to measure coverage and distinguish a quiet project from missing data.
     """
     normalized_slug = _normalize_project_slug(project_slug)
-    if not normalized_slug:
+    if not normalized_slug or not get_policy().get("monitoring_enabled", True):
         return
     sample_time = float(timestamp if timestamp is not None else time.time())
     sample = (sample_time, max(0, int(items_delta)), max(0, int(bytes_delta)))
@@ -462,6 +507,11 @@ def configure_policy(
     canary_percent: int = DEFAULT_CANARY_PERCENT,
     minimum_baseline_hours: int = DEFAULT_MINIMUM_BASELINE_HOURS,
     full_baseline_hours: int = DEFAULT_FULL_BASELINE_HOURS,
+    monitoring_enabled: bool = True,
+    automatic_failover_enabled: bool = False,
+    stalled_evaluations_required: int = DEFAULT_STALLED_EVALUATIONS,
+    cooldown_hours: int = DEFAULT_COOLDOWN_HOURS,
+    resume_stabilization_minutes: int = DEFAULT_RESUME_STABILIZATION_MINUTES,
     actor: str = "dashboard",
 ) -> dict[str, Any]:
     """Persist primary/fallback policy. Automation remains disabled."""
@@ -489,18 +539,40 @@ def configure_policy(
         raise ValueError("Minimum baseline must be between 1 and 48 hours")
     if not normalized_minimum_hours <= normalized_full_hours <= MAXIMUM_ALLOWED_BASELINE_HOURS:
         raise ValueError("Full baseline must be at least the minimum baseline and no more than 48 hours")
+    normalized_stalled = max(MINIMUM_STALLED_EVALUATIONS, min(MAXIMUM_STALLED_EVALUATIONS, int(stalled_evaluations_required)))
+    normalized_cooldown = max(MINIMUM_COOLDOWN_HOURS, min(MAXIMUM_COOLDOWN_HOURS, int(cooldown_hours)))
+    normalized_stabilization = max(MINIMUM_RESUME_STABILIZATION_MINUTES, min(MAXIMUM_RESUME_STABILIZATION_MINUTES, int(resume_stabilization_minutes)))
     with _lock:
         old_primary = _policy.get("primary_project", "")
+        old_monitoring = _policy.get("monitoring_enabled", True)
         _policy = {
             "primary_project": primary,
             "fallback_project": fallback,
             "canary_percent": normalized_percent,
             "minimum_baseline_hours": normalized_minimum_hours,
             "full_baseline_hours": normalized_full_hours,
-            "monitor_only": True,
-            "manual_failover_only": True,
+            "monitoring_enabled": bool(monitoring_enabled),
+            "automatic_failover_enabled": bool(automatic_failover_enabled),
+            "stalled_evaluations_required": normalized_stalled,
+            "cooldown_hours": normalized_cooldown,
+            "resume_stabilization_minutes": normalized_stabilization,
             "updated_at": time.time(),
         }
+        now = time.time()
+        if old_monitoring != bool(monitoring_enabled):
+            _runtime["consecutive_stalled_evaluations"] = 0
+            if monitoring_enabled:
+                _runtime["monitoring_resumed_at"] = now
+                _runtime["stabilization_until"] = now + normalized_stabilization * 60
+                toggle_event = "monitoring_enabled"
+            else:
+                _runtime["monitoring_paused_at"] = now
+                _runtime["stabilization_until"] = None
+                _runtime["automatic_failover_state"] = "disabled"
+                toggle_event = "monitoring_disabled"
+            _append_decision_locked(toggle_event, "Project Health monitoring " + ("enabled" if monitoring_enabled else "disabled"), actor, {})
+        if old_primary != primary:
+            _runtime["consecutive_stalled_evaluations"] = 0
         _append_decision_locked(
             "policy_updated",
             "Project health policy updated",
@@ -631,6 +703,8 @@ def failover_availability() -> dict[str, Any]:
     primary_project = policy.get("primary_project", "")
     readiness = get_baseline_readiness(primary_project) if primary_project else None
     reasons = []
+    if not policy.get("monitoring_enabled", True):
+        reasons.append("Turn on Project Health monitoring")
     if not primary_project:
         reasons.append("Configure a primary project")
     if not policy.get("fallback_project"):
@@ -644,12 +718,12 @@ def failover_availability() -> dict[str, Any]:
         reasons.append("Preview and save Primary canary and Fallback fleet assignments")
     return {
         "available": not reasons,
-        "monitor_only": True,
-        "manual_only": True,
+        "monitoring_enabled": policy.get("monitoring_enabled", True),
+        "manual_only": False,
         "reasons": reasons,
         "primary_baseline": readiness,
         "message": (
-            "Manual failover is available. No automatic switching is enabled."
+            "Failover prerequisites are satisfied."
             if not reasons
             else "Failover unavailable: " + "; ".join(reasons) + "."
         ),
@@ -677,6 +751,98 @@ def log_manual_failover_decision(
         )
     force_save()
     return copy.deepcopy(entry)
+
+
+def get_runtime() -> dict[str, Any]:
+    with _lock:
+        return copy.deepcopy(_runtime or _default_runtime())
+
+
+def automatic_failover_prerequisites(now: float | None = None) -> dict[str, Any]:
+    current_time = float(now if now is not None else time.time())
+    policy = get_policy()
+    availability = failover_availability()
+    reasons = list(availability["reasons"])
+    runtime = get_runtime()
+    if not policy.get("automatic_failover_enabled"):
+        reasons.append("Automatic failover is turned off")
+    stabilization_until = runtime.get("stabilization_until")
+    if stabilization_until and current_time < float(stabilization_until):
+        reasons.append("Monitoring is stabilizing after resume")
+    cooldown_until = runtime.get("cooldown_until")
+    if cooldown_until and current_time < float(cooldown_until):
+        reasons.append("Automatic failover is in cooldown")
+    if runtime.get("failover_in_progress"):
+        reasons.append("Automatic failover is already in progress")
+    return {"available": not reasons, "reasons": reasons, "runtime": runtime}
+
+
+def register_automatic_evaluation(evaluation: dict[str, Any], now: float | None = None) -> dict[str, Any]:
+    """Persist one evaluator result and state whether main.py should switch the fleet."""
+    current_time = float(now if now is not None else time.time())
+    policy = get_policy()
+    prerequisites = automatic_failover_prerequisites(current_time)
+    item_ratio = evaluation.get("item_activity_ratio")
+    byte_ratio = evaluation.get("byte_activity_ratio")
+    both_stalled = (
+        evaluation.get("state") == "Likely stalled"
+        and item_ratio is not None and byte_ratio is not None
+        and item_ratio < STALLED_RATIO and byte_ratio < STALLED_RATIO
+    )
+    with _lock:
+        if not prerequisites["available"]:
+            _runtime["consecutive_stalled_evaluations"] = 0
+            _runtime["automatic_failover_state"] = "blocked"
+        elif both_stalled:
+            _runtime["consecutive_stalled_evaluations"] = int(_runtime.get("consecutive_stalled_evaluations", 0)) + 1
+            _runtime["automatic_failover_state"] = "confirming_stall"
+        else:
+            _runtime["consecutive_stalled_evaluations"] = 0
+            _runtime["automatic_failover_state"] = "armed"
+        trigger = (
+            prerequisites["available"] and both_stalled
+            and _runtime["consecutive_stalled_evaluations"] >= policy["stalled_evaluations_required"]
+        )
+        if trigger:
+            _runtime["failover_in_progress"] = True
+            _runtime["automatic_failover_state"] = "failover_in_progress"
+            _append_decision_locked("automatic_failover_triggered", "Automatic failover threshold reached", "automation", {"evaluation": copy.deepcopy(evaluation)})
+    force_save()
+    return {"trigger": trigger, "both_ratios_stalled": both_stalled, "runtime": get_runtime(), "prerequisites": prerequisites}
+
+
+def complete_automatic_failover(switched: int, failed: int, results: dict[str, Any]) -> None:
+    with _lock:
+        now = time.time()
+        _runtime["failover_in_progress"] = False
+        _runtime["last_automatic_failover_at"] = now
+        _runtime["cooldown_until"] = now + get_policy()["cooldown_hours"] * 3600
+        _runtime["consecutive_stalled_evaluations"] = 0
+        _runtime["automatic_failover_state"] = "cooldown"
+        _runtime["last_automatic_result"] = {"switched": switched, "failed": failed}
+        _append_decision_locked("automatic_failover_completed" if failed == 0 else "automatic_failover_partial", "Automatic failover finished", "automation", {"switched": switched, "failed": failed, "results": copy.deepcopy(results)})
+    force_save()
+
+
+def reset_primary_baseline(confirmation: str, actor: str = "dashboard") -> dict[str, Any]:
+    policy = get_policy()
+    primary = policy.get("primary_project", "")
+    expected = "RESET " + primary
+    if not primary:
+        raise ValueError("Configure a primary project before resetting its baseline")
+    if str(confirmation).strip() != expected:
+        raise ValueError("Type %s to confirm baseline reset" % expected)
+    with _lock:
+        previous_samples = list(_project_history.get(primary, ()))
+        previous_readiness = get_baseline_readiness(primary)
+        deleted_samples = len(previous_samples)
+        _project_history.pop(primary, None)
+        _runtime["consecutive_stalled_evaluations"] = 0
+        _runtime["automatic_failover_state"] = "waiting_for_baseline"
+        _runtime["stabilization_until"] = None
+        _append_decision_locked("baseline_reset", "Primary-project baseline history deleted", actor, {"project": primary, "deleted_samples": deleted_samples, "previous_minimum_coverage": previous_readiness["minimum"]["coverage_percent"], "previous_full_coverage": previous_readiness["full"]["coverage_percent"], "automatic_failover_enabled": policy.get("automatic_failover_enabled", False)})
+    force_save()
+    return {"project": primary, "deleted_samples": deleted_samples, "baseline_phase": "building", "automatic_failover_armed": policy.get("automatic_failover_enabled", False), "automatic_failover_available": False}
 
 
 def _append_decision_locked(
@@ -739,12 +905,14 @@ def get_status(instances: Iterable[Any] = ()) -> dict[str, Any]:
         for project_slug in sorted(project_slugs)
     }
     return {
-        "mode": "monitor_only",
-        "automatic_switching_enabled": False,
+        "mode": "automatic_capable",
+        "monitoring_enabled": policy.get("monitoring_enabled", True),
+        "automatic_switching_enabled": policy.get("automatic_failover_enabled", False),
+        "automation": automatic_failover_prerequisites(),
+        "runtime": get_runtime(),
         "policy": policy,
         "health": evaluations,
         "roles": get_role_assignments(),
-        "frozen_baseline": copy.deepcopy(_frozen_baseline),
         "failover": failover_availability(),
         "recommendation": recommend_canaries(instances),
         "decision_log": get_decision_log(100),

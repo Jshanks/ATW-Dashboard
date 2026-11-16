@@ -144,7 +144,7 @@ class DashboardState(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Project Health and manual failover planning (v4.5.2)
+# Project Health automation and baseline management (v4.6.0)
 # ---------------------------------------------------------------------------
 
 
@@ -192,6 +192,32 @@ class ProjectHealthPolicyRequest(BaseModel):
             "Covered history required for a full-confidence baseline. Defaults "
             "to 24 hours and cannot be shorter than the minimum baseline."
         ),
+    )
+    monitoring_enabled: bool = Field(
+        True,
+        description="Master Project Health collection and evaluation switch",
+    )
+    automatic_failover_enabled: bool = Field(
+        False,
+        description="Allow automatic failover after all prerequisites are satisfied",
+    )
+    stalled_evaluations_required: int = Field(
+        3,
+        ge=2,
+        le=10,
+        description="Consecutive stalled evaluations required before automatic failover",
+    )
+    cooldown_hours: int = Field(
+        6,
+        ge=1,
+        le=48,
+        description="Hours after automatic failover before another automatic action",
+    )
+    resume_stabilization_minutes: int = Field(
+        30,
+        ge=15,
+        le=120,
+        description="Delay after re-enabling monitoring before automation may trigger",
     )
 
     @field_validator("primary_project", "fallback_project")
@@ -243,6 +269,27 @@ class ProjectHealthRoleAssignmentRequest(BaseModel):
         if self.fallback_fleet and not self.primary_canaries:
             raise ValueError("At least one Primary canary is required when a fallback fleet is assigned")
         return self
+
+
+class ProjectHealthBaselineResetRequest(BaseModel):
+    """Delete retained Project Health samples for the configured primary project."""
+
+    confirmation: str = Field(..., min_length=1, max_length=220)
+    actor: str = Field("dashboard", min_length=1, max_length=200)
+
+    @field_validator("confirmation")
+    @classmethod
+    def normalize_reset_confirmation(cls, value: str) -> str:
+        normalized_value = value.strip()
+        if not normalized_value.startswith("RESET "):
+            raise ValueError("Confirmation must start with RESET followed by the primary project slug")
+        return normalized_value
+
+    @field_validator("actor")
+    @classmethod
+    def normalize_reset_actor(cls, value: str) -> str:
+        normalized_value = value.strip()
+        return normalized_value or "dashboard"
 
 
 class ManualFailoverDecisionAction(str, Enum):

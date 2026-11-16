@@ -326,17 +326,17 @@
         </div>
     </main>
 
-    <!-- Project Health Modal (v4.5.0: monitor-only and manual failover) -->
+    <!-- Project Health Modal (v4.6.0: monitoring control and automatic failover) -->
     <div id="project-health-modal" class="hidden fixed inset-0 bg-black/70 z-50 p-3 sm:p-6 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="project-health-title">
         <div class="project-health-shell bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-6xl mx-auto my-2 sm:my-6">
             <div class="sticky top-0 z-10 flex items-start justify-between gap-4 px-5 sm:px-6 py-4 bg-gray-900 border-b border-gray-800 rounded-t-xl">
                 <div>
                     <div class="flex items-center gap-3 flex-wrap">
                         <h2 id="project-health-title" class="text-xl font-bold text-white">Project Health</h2>
-                        <span class="px-2 py-1 rounded-full text-xs font-semibold bg-blue-950 text-blue-300 border border-blue-800">Monitor-only</span>
-                        <span class="px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">Manual failover only</span>
+                        <span id="project-health-monitoring-badge" class="px-2 py-1 rounded-full text-xs font-semibold bg-green-950 text-green-300 border border-green-800">Monitoring on</span>
+                        <span id="project-health-automation-badge" class="px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">Automatic failover off</span>
                     </div>
-                    <p class="mt-1 text-sm text-gray-400">Tracks project activity and prepares a reviewed failover plan. No automatic project switching is enabled in v4.5.0.</p>
+                    <p class="mt-1 text-sm text-gray-400">Collects tracker history, evaluates the configured primary project, and can switch the assigned fallback fleet when automation is explicitly enabled.</p>
                 </div>
                 <button id="btn-close-project-health" type="button" class="text-gray-400 hover:text-white p-2 rounded-lg hover:bg-gray-800" aria-label="Close Project Health">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
@@ -345,6 +345,22 @@
 
             <div class="p-5 sm:p-6 space-y-6">
                 <div id="project-health-message" class="hidden rounded-lg border px-4 py-3 text-sm" role="status" aria-live="polite"></div>
+
+                <section class="project-health-section" aria-labelledby="project-health-controls-title">
+                    <h3 id="project-health-controls-title" class="text-base font-semibold text-white">Operation</h3>
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+                        <label class="project-health-toggle-row">
+                            <span><strong class="text-white">Project Health monitoring</strong><span class="block text-sm text-gray-400 mt-1">Collect history, build baselines, evaluate health, and make failover actions available.</span></span>
+                            <input id="project-health-monitoring-enabled" type="checkbox" class="project-health-toggle" checked>
+                        </label>
+                        <label class="project-health-toggle-row">
+                            <span><strong class="text-white">Automatic failover</strong><span class="block text-sm text-gray-400 mt-1">Switch only the saved Fallback fleet after consecutive stalled evaluations. Automatic failback is not enabled.</span></span>
+                            <input id="project-health-automatic-failover-enabled" type="checkbox" class="project-health-toggle">
+                        </label>
+                    </div>
+                    <div id="project-health-off-banner" class="hidden mt-4 rounded-lg border border-gray-600 bg-gray-950/60 px-4 py-3 text-sm text-gray-300"><strong class="text-white">Project Health is off.</strong> No baseline data is being collected and no Project Health failover actions will occur. Warrior projects remain under normal dashboard control.</div>
+                    <div id="project-health-automation-state" class="mt-4 rounded-lg border border-gray-700 bg-gray-950/40 px-4 py-3 text-sm text-gray-300" aria-live="polite">Automatic failover is disabled.</div>
+                </section>
 
                 <section aria-labelledby="project-health-status-title">
                     <div class="flex items-center justify-between gap-3 mb-3">
@@ -366,14 +382,17 @@
                     <div class="flex items-start justify-between gap-3 flex-wrap">
                         <div><h3 id="project-health-policy-title" class="text-base font-semibold text-white">Monitoring policy</h3><p class="text-sm text-gray-400 mt-1">Choose the project being evaluated and the destination used only for an operator-confirmed failover.</p></div>
                     </div>
-                    <form id="project-health-policy-form" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mt-4">
+                    <form id="project-health-policy-form" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
                         <label class="block"><span class="project-health-label">Primary project</span><select id="project-health-primary-project" required class="project-health-input"><option value="">Select primary project</option></select></label>
                         <label class="block"><span class="project-health-label">Fallback project</span><select id="project-health-fallback-project" required class="project-health-input"><option value="">Select fallback project</option></select></label>
                         <label class="block"><span class="project-health-label">Canary allocation</span><div class="flex items-center gap-2"><input id="project-health-canary-percent" type="number" min="1" max="100" value="5" required class="project-health-input"><span class="text-gray-400">%</span></div><span class="project-health-help">Recommended 5%; minimum 3 and maximum 10 Warriors.</span></label>
                         <label class="block"><span class="project-health-label">Minimum baseline</span><div class="flex items-center gap-2"><input id="project-health-minimum-baseline-hours" type="number" min="1" max="48" value="6" required class="project-health-input"><span class="text-gray-400">hours</span></div><span class="project-health-help">Enables advisory health and manual failover. Default: 6 hours.</span></label>
                         <label class="block"><span class="project-health-label">Full baseline</span><div class="flex items-center gap-2"><input id="project-health-full-baseline-hours" type="number" min="1" max="48" value="24" required class="project-health-input"><span class="text-gray-400">hours</span></div><span class="project-health-help">Marks the baseline fully established. Default: 24 hours.</span></label>
-                        <div class="md:col-span-2 lg:col-span-5 rounded-lg border border-amber-900/60 bg-amber-950/20 px-4 py-3 text-sm text-amber-200"><strong>Testing note:</strong> Shorter windows produce faster results but are more sensitive to brief spikes, quiet periods, and time-of-day variation. Full baseline cannot be shorter than minimum baseline.</div>
-                        <div class="md:col-span-2 lg:col-span-5 flex justify-end gap-3 flex-wrap">
+                        <label class="block"><span class="project-health-label">Stalled evaluations</span><input id="project-health-stalled-evaluations" type="number" min="2" max="10" value="3" required class="project-health-input"><span class="project-health-help">Consecutive five-minute evaluations required. Default: 3.</span></label>
+                        <label class="block"><span class="project-health-label">Cooldown</span><div class="flex items-center gap-2"><input id="project-health-cooldown-hours" type="number" min="1" max="48" value="6" required class="project-health-input"><span class="text-gray-400">hours</span></div><span class="project-health-help">Blocks another automatic action after failover.</span></label>
+                        <label class="block"><span class="project-health-label">Resume stabilization</span><div class="flex items-center gap-2"><input id="project-health-stabilization-minutes" type="number" min="15" max="120" value="30" required class="project-health-input"><span class="text-gray-400">minutes</span></div><span class="project-health-help">Delay before automation can trigger after monitoring resumes.</span></label>
+                        <div class="md:col-span-2 lg:col-span-3 rounded-lg border border-amber-900/60 bg-amber-950/20 px-4 py-3 text-sm text-amber-200"><strong>Testing note:</strong> Shorter windows produce faster results but are more sensitive to brief spikes, quiet periods, and time-of-day variation. Full baseline cannot be shorter than minimum baseline.</div>
+                        <div class="md:col-span-2 lg:col-span-3 flex justify-end gap-3 flex-wrap">
                             <button id="btn-save-project-health-policy" type="submit" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm font-semibold">Save policy</button>
                         </div>
                     </form>
@@ -401,7 +420,14 @@
                 <section class="project-health-section" aria-labelledby="project-health-failover-title">
                     <h3 id="project-health-failover-title" class="text-base font-semibold text-white">Manual failover</h3>
                     <p class="text-sm text-gray-400 mt-1">This changes the saved Fallback fleet to the configured fallback project. Primary canaries remain on the primary project.</p>
-                    <div class="mt-4 flex flex-col sm:flex-row gap-3 sm:items-end"><label class="block flex-1"><span class="project-health-label">Confirmation</span><input id="project-health-failover-confirmation" type="text" autocomplete="off" placeholder="Type FAILOVER" class="project-health-input"><span class="project-health-help">Automatic switching is not implemented. This action requires an operator.</span></label><button id="btn-execute-project-health-failover" type="button" disabled class="bg-red-700 hover:bg-red-600 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed px-5 py-2.5 rounded-lg text-sm font-semibold whitespace-nowrap">Execute manual failover</button></div>
+                    <div class="mt-4 flex flex-col sm:flex-row gap-3 sm:items-end"><label class="block flex-1"><span class="project-health-label">Confirmation</span><input id="project-health-failover-confirmation" type="text" autocomplete="off" placeholder="Type FAILOVER" class="project-health-input"><span class="project-health-help">This action remains available when monitoring prerequisites are satisfied, even if automatic failover is off.</span></label><button id="btn-execute-project-health-failover" type="button" disabled class="bg-red-700 hover:bg-red-600 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed px-5 py-2.5 rounded-lg text-sm font-semibold whitespace-nowrap">Execute manual failover</button></div>
+                </section>
+
+                <section class="project-health-section project-health-danger-section" aria-labelledby="project-health-reset-title">
+                    <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                        <div><h3 id="project-health-reset-title" class="text-base font-semibold text-red-300">Reset primary baseline</h3><p class="text-sm text-gray-400 mt-1">Permanently deletes retained Project Health samples for the configured primary project. Coverage returns to 0%, health ratios and failover become unavailable, and the minimum baseline must rebuild. Policy, assignments, other project history, and the decision log remain.</p></div>
+                        <button id="btn-open-project-health-reset" type="button" class="bg-red-950 hover:bg-red-900 border border-red-800 text-red-200 px-4 py-2 rounded-lg text-sm font-semibold whitespace-nowrap">Reset baseline</button>
+                    </div>
                 </section>
 
                 <section class="project-health-section" aria-labelledby="project-health-history-title">
@@ -409,6 +435,15 @@
                     <div class="overflow-x-auto mt-3"><table class="w-full text-sm"><thead><tr class="text-left text-gray-400 border-b border-gray-800"><th class="py-2 pr-4 font-medium">Time</th><th class="py-2 pr-4 font-medium">Event</th><th class="py-2 pr-4 font-medium">Actor</th><th class="py-2 font-medium">Details</th></tr></thead><tbody id="project-health-decision-log"><tr><td colspan="4" class="py-6 text-center text-gray-500">No Project Health decisions recorded.</td></tr></tbody></table></div>
                 </section>
             </div>
+        </div>
+    </div>
+
+    <div id="project-health-reset-dialog" class="hidden fixed inset-0 bg-black/80 z-[60] p-4 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="project-health-reset-dialog-title">
+        <div class="bg-gray-900 border border-red-800 rounded-xl shadow-2xl w-full max-w-xl mx-auto my-16 p-6">
+            <h2 id="project-health-reset-dialog-title" class="text-xl font-bold text-red-300">Delete primary-project baseline?</h2>
+            <p id="project-health-reset-warning" class="mt-3 text-sm text-gray-300">Existing baseline coverage will be permanently deleted and must be rebuilt before health ratios or failover are available.</p>
+            <label class="block mt-5"><span class="project-health-label">Confirmation</span><input id="project-health-reset-confirmation" type="text" autocomplete="off" class="project-health-input" placeholder="RESET project-slug"><span id="project-health-reset-help" class="project-health-help">Type the displayed phrase exactly.</span></label>
+            <div class="flex justify-end gap-3 mt-6"><button id="btn-cancel-project-health-reset" type="button" class="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg text-sm font-semibold">Cancel</button><button id="btn-confirm-project-health-reset" type="button" disabled class="bg-red-700 hover:bg-red-600 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed px-4 py-2 rounded-lg text-sm font-semibold">Delete baseline and rebuild</button></div>
         </div>
     </div>
 

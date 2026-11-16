@@ -20,6 +20,7 @@
  *         persistent decisions, and operator-confirmed manual failover.
  * v4.5.1: editable minimum/full baseline windows and header progress indicator.
  * v4.5.2: rolling health baseline and whole-card Warrior selection.
+ * v4.6.0: monitoring control, automatic failover, and destructive baseline reset.
  */
 (function () {
     "use strict";
@@ -1756,7 +1757,7 @@ function applyVersionBadge(cfg) {
     }
 }
 
-    // ---- Project Health (v4.5.1, monitor-only) ----
+    // ---- Project Health (v4.6.0: monitoring, automation, and reset) ----
     var projectHealthState = null;
     var projectHealthPreview = null;
     var projectHealthBusy = false;
@@ -1777,6 +1778,21 @@ function applyVersionBadge(cfg) {
     var btnSaveRoles = document.getElementById("btn-save-project-health-roles");
     var failoverConfirmationInput = document.getElementById("project-health-failover-confirmation");
     var btnExecuteFailover = document.getElementById("btn-execute-project-health-failover");
+    var monitoringEnabledInput = document.getElementById("project-health-monitoring-enabled");
+    var automaticFailoverEnabledInput = document.getElementById("project-health-automatic-failover-enabled");
+    var stalledEvaluationsInput = document.getElementById("project-health-stalled-evaluations");
+    var cooldownHoursInput = document.getElementById("project-health-cooldown-hours");
+    var stabilizationMinutesInput = document.getElementById("project-health-stabilization-minutes");
+    var monitoringBadge = document.getElementById("project-health-monitoring-badge");
+    var automationBadge = document.getElementById("project-health-automation-badge");
+    var monitoringOffBanner = document.getElementById("project-health-off-banner");
+    var automationStateElement = document.getElementById("project-health-automation-state");
+    var resetDialog = document.getElementById("project-health-reset-dialog");
+    var resetConfirmationInput = document.getElementById("project-health-reset-confirmation");
+    var resetHelp = document.getElementById("project-health-reset-help");
+    var btnOpenReset = document.getElementById("btn-open-project-health-reset");
+    var btnCancelReset = document.getElementById("btn-cancel-project-health-reset");
+    var btnConfirmReset = document.getElementById("btn-confirm-project-health-reset");
 
     function projectHealthErrorDetail(response) {
         return response.json().then(function (data) {
@@ -1909,22 +1925,36 @@ function applyVersionBadge(cfg) {
     function renderProjectHealthHeaderIndicator(state) {
         if (!projectHealthHeaderIndicator) return;
         var policy = state.policy || {};
+        var runtime = state.runtime || {};
         var evaluation = (state.health || {})[policy.primary_project] || null;
         var readiness = evaluation ? evaluation.baseline : null;
-        if (!policy.primary_project || !readiness || readiness.full_complete) {
-            projectHealthHeaderIndicator.classList.add("hidden");
-            return;
+        var nowSeconds = Date.now() / 1000;
+        projectHealthHeaderIndicator.classList.remove("project-health-header-indicator-provisional", "project-health-header-indicator-off", "project-health-header-indicator-danger");
+        if (runtime.failover_in_progress) {
+            projectHealthHeaderIndicatorLabel.textContent = "Failover in progress";
+            projectHealthHeaderIndicatorDetail.textContent = "Automatic";
+            projectHealthHeaderIndicator.classList.add("project-health-header-indicator-danger");
+        } else if (!policy.monitoring_enabled) {
+            projectHealthHeaderIndicatorLabel.textContent = "Project Health Off";
+            projectHealthHeaderIndicatorDetail.textContent = "Manual control";
+            projectHealthHeaderIndicator.classList.add("project-health-header-indicator-off");
+        } else if (runtime.stabilization_until && runtime.stabilization_until > nowSeconds) {
+            projectHealthHeaderIndicatorLabel.textContent = "Stabilizing";
+            projectHealthHeaderIndicatorDetail.textContent = Math.ceil((runtime.stabilization_until - nowSeconds) / 60) + "m";
+            projectHealthHeaderIndicator.classList.add("project-health-header-indicator-provisional");
+        } else if (runtime.automatic_failover_state === "confirming_stall") {
+            projectHealthHeaderIndicatorLabel.textContent = "Likely stalled";
+            projectHealthHeaderIndicatorDetail.textContent = runtime.consecutive_stalled_evaluations + "/" + policy.stalled_evaluations_required;
+            projectHealthHeaderIndicator.classList.add("project-health-header-indicator-danger");
+        } else if (!policy.primary_project || !readiness || readiness.full_complete) {
+            projectHealthHeaderIndicator.classList.add("hidden"); return;
+        } else {
+            var window = readiness.phase === "building" ? readiness.minimum : readiness.full;
+            var coverage = Number(window.coverage_percent || 0);
+            projectHealthHeaderIndicatorLabel.textContent = readiness.phase === "building" ? "Baseline " + coverage.toFixed(0) + "%" : "Provisional " + coverage.toFixed(0) + "%";
+            projectHealthHeaderIndicatorDetail.textContent = formatBaselineHours(Number(window.span_seconds || 0) / 3600) + " / " + formatBaselineHours(Number(window.hours || 0));
+            if (readiness.phase !== "building") projectHealthHeaderIndicator.classList.add("project-health-header-indicator-provisional");
         }
-        var minimum = readiness.minimum || {};
-        var full = readiness.full || {};
-        var phase = readiness.phase || "building";
-        var window = phase === "building" ? minimum : full;
-        var coverage = Number(window.coverage_percent || 0);
-        var observedHours = Number(window.span_seconds || 0) / 3600;
-        var targetHours = Number(window.hours || (phase === "building" ? policy.minimum_baseline_hours : policy.full_baseline_hours) || 0);
-        projectHealthHeaderIndicatorLabel.textContent = phase === "building" ? "Baseline " + coverage.toFixed(0) + "%" : "Provisional " + coverage.toFixed(0) + "%";
-        projectHealthHeaderIndicatorDetail.textContent = formatBaselineHours(observedHours) + " / " + formatBaselineHours(targetHours);
-        projectHealthHeaderIndicator.classList.toggle("project-health-header-indicator-provisional", phase !== "building");
         projectHealthHeaderIndicator.classList.remove("hidden");
     }
 
@@ -1937,6 +1967,19 @@ function applyVersionBadge(cfg) {
         canaryPercentInput.value = policy.canary_percent || 5;
         minimumBaselineHoursInput.value = policy.minimum_baseline_hours || 6;
         fullBaselineHoursInput.value = policy.full_baseline_hours || 24;
+        monitoringEnabledInput.checked = policy.monitoring_enabled !== false;
+        automaticFailoverEnabledInput.checked = Boolean(policy.automatic_failover_enabled);
+        stalledEvaluationsInput.value = policy.stalled_evaluations_required || 3;
+        cooldownHoursInput.value = policy.cooldown_hours || 6;
+        stabilizationMinutesInput.value = policy.resume_stabilization_minutes || 30;
+        monitoringBadge.textContent = policy.monitoring_enabled !== false ? "Monitoring on" : "Monitoring off";
+        automationBadge.textContent = policy.automatic_failover_enabled ? "Automatic failover on" : "Automatic failover off";
+        monitoringOffBanner.classList.toggle("hidden", policy.monitoring_enabled !== false);
+        var runtime = state.runtime || {};
+        var automationReasons = state.automation && state.automation.reasons ? state.automation.reasons : [];
+        automationStateElement.textContent = runtime.failover_in_progress ? "Automatic failover is in progress." :
+            (runtime.automatic_failover_state === "confirming_stall" ? "Stall confirmation " + runtime.consecutive_stalled_evaluations + " of " + policy.stalled_evaluations_required + "." :
+            (policy.automatic_failover_enabled ? (automationReasons.length ? "Automatic failover armed but blocked: " + automationReasons.join("; ") + "." : "Automatic failover is armed.") : "Automatic failover is disabled."));
         var evaluation = (state.health || {})[policy.primary_project] || null;
         var stateElement = document.getElementById("project-health-primary-state");
         stateElement.textContent = evaluation ? evaluation.state : "Not configured";
@@ -1978,7 +2021,9 @@ function applyVersionBadge(cfg) {
         var baselineComplete = Boolean(evaluation && evaluation.baseline && evaluation.baseline.complete);
         btnPreviewGroups.disabled = projectHealthBusy || !policy.primary_project || !policy.fallback_project;
         btnSaveRoles.disabled = projectHealthBusy || !projectHealthPreview || !projectHealthPreview.primary_canaries.length;
-        var failoverAvailable = Boolean(projectHealthState.failover && projectHealthState.failover.available);
+        var monitoringEnabled = projectHealthState.policy && projectHealthState.policy.monitoring_enabled !== false;
+        var failoverAvailable = monitoringEnabled && Boolean(projectHealthState.failover && projectHealthState.failover.available);
+        btnOpenReset.disabled = projectHealthBusy || !(projectHealthState.policy && projectHealthState.policy.primary_project);
         btnExecuteFailover.disabled = projectHealthBusy || !failoverAvailable || failoverConfirmationInput.value.trim() !== "FAILOVER";
         btnRefreshProjectHealth.disabled = projectHealthBusy;
     }
@@ -2013,6 +2058,18 @@ function applyVersionBadge(cfg) {
     projectHealthModal.addEventListener("click", function (event) { if (event.target === projectHealthModal) closeProjectHealth(); });
     failoverConfirmationInput.addEventListener("input", updateProjectHealthActions);
 
+    monitoringEnabledInput.addEventListener("change", function () {
+        if (!monitoringEnabledInput.checked && !window.confirm("Turn off Project Health monitoring? Baseline collection, health evaluation, manual failover, and automatic failover will stop. Existing configuration and history will be retained, and Warrior projects will remain unchanged.")) {
+            monitoringEnabledInput.checked = true;
+        }
+    });
+
+    automaticFailoverEnabledInput.addEventListener("change", function () {
+        if (automaticFailoverEnabledInput.checked && !window.confirm("Enable automatic failover? The saved Fallback fleet may be switched after the configured consecutive stalled evaluations. Primary canaries remain on the primary project. Automatic failback is not enabled.")) {
+            automaticFailoverEnabledInput.checked = false;
+        }
+    });
+
     projectHealthPolicyForm.addEventListener("submit", function (event) {
         event.preventDefault();
         var primaryProject = primaryProjectSelect.value;
@@ -2020,14 +2077,20 @@ function applyVersionBadge(cfg) {
         var canaryPercent = parseInt(canaryPercentInput.value, 10);
         var minimumBaselineHours = parseInt(minimumBaselineHoursInput.value, 10);
         var fullBaselineHours = parseInt(fullBaselineHoursInput.value, 10);
+        var stalledEvaluations = parseInt(stalledEvaluationsInput.value, 10);
+        var cooldownHours = parseInt(cooldownHoursInput.value, 10);
+        var stabilizationMinutes = parseInt(stabilizationMinutesInput.value, 10);
         if (!primaryProject || !fallbackProject) return setProjectHealthMessage("Select both a primary and fallback project.", "error");
         if (primaryProject === fallbackProject) return setProjectHealthMessage("Primary and fallback projects must be different.", "error");
         if (!Number.isInteger(canaryPercent) || canaryPercent < 1 || canaryPercent > 100) return setProjectHealthMessage("Canary allocation must be a whole number from 1 to 100.", "error");
         if (!Number.isInteger(minimumBaselineHours) || minimumBaselineHours < 1 || minimumBaselineHours > 48) return setProjectHealthMessage("Minimum baseline must be a whole number from 1 to 48 hours.", "error");
         if (!Number.isInteger(fullBaselineHours) || fullBaselineHours < 1 || fullBaselineHours > 48) return setProjectHealthMessage("Full baseline must be a whole number from 1 to 48 hours.", "error");
         if (fullBaselineHours < minimumBaselineHours) return setProjectHealthMessage("Full baseline cannot be shorter than the minimum baseline.", "error");
+        if (!Number.isInteger(stalledEvaluations) || stalledEvaluations < 2 || stalledEvaluations > 10) return setProjectHealthMessage("Stalled evaluations must be from 2 to 10.", "error");
+        if (!Number.isInteger(cooldownHours) || cooldownHours < 1 || cooldownHours > 48) return setProjectHealthMessage("Cooldown must be from 1 to 48 hours.", "error");
+        if (!Number.isInteger(stabilizationMinutes) || stabilizationMinutes < 15 || stabilizationMinutes > 120) return setProjectHealthMessage("Resume stabilization must be from 15 to 120 minutes.", "error");
         setProjectHealthBusy(true);
-        projectHealthRequest("api/project-health/policy", { method: "PUT", body: JSON.stringify({ primary_project: primaryProject, fallback_project: fallbackProject, canary_percent: canaryPercent, minimum_baseline_hours: minimumBaselineHours, full_baseline_hours: fullBaselineHours }) })
+        projectHealthRequest("api/project-health/policy", { method: "PUT", body: JSON.stringify({ primary_project: primaryProject, fallback_project: fallbackProject, canary_percent: canaryPercent, minimum_baseline_hours: minimumBaselineHours, full_baseline_hours: fullBaselineHours, monitoring_enabled: monitoringEnabledInput.checked, automatic_failover_enabled: automaticFailoverEnabledInput.checked, stalled_evaluations_required: stalledEvaluations, cooldown_hours: cooldownHours, resume_stabilization_minutes: stabilizationMinutes }) })
             .then(function () { projectHealthPreview = null; showToast("Project Health policy saved", "success"); return loadProjectHealth(); })
             .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
             .finally(function () { setProjectHealthBusy(false); });
@@ -2047,6 +2110,40 @@ function applyVersionBadge(cfg) {
         setProjectHealthBusy(true);
         projectHealthRequest("api/project-health/roles", { method: "PUT", body: JSON.stringify({ primary_canaries: projectHealthPreview.primary_canaries.map(function (item) { return item.name; }), fallback_fleet: projectHealthPreview.fallback_fleet.map(function (item) { return item.name; }) }) })
             .then(function () { showToast("Project Health group assignments saved", "success"); return loadProjectHealth(); })
+            .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
+            .finally(function () { setProjectHealthBusy(false); });
+    });
+
+    function closeBaselineResetDialog() {
+        resetDialog.classList.add("hidden");
+        resetConfirmationInput.value = "";
+        btnConfirmReset.disabled = true;
+    }
+    btnOpenReset.addEventListener("click", function () {
+        var primary = projectHealthState && projectHealthState.policy ? projectHealthState.policy.primary_project : "";
+        if (!primary) return;
+        var phrase = "RESET " + primary;
+        resetHelp.textContent = "Type " + phrase + " exactly. Coverage will return to 0% and must rebuild.";
+        resetConfirmationInput.placeholder = phrase;
+        resetDialog.classList.remove("hidden");
+        resetConfirmationInput.focus();
+    });
+    btnCancelReset.addEventListener("click", closeBaselineResetDialog);
+    resetDialog.addEventListener("click", function (event) { if (event.target === resetDialog) closeBaselineResetDialog(); });
+    resetConfirmationInput.addEventListener("input", function () {
+        var primary = projectHealthState && projectHealthState.policy ? projectHealthState.policy.primary_project : "";
+        btnConfirmReset.disabled = resetConfirmationInput.value.trim() !== "RESET " + primary;
+    });
+    btnConfirmReset.addEventListener("click", function () {
+        var phrase = resetConfirmationInput.value.trim();
+        if (!phrase || btnConfirmReset.disabled) return;
+        setProjectHealthBusy(true);
+        projectHealthRequest("api/project-health/baseline/reset", { method: "POST", body: JSON.stringify({ confirmation: phrase, actor: "dashboard" }) })
+            .then(function (result) {
+                closeBaselineResetDialog();
+                showToast("Deleted " + result.deleted_samples + " baseline samples for " + result.project, "success");
+                return loadProjectHealth();
+            })
             .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
             .finally(function () { setProjectHealthBusy(false); });
     });

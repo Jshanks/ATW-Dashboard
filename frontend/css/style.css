@@ -851,3 +851,153 @@ body.has-selection #instances-grid {
         border-radius: 0.65rem;
     }
 }
+
+/* --------------------------------------------------------------------------
+   Project Health controls and automation states (v4.6.0)
+   -------------------------------------------------------------------------- */
+.project-health-toggle-row {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.25rem;
+    border: 1px solid rgb(55 65 81 / 0.85);
+    border-radius: 0.75rem;
+    background: rgb(3 7 18 / 0.42);
+    padding: 1rem;
+    cursor: pointer;
+}
+
+.project-health-toggle-row:hover {
+    border-color: rgb(75 85 99);
+    background: rgb(17 24 39 / 0.7);
+}
+
+.project-health-toggle {
+    appearance: none;
+    position: relative;
+    width: 3.25rem;
+    height: 1.75rem;
+    flex: 0 0 auto;
+    border: 1px solid rgb(75 85 99);
+    border-radius: 9999px;
+    background: rgb(31 41 55);
+    cursor: pointer;
+    transition: border-color 150ms ease, background-color 150ms ease;
+}
+
+.project-health-toggle::after {
+    content: "";
+    position: absolute;
+    top: 0.1875rem;
+    left: 0.1875rem;
+    width: 1.25rem;
+    height: 1.25rem;
+    border-radius: 9999px;
+    background: rgb(209 213 219);
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.45);
+    transition: transform 150ms ease, background-color 150ms ease;
+}
+
+.project-health-toggle:checked {
+    border-color: rgb(37 99 235);
+    background: rgb(37 99 235);
+}
+
+.project-health-toggle:checked::after {
+    background: #ffffff;
+    transform: translateX(1.5rem);
+}
+
+.project-health-toggle:focus-visible {
+    outline: 2px solid rgb(96 165 250);
+    outline-offset: 3px;
+}
+
+.project-health-toggle:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+.project-health-danger-section {
+    border-color: rgb(127 29 29 / 0.9);
+    background: rgb(69 10 10 / 0.16);
+}
+
+#project-health-reset-dialog > div {
+    box-shadow: 0 24px 70px rgb(0 0 0 / 0.65);
+}
+
+#project-health-reset-dialog .project-health-input {
+    border-color: rgb(153 27 27);
+}
+
+#project-health-reset-dialog .project-health-input:focus {
+    border-color: rgb(239 68 68);
+    box-shadow: 0 0 0 3px rgb(239 68 68 / 0.22);
+}
+
+.project-health-header-indicator-off {
+    border-color: rgb(75 85 99 / 0.9);
+    background: rgb(31 41 55 / 0.72);
+    color: rgb(209 213 219);
+}
+
+.project-health-header-indicator-off:hover {
+    border-color: rgb(107 114 128);
+    background: rgb(55 65 81 / 0.82);
+    color: rgb(243 244 246);
+}
+
+.project-health-header-indicator-danger {
+    border-color: rgb(185 28 28 / 0.95);
+    background: rgb(127 29 29 / 0.52);
+    color: rgb(254 202 202);
+    animation: project-health-attention 1.8s ease-in-out infinite;
+}
+
+.project-health-header-indicator-danger:hover {
+    border-color: rgb(239 68 68);
+    background: rgb(153 27 27 / 0.65);
+    color: rgb(254 226 226);
+}
+
+@keyframes project-health-attention {
+    0%, 100% { box-shadow: 0 0 0 0 rgb(239 68 68 / 0); }
+    50% { box-shadow: 0 0 0 4px rgb(239 68 68 / 0.15); }
+}
+
+@media (max-width: 639px) {
+    .project-health-toggle-row {
+        align-items: flex-start;
+        gap: 0.75rem;
+        padding: 0.875rem;
+    }
+
+    .project-health-toggle {
+        margin-top: 0.125rem;
+    }
+
+    #project-health-reset-dialog {
+        padding: 0;
+    }
+
+    #project-health-reset-dialog > div {
+        min-height: 100dvh;
+        margin: 0;
+        border-left: 0;
+        border-right: 0;
+        border-radius: 0;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .project-health-toggle,
+    .project-health-toggle::after {
+        transition: none;
+    }
+
+    .project-health-header-indicator-danger {
+        animation: none;
+    }
+}

@@ -26,6 +26,7 @@ from backend.models import (
     ProjectHealthPolicyRequest,
     ProjectHealthPreviewRequest,
     ProjectHealthRoleAssignmentRequest,
+    ProjectHealthBaselineResetRequest,
     ManualFailoverDecisionRequest,
     ManualFailoverRequest,
     WarriorInstanceConfig,
@@ -58,6 +59,7 @@ ws_connections = []
 broadcast_task = None
 tracker_task = None
 auto_resume_task = None
+automatic_failover_task = None
 
 # Pause state: {instance_name: {"project_slug": str, "paused_at": float, "resume_at": float|None}}
 # "project_slug" here is the project to RESUME with: the warrior's selected_project,
@@ -291,7 +293,7 @@ async def _auto_resume_loop():
 # ------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app):
-    global config, broadcast_task, tracker_task, auto_resume_task
+    global config, broadcast_task, tracker_task, auto_resume_task, automatic_failover_task
 
     config = DashboardConfig.load()
     logger.info('Dashboard "%s" starting', config.title)
@@ -321,9 +323,10 @@ async def lifespan(app):
     broadcast_task = asyncio.create_task(_broadcast_loop())
     tracker_task = asyncio.create_task(_tracker_poll_loop())
     auto_resume_task = asyncio.create_task(_auto_resume_loop())
+    automatic_failover_task = asyncio.create_task(_automatic_failover_loop())
     yield
 
-    for task in [broadcast_task, tracker_task, auto_resume_task]:
+    for task in [broadcast_task, tracker_task, auto_resume_task, automatic_failover_task]:
         if task:
             task.cancel()
             try:
@@ -907,6 +910,11 @@ async def update_project_health_policy(request: ProjectHealthPolicyRequest):
             request.canary_percent,
             request.minimum_baseline_hours,
             request.full_baseline_hours,
+            request.monitoring_enabled,
+            request.automatic_failover_enabled,
+            request.stalled_evaluations_required,
+            request.cooldown_hours,
+            request.resume_stabilization_minutes,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
@@ -945,6 +953,24 @@ async def save_project_health_roles(request: ProjectHealthRoleAssignmentRequest)
     return {"status": "ok", "roles": roles, "failover": project_health.failover_availability()}
 
 
+@app.post("/api/project-health/baseline/reset")
+async def reset_project_health_baseline(request: ProjectHealthBaselineResetRequest):
+    """Delete only the configured primary project's Project Health history."""
+    policy = project_health.get_policy()
+    primary_project = policy.get("primary_project", "")
+    try:
+        result = project_health.reset_primary_baseline(request.confirmation, request.actor)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    # The tracker total is cumulative. Removing this counter reference ensures
+    # the next poll establishes a fresh zero-delta point instead of importing
+    # activity from before the reset into the rebuilt baseline.
+    if primary_project:
+        _tracker_baselines.pop(primary_project, None)
+        _save_tracker_baselines()
+    return {"status": "ok", **result, "project_health": project_health.get_status(client.status for client in clients.values())}
+
+
 @app.post("/api/project-health/decision")
 async def record_project_health_decision(request: ManualFailoverDecisionRequest):
     try:
@@ -961,7 +987,7 @@ _MANUAL_FAILOVER_BATCH_DELAY_SECONDS = 1
 _manual_failover_lock = asyncio.Lock()
 
 
-async def _switch_manual_failover_instance(name, fallback_project):
+async def _switch_failover_instance(name, fallback_project):
     client = clients.get(name)
     if not client:
         return name, {"status": "error", "detail": "Not found"}
@@ -1006,7 +1032,7 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
         for start in range(0, len(fallback_names), _MANUAL_FAILOVER_BATCH_SIZE):
             batch = fallback_names[start:start + _MANUAL_FAILOVER_BATCH_SIZE]
             for name, result in await asyncio.gather(*(
-                _switch_manual_failover_instance(name, policy["fallback_project"]) for name in batch
+                _switch_failover_instance(name, policy["fallback_project"]) for name in batch
             )):
                 results[name] = result
             if start + _MANUAL_FAILOVER_BATCH_SIZE < len(fallback_names):
@@ -1021,11 +1047,61 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
     )
     return {
         "status": "ok" if failed == 0 else "partial", "mode": "manual",
-        "automatic_switching_enabled": False,
+        "automatic_switching_enabled": project_health.get_policy().get("automatic_failover_enabled", False),
         "primary_canaries_unchanged": primary_canaries,
         "fallback_project": policy["fallback_project"],
         "switched": switched, "failed": failed, "results": results,
     }
+
+
+async def _execute_automatic_failover():
+    policy = project_health.get_policy()
+    assignments = project_health.get_role_assignments()
+    fallback_names = [name for name, role in assignments.items() if role == "fallback_fleet"]
+    primary_canaries = [name for name, role in assignments.items() if role == "primary_canary"]
+    results = {}
+    for start in range(0, len(fallback_names), _MANUAL_FAILOVER_BATCH_SIZE):
+        # Turning monitoring or automation off stops new batches. Requests already
+        # in flight finish, which avoids abandoning Warriors in an unknown state.
+        current_policy = project_health.get_policy()
+        if not current_policy.get("monitoring_enabled") or not current_policy.get("automatic_failover_enabled"):
+            for skipped_name in fallback_names[start:]:
+                results[skipped_name] = {"status": "error", "detail": "Automation disabled before batch started"}
+            break
+        batch = fallback_names[start:start + _MANUAL_FAILOVER_BATCH_SIZE]
+        for name, result in await asyncio.gather(*(
+            _switch_failover_instance(name, policy["fallback_project"]) for name in batch
+        )):
+            results[name] = result
+        if start + _MANUAL_FAILOVER_BATCH_SIZE < len(fallback_names):
+            await asyncio.sleep(_MANUAL_FAILOVER_BATCH_DELAY_SECONDS)
+    switched = sum(1 for result in results.values() if result["status"] == "ok")
+    failed = len(results) - switched
+    project_health.complete_automatic_failover(switched, failed, results)
+    logger.warning(
+        "Automatic failover completed: %d switched, %d failed; %d primary canaries unchanged",
+        switched, failed, len(primary_canaries),
+    )
+
+
+async def _automatic_failover_loop():
+    """Evaluate automation every five minutes; automatic failback is not implemented."""
+    while True:
+        try:
+            await asyncio.sleep(300)
+            policy = project_health.get_policy()
+            primary_project = policy.get("primary_project", "")
+            if not primary_project or not policy.get("monitoring_enabled"):
+                continue
+            evaluation = project_health.update_health_state_log(primary_project)
+            decision = project_health.register_automatic_evaluation(evaluation)
+            if decision.get("trigger"):
+                await _execute_automatic_failover()
+        except asyncio.CancelledError:
+            break
+        except Exception as error:
+            logger.exception("Automatic failover evaluator error: %s", error)
+            await asyncio.sleep(30)
 
 
 # -- WebSocket --
