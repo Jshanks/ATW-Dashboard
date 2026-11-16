@@ -681,3 +681,102 @@ body {
         transition: none;
     }
 }
+
+/* --------------------------------------------------------------------------
+   Project Health header progress indicator (v4.5.1)
+   -------------------------------------------------------------------------- */
+.project-health-header-indicator {
+    display: inline-flex;
+    min-width: 10.5rem;
+    max-width: 15rem;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border: 1px solid rgb(180 83 9 / 0.8);
+    border-radius: 9999px;
+    background: rgb(120 53 15 / 0.35);
+    color: rgb(253 230 138);
+    padding: 0.4rem 0.8rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+    line-height: 1.2;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease;
+}
+
+.project-health-header-indicator:hover {
+    border-color: rgb(245 158 11);
+    background: rgb(120 53 15 / 0.55);
+    color: rgb(254 243 199);
+}
+
+.project-health-header-indicator:focus-visible {
+    outline: 2px solid rgb(251 191 36);
+    outline-offset: 2px;
+}
+
+.project-health-header-indicator-provisional {
+    border-color: rgb(30 64 175 / 0.85);
+    background: rgb(30 58 138 / 0.35);
+    color: rgb(191 219 254);
+}
+
+.project-health-header-indicator-provisional:hover {
+    border-color: rgb(59 130 246);
+    background: rgb(30 58 138 / 0.55);
+    color: rgb(219 234 254);
+}
+
+.project-health-header-indicator-detail {
+    color: currentColor;
+    font-weight: 500;
+    opacity: 0.82;
+}
+
+/* Keep the status centered independently of left/right header widths on desktop. */
+@media (min-width: 1024px) {
+    #header-row {
+        position: relative;
+    }
+
+    .project-health-header-indicator:not(.hidden) {
+        position: absolute;
+        left: 50%;
+        transform: translateX(-50%);
+    }
+}
+
+/* At widths where the centered pill could overlap title or statistics, let it
+   participate in the existing wrapped header flow instead. */
+@media (min-width: 1024px) and (max-width: 1399.98px) {
+    .project-health-header-indicator:not(.hidden) {
+        position: static;
+        order: 3;
+        width: 100%;
+        max-width: none;
+        transform: none;
+    }
+}
+
+@media (max-width: 1023.98px) {
+    .project-health-header-indicator:not(.hidden) {
+        order: 3;
+        width: 100%;
+        max-width: none;
+    }
+}
+
+@media (max-width: 639px) {
+    .project-health-header-indicator {
+        justify-content: space-between;
+        min-width: 0;
+        padding: 0.45rem 0.7rem;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .project-health-header-indicator {
+        transition: none;
+    }
+}

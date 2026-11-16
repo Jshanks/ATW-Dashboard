@@ -1,6 +1,6 @@
 """Persistent project-health monitoring and manual failover planning for ATW Dashboard.
 
-v4.5.0 is intentionally monitor-only. This module records per-project tracker
+v4.5.1 remains intentionally monitor-only. This module records per-project tracker
 activity, evaluates project health, recommends representative canaries, persists
 the configured policy and role assignments, and keeps an auditable decision log.
 It never changes a Warrior project on its own.
@@ -27,14 +27,13 @@ DATA_DIR = os.environ.get(
 STATE_FILE = os.path.join(DATA_DIR, "project_health.json")
 
 HISTORY_SECONDS = 48 * 60 * 60
-BASELINE_SECONDS = 24 * 60 * 60
+DEFAULT_MINIMUM_BASELINE_HOURS = 6
+DEFAULT_FULL_BASELINE_HOURS = 24
+MINIMUM_ALLOWED_BASELINE_HOURS = 1
+MAXIMUM_ALLOWED_BASELINE_HOURS = 48
 RECENT_WINDOW_SECONDS = 60 * 60
 SAMPLE_INTERVAL_SECONDS = 60
-EXPECTED_BASELINE_SAMPLES = BASELINE_SECONDS // SAMPLE_INTERVAL_SECONDS
 MINIMUM_BASELINE_COVERAGE = 0.90
-MINIMUM_VALID_BASELINE_SAMPLES = math.ceil(
-    EXPECTED_BASELINE_SAMPLES * MINIMUM_BASELINE_COVERAGE
-)
 MAX_HISTORY_SAMPLES_PER_PROJECT = HISTORY_SECONDS // SAMPLE_INTERVAL_SECONDS + 10
 MAX_DECISION_LOG_ENTRIES = 500
 
@@ -46,7 +45,7 @@ MAXIMUM_CANARY_COUNT = 10
 MINIMUM_BASELINE_ITEMS_PER_HOUR = 1.0
 MINIMUM_BASELINE_BYTES_PER_HOUR = 1024 * 1024
 
-# Ratios compare the latest complete hour with the frozen 24-hour baseline's
+# Ratios compare the latest complete hour with the frozen configured baseline's
 # average hourly rate. Both item and byte ratios participate in classification.
 HEALTHY_RATIO = 0.75
 REDUCED_RATIO = 0.35
@@ -68,6 +67,8 @@ def _default_policy() -> dict[str, Any]:
         "primary_project": "",
         "fallback_project": "",
         "canary_percent": DEFAULT_CANARY_PERCENT,
+        "minimum_baseline_hours": DEFAULT_MINIMUM_BASELINE_HOURS,
+        "full_baseline_hours": DEFAULT_FULL_BASELINE_HOURS,
         "monitor_only": True,
         "manual_failover_only": True,
         "updated_at": 0.0,
@@ -91,6 +92,18 @@ def _normalize_policy(raw: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         canary_percent = DEFAULT_CANARY_PERCENT
     policy["canary_percent"] = max(1, min(100, canary_percent))
+    try:
+        minimum_hours = int(raw.get("minimum_baseline_hours", DEFAULT_MINIMUM_BASELINE_HOURS))
+    except (TypeError, ValueError):
+        minimum_hours = DEFAULT_MINIMUM_BASELINE_HOURS
+    try:
+        full_hours = int(raw.get("full_baseline_hours", DEFAULT_FULL_BASELINE_HOURS))
+    except (TypeError, ValueError):
+        full_hours = DEFAULT_FULL_BASELINE_HOURS
+    minimum_hours = max(MINIMUM_ALLOWED_BASELINE_HOURS, min(MAXIMUM_ALLOWED_BASELINE_HOURS, minimum_hours))
+    full_hours = max(minimum_hours, min(MAXIMUM_ALLOWED_BASELINE_HOURS, full_hours))
+    policy["minimum_baseline_hours"] = minimum_hours
+    policy["full_baseline_hours"] = full_hours
     policy["monitor_only"] = True
     policy["manual_failover_only"] = True
     try:
@@ -247,13 +260,13 @@ def _coverage(sample_count: int, duration_seconds: int) -> float:
     return min(1.0, sample_count / expected_samples)
 
 
-def get_baseline_readiness(project_slug: str, now: float | None = None) -> dict[str, Any]:
-    """Return primary-project baseline readiness for the most recent 24 hours."""
-    current_time = float(now if now is not None else time.time())
-    start_time = current_time - BASELINE_SECONDS
-    samples = _window_samples(project_slug, start_time, current_time)
+def _window_readiness(project_slug: str, window_hours: int, current_time: float) -> dict[str, Any]:
+    duration_seconds = window_hours * 60 * 60
+    samples = _window_samples(project_slug, current_time - duration_seconds, current_time)
     sample_count = len(samples)
-    coverage = _coverage(sample_count, BASELINE_SECONDS)
+    expected_samples = max(1, duration_seconds // SAMPLE_INTERVAL_SECONDS)
+    required_samples = math.ceil(expected_samples * MINIMUM_BASELINE_COVERAGE)
+    coverage = _coverage(sample_count, duration_seconds)
     items_total = sum(sample[1] for sample in samples)
     bytes_total = sum(sample[2] for sample in samples)
     first_sample_at = samples[0][0] if samples else None
@@ -262,27 +275,61 @@ def get_baseline_readiness(project_slug: str, now: float | None = None) -> dict[
     if first_sample_at is not None and last_sample_at is not None:
         span_seconds = max(0.0, last_sample_at - first_sample_at)
     complete = (
-        sample_count >= MINIMUM_VALID_BASELINE_SAMPLES
+        sample_count >= required_samples
         and coverage >= MINIMUM_BASELINE_COVERAGE
-        and span_seconds >= BASELINE_SECONDS * MINIMUM_BASELINE_COVERAGE
+        and span_seconds >= duration_seconds * MINIMUM_BASELINE_COVERAGE
     )
     sufficient_volume = (
-        items_total >= MINIMUM_BASELINE_ITEMS_PER_HOUR * 24
-        or bytes_total >= MINIMUM_BASELINE_BYTES_PER_HOUR * 24
+        items_total >= MINIMUM_BASELINE_ITEMS_PER_HOUR * window_hours
+        or bytes_total >= MINIMUM_BASELINE_BYTES_PER_HOUR * window_hours
     )
     return {
-        "project": project_slug,
+        "hours": window_hours,
         "complete": complete,
         "coverage": coverage,
         "coverage_percent": round(coverage * 100, 1),
         "sample_count": sample_count,
-        "required_sample_count": MINIMUM_VALID_BASELINE_SAMPLES,
+        "required_sample_count": required_samples,
         "first_sample_at": first_sample_at,
         "last_sample_at": last_sample_at,
         "span_seconds": span_seconds,
         "items_total": items_total,
         "bytes_total": bytes_total,
+        "items_per_hour": items_total / window_hours,
+        "bytes_per_hour": bytes_total / window_hours,
         "sufficient_volume": sufficient_volume,
+    }
+
+
+def get_baseline_readiness(project_slug: str, now: float | None = None) -> dict[str, Any]:
+    """Return minimum and full baseline readiness using the saved policy windows."""
+    current_time = float(now if now is not None else time.time())
+    policy = get_policy()
+    minimum = _window_readiness(project_slug, policy["minimum_baseline_hours"], current_time)
+    full = _window_readiness(project_slug, policy["full_baseline_hours"], current_time)
+    phase = "building"
+    if minimum["complete"]:
+        phase = "full" if full["complete"] else "provisional"
+    return {
+        "project": project_slug,
+        "phase": phase,
+        "complete": minimum["complete"],
+        "full_complete": full["complete"],
+        "coverage": minimum["coverage"],
+        "coverage_percent": minimum["coverage_percent"],
+        "minimum": minimum,
+        "full": full,
+        # Compatibility fields retained for the v4.5.0 UI and classifier.
+        "sample_count": minimum["sample_count"],
+        "required_sample_count": minimum["required_sample_count"],
+        "first_sample_at": minimum["first_sample_at"],
+        "last_sample_at": minimum["last_sample_at"],
+        "span_seconds": minimum["span_seconds"],
+        "items_total": minimum["items_total"],
+        "bytes_total": minimum["bytes_total"],
+        "items_per_hour": minimum["items_per_hour"],
+        "bytes_per_hour": minimum["bytes_per_hour"],
+        "sufficient_volume": minimum["sufficient_volume"],
     }
 
 
@@ -299,7 +346,7 @@ def freeze_primary_baseline(actor: str = "dashboard") -> dict[str, Any]:
         raise ValueError("A primary project must be configured before freezing a baseline")
     if not readiness.get("complete"):
         raise ValueError(
-            "A complete 24-hour primary-project baseline with at least 90% coverage is required"
+            "A complete configured minimum primary-project baseline with at least 90% coverage is required"
         )
     frozen_at = time.time()
     baseline = {
@@ -307,11 +354,13 @@ def freeze_primary_baseline(actor: str = "dashboard") -> dict[str, Any]:
         "frozen_at": frozen_at,
         "coverage": readiness["coverage"],
         "coverage_percent": readiness["coverage_percent"],
+        "baseline_hours": readiness["minimum"]["hours"],
+        "baseline_phase": readiness["phase"],
         "sample_count": readiness["sample_count"],
         "items_total": readiness["items_total"],
         "bytes_total": readiness["bytes_total"],
-        "items_per_hour": readiness["items_total"] / 24.0,
-        "bytes_per_hour": readiness["bytes_total"] / 24.0,
+        "items_per_hour": readiness["items_per_hour"],
+        "bytes_per_hour": readiness["bytes_per_hour"],
         "sufficient_volume": readiness["sufficient_volume"],
     }
     with _lock:
@@ -379,8 +428,8 @@ def evaluate_project_health(project_slug: str, now: float | None = None) -> dict
     baseline = frozen_baseline
     if not baseline or baseline.get("project") != project_slug:
         baseline = {
-            "items_per_hour": readiness["items_total"] / 24.0 if readiness["complete"] else 0.0,
-            "bytes_per_hour": readiness["bytes_total"] / 24.0 if readiness["complete"] else 0.0,
+            "items_per_hour": readiness["items_per_hour"] if readiness["complete"] else 0.0,
+            "bytes_per_hour": readiness["bytes_per_hour"] if readiness["complete"] else 0.0,
             "sufficient_volume": readiness["sufficient_volume"],
         }
     recent_samples = _window_samples(
@@ -441,6 +490,8 @@ def configure_policy(
     primary_project: str,
     fallback_project: str,
     canary_percent: int = DEFAULT_CANARY_PERCENT,
+    minimum_baseline_hours: int = DEFAULT_MINIMUM_BASELINE_HOURS,
+    full_baseline_hours: int = DEFAULT_FULL_BASELINE_HOURS,
     actor: str = "dashboard",
 ) -> dict[str, Any]:
     """Persist primary/fallback policy. Automation remains disabled."""
@@ -459,12 +510,23 @@ def configure_policy(
         raise ValueError("Canary allocation must be a whole-number percentage")
     if normalized_percent < 1 or normalized_percent > 100:
         raise ValueError("Canary allocation must be between 1% and 100%")
+    try:
+        normalized_minimum_hours = int(minimum_baseline_hours)
+        normalized_full_hours = int(full_baseline_hours)
+    except (TypeError, ValueError):
+        raise ValueError("Baseline windows must be whole hours")
+    if not MINIMUM_ALLOWED_BASELINE_HOURS <= normalized_minimum_hours <= MAXIMUM_ALLOWED_BASELINE_HOURS:
+        raise ValueError("Minimum baseline must be between 1 and 48 hours")
+    if not normalized_minimum_hours <= normalized_full_hours <= MAXIMUM_ALLOWED_BASELINE_HOURS:
+        raise ValueError("Full baseline must be at least the minimum baseline and no more than 48 hours")
     with _lock:
         old_primary = _policy.get("primary_project", "")
         _policy = {
             "primary_project": primary,
             "fallback_project": fallback,
             "canary_percent": normalized_percent,
+            "minimum_baseline_hours": normalized_minimum_hours,
+            "full_baseline_hours": normalized_full_hours,
             "monitor_only": True,
             "manual_failover_only": True,
             "updated_at": time.time(),
@@ -606,7 +668,10 @@ def failover_availability() -> dict[str, Any]:
     if not policy.get("fallback_project"):
         reasons.append("Configure a fallback project")
     if readiness and not readiness.get("complete"):
-        reasons.append("Complete a 24-hour primary-project baseline with at least 90% coverage")
+        reasons.append(
+            "Complete the configured %d-hour minimum primary-project baseline with at least 90%% coverage"
+            % policy["minimum_baseline_hours"]
+        )
     if not get_role_assignments():
         reasons.append("Preview and save Primary canary and Fallback fleet assignments")
     return {
@@ -716,7 +781,8 @@ def get_status(instances: Iterable[Any] = ()) -> dict[str, Any]:
         "recommendation": recommend_canaries(instances),
         "decision_log": get_decision_log(100),
         "thresholds": {
-            "baseline_hours": 24,
+            "minimum_baseline_hours": policy["minimum_baseline_hours"],
+            "full_baseline_hours": policy["full_baseline_hours"],
             "history_hours": 48,
             "minimum_coverage_percent": MINIMUM_BASELINE_COVERAGE * 100,
             "healthy_ratio": HEALTHY_RATIO,

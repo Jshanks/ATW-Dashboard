@@ -18,6 +18,7 @@
  *         labels derived from what Choice warriors actually run.
  * v4.5.0: monitor-only Project Health policy, baseline, canary preview,
  *         persistent decisions, and operator-confirmed manual failover.
+ * v4.5.1: editable minimum/full baseline windows and header progress indicator.
  */
 (function () {
     "use strict";
@@ -984,6 +985,7 @@ activityChart.update("none");
             var ok = Object.values(data.results).filter(function (r) { return r.status === "ok"; }).length;
             showToast("Resumed " + ok + " instance(s)", "success");
             loadPauseStatus();
+    loadProjectHealth();
         } catch (e) { showToast("Failed: " + e.message, "error"); }
     });
 
@@ -1768,7 +1770,7 @@ function applyVersionBadge(cfg) {
     }
 }
 
-    // ---- Project Health (v4.5.0, monitor-only) ----
+    // ---- Project Health (v4.5.1, monitor-only) ----
     var projectHealthState = null;
     var projectHealthPreview = null;
     var projectHealthBusy = false;
@@ -1780,6 +1782,11 @@ function applyVersionBadge(cfg) {
     var primaryProjectSelect = document.getElementById("project-health-primary-project");
     var fallbackProjectSelect = document.getElementById("project-health-fallback-project");
     var canaryPercentInput = document.getElementById("project-health-canary-percent");
+    var minimumBaselineHoursInput = document.getElementById("project-health-minimum-baseline-hours");
+    var fullBaselineHoursInput = document.getElementById("project-health-full-baseline-hours");
+    var projectHealthHeaderIndicator = document.getElementById("project-health-header-indicator");
+    var projectHealthHeaderIndicatorLabel = document.getElementById("project-health-header-indicator-label");
+    var projectHealthHeaderIndicatorDetail = document.getElementById("project-health-header-indicator-detail");
     var btnFreezeBaseline = document.getElementById("btn-freeze-project-health-baseline");
     var btnPreviewGroups = document.getElementById("btn-preview-project-health-groups");
     var btnSaveRoles = document.getElementById("btn-save-project-health-roles");
@@ -1908,6 +1915,34 @@ function applyVersionBadge(cfg) {
         }).join("");
     }
 
+    function formatBaselineHours(hours) {
+        if (!isFinite(hours) || hours <= 0) return "0h";
+        if (hours < 1) return Math.round(hours * 60) + "m";
+        return (Math.round(hours * 10) / 10).toString().replace(/\.0$/, "") + "h";
+    }
+
+    function renderProjectHealthHeaderIndicator(state) {
+        if (!projectHealthHeaderIndicator) return;
+        var policy = state.policy || {};
+        var evaluation = (state.health || {})[policy.primary_project] || null;
+        var readiness = evaluation ? evaluation.baseline : null;
+        if (!policy.primary_project || !readiness || readiness.full_complete) {
+            projectHealthHeaderIndicator.classList.add("hidden");
+            return;
+        }
+        var minimum = readiness.minimum || {};
+        var full = readiness.full || {};
+        var phase = readiness.phase || "building";
+        var window = phase === "building" ? minimum : full;
+        var coverage = Number(window.coverage_percent || 0);
+        var observedHours = Number(window.span_seconds || 0) / 3600;
+        var targetHours = Number(window.hours || (phase === "building" ? policy.minimum_baseline_hours : policy.full_baseline_hours) || 0);
+        projectHealthHeaderIndicatorLabel.textContent = phase === "building" ? "Baseline " + coverage.toFixed(0) + "%" : "Provisional " + coverage.toFixed(0) + "%";
+        projectHealthHeaderIndicatorDetail.textContent = formatBaselineHours(observedHours) + " / " + formatBaselineHours(targetHours);
+        projectHealthHeaderIndicator.classList.toggle("project-health-header-indicator-provisional", phase !== "building");
+        projectHealthHeaderIndicator.classList.remove("hidden");
+    }
+
     function renderProjectHealth(state) {
         projectHealthState = state;
         populateProjectHealthProjects();
@@ -1915,13 +1950,25 @@ function applyVersionBadge(cfg) {
         primaryProjectSelect.value = policy.primary_project || "";
         fallbackProjectSelect.value = policy.fallback_project || "";
         canaryPercentInput.value = policy.canary_percent || 5;
+        minimumBaselineHoursInput.value = policy.minimum_baseline_hours || 6;
+        fullBaselineHoursInput.value = policy.full_baseline_hours || 24;
         var evaluation = (state.health || {})[policy.primary_project] || null;
         var stateElement = document.getElementById("project-health-primary-state");
         stateElement.textContent = evaluation ? evaluation.state : "Not configured";
         stateElement.className = "project-health-value " + healthStateClass(evaluation ? evaluation.state : "Building baseline");
         var readiness = evaluation ? evaluation.baseline : null;
-        document.getElementById("project-health-coverage").textContent = readiness ? readiness.coverage_percent.toFixed(1) + "%" : "0%";
-        document.getElementById("project-health-baseline-detail").textContent = readiness && readiness.complete ? "Complete 24-hour baseline" : "Requires 24 hours at 90% coverage";
+        var displayedCoverage = readiness ? (readiness.phase === "building" ? readiness.minimum.coverage_percent : readiness.full.coverage_percent) : 0;
+        document.getElementById("project-health-coverage").textContent = displayedCoverage.toFixed(1) + "%";
+        if (!readiness) {
+            document.getElementById("project-health-baseline-detail").textContent = "Configure a primary project";
+        } else if (readiness.phase === "full") {
+            document.getElementById("project-health-baseline-detail").textContent = "Full " + readiness.full.hours + "-hour baseline";
+        } else if (readiness.phase === "provisional") {
+            document.getElementById("project-health-baseline-detail").textContent = "Provisional; building toward " + readiness.full.hours + " hours";
+        } else {
+            document.getElementById("project-health-baseline-detail").textContent = "Requires " + readiness.minimum.hours + " hours at 90% coverage";
+        }
+        renderProjectHealthHeaderIndicator(state);
         document.getElementById("project-health-item-ratio").textContent = formatActivityRatio(evaluation && evaluation.item_activity_ratio);
         document.getElementById("project-health-byte-ratio").textContent = formatActivityRatio(evaluation && evaluation.byte_activity_ratio);
 
@@ -1976,6 +2023,7 @@ function applyVersionBadge(cfg) {
     }
 
     btnProjectHealth.addEventListener("click", openProjectHealth);
+    projectHealthHeaderIndicator.addEventListener("click", openProjectHealth);
     btnCloseProjectHealth.addEventListener("click", closeProjectHealth);
     btnRefreshProjectHealth.addEventListener("click", loadProjectHealth);
     projectHealthModal.addEventListener("click", function (event) { if (event.target === projectHealthModal) closeProjectHealth(); });
@@ -1986,11 +2034,16 @@ function applyVersionBadge(cfg) {
         var primaryProject = primaryProjectSelect.value;
         var fallbackProject = fallbackProjectSelect.value;
         var canaryPercent = parseInt(canaryPercentInput.value, 10);
+        var minimumBaselineHours = parseInt(minimumBaselineHoursInput.value, 10);
+        var fullBaselineHours = parseInt(fullBaselineHoursInput.value, 10);
         if (!primaryProject || !fallbackProject) return setProjectHealthMessage("Select both a primary and fallback project.", "error");
         if (primaryProject === fallbackProject) return setProjectHealthMessage("Primary and fallback projects must be different.", "error");
         if (!Number.isInteger(canaryPercent) || canaryPercent < 1 || canaryPercent > 100) return setProjectHealthMessage("Canary allocation must be a whole number from 1 to 100.", "error");
+        if (!Number.isInteger(minimumBaselineHours) || minimumBaselineHours < 1 || minimumBaselineHours > 48) return setProjectHealthMessage("Minimum baseline must be a whole number from 1 to 48 hours.", "error");
+        if (!Number.isInteger(fullBaselineHours) || fullBaselineHours < 1 || fullBaselineHours > 48) return setProjectHealthMessage("Full baseline must be a whole number from 1 to 48 hours.", "error");
+        if (fullBaselineHours < minimumBaselineHours) return setProjectHealthMessage("Full baseline cannot be shorter than the minimum baseline.", "error");
         setProjectHealthBusy(true);
-        projectHealthRequest("api/project-health/policy", { method: "PUT", body: JSON.stringify({ primary_project: primaryProject, fallback_project: fallbackProject, canary_percent: canaryPercent }) })
+        projectHealthRequest("api/project-health/policy", { method: "PUT", body: JSON.stringify({ primary_project: primaryProject, fallback_project: fallbackProject, canary_percent: canaryPercent, minimum_baseline_hours: minimumBaselineHours, full_baseline_hours: fullBaselineHours }) })
             .then(function () { projectHealthPreview = null; showToast("Project Health policy saved", "success"); return loadProjectHealth(); })
             .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
             .finally(function () { setProjectHealthBusy(false); });

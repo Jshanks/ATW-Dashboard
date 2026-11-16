@@ -903,7 +903,11 @@ async def get_project_health_history(project: str = ""):
 async def update_project_health_policy(request: ProjectHealthPolicyRequest):
     try:
         policy = project_health.configure_policy(
-            request.primary_project, request.fallback_project, request.canary_percent
+            request.primary_project,
+            request.fallback_project,
+            request.canary_percent,
+            request.minimum_baseline_hours,
+            request.full_baseline_hours,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))

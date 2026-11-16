@@ -144,7 +144,7 @@ class DashboardState(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Project Health and manual failover planning (v4.5.0)
+# Project Health and manual failover planning (v4.5.1)
 # ---------------------------------------------------------------------------
 
 
@@ -175,6 +175,24 @@ class ProjectHealthPolicyRequest(BaseModel):
             "a minimum of 3 and maximum of 10 canaries. Five percent is recommended."
         ),
     )
+    minimum_baseline_hours: int = Field(
+        6,
+        ge=1,
+        le=48,
+        description=(
+            "Minimum covered history required before health ratios and manual "
+            "failover become available. Defaults to 6 hours."
+        ),
+    )
+    full_baseline_hours: int = Field(
+        24,
+        ge=1,
+        le=48,
+        description=(
+            "Covered history required for a full-confidence baseline. Defaults "
+            "to 24 hours and cannot be shorter than the minimum baseline."
+        ),
+    )
 
     @field_validator("primary_project", "fallback_project")
     @classmethod
@@ -185,9 +203,11 @@ class ProjectHealthPolicyRequest(BaseModel):
         return normalized_value
 
     @model_validator(mode="after")
-    def projects_must_be_different(self):
+    def validate_policy(self):
         if self.primary_project == self.fallback_project:
             raise ValueError("Primary and fallback projects must be different")
+        if self.full_baseline_hours < self.minimum_baseline_hours:
+            raise ValueError("Full baseline cannot be shorter than the minimum baseline")
         return self
 
 

@@ -32,6 +32,10 @@
                     <span id="ws-status-text">Disconnected</span>
                 </div>
             </div>
+            <button id="project-health-header-indicator" type="button" class="hidden project-health-header-indicator" title="Open Project Health" aria-label="Open Project Health baseline progress">
+                <span id="project-health-header-indicator-label">Baseline 0%</span>
+                <span id="project-health-header-indicator-detail" class="project-health-header-indicator-detail">0h / 6h</span>
+            </button>
             <div id="header-stats" class="flex items-center gap-x-4 gap-y-2 text-sm">
                 <div class="hdr-stat"><span class="text-gray-400">Online:</span><span id="total-online" class="text-green-400 font-bold">0</span></div>
                 <div class="hdr-stat"><span class="text-gray-400">Offline:</span><span id="total-offline" class="text-red-400 font-bold">0</span></div>
@@ -350,7 +354,7 @@
                     </div>
                     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                         <div class="project-health-card"><span class="project-health-label">Primary state</span><span id="project-health-primary-state" class="project-health-value">Not configured</span></div>
-                        <div class="project-health-card"><span class="project-health-label">Baseline coverage</span><span id="project-health-coverage" class="project-health-value">0%</span><span id="project-health-baseline-detail" class="project-health-subvalue">Requires 24 hours at 90% coverage</span></div>
+                        <div class="project-health-card"><span class="project-health-label">Baseline coverage</span><span id="project-health-coverage" class="project-health-value">0%</span><span id="project-health-baseline-detail" class="project-health-subvalue">Requires the configured minimum window at 90% coverage</span></div>
                         <div class="project-health-card"><span class="project-health-label">Item activity ratio</span><span id="project-health-item-ratio" class="project-health-value">Unavailable</span></div>
                         <div class="project-health-card"><span class="project-health-label">Byte activity ratio</span><span id="project-health-byte-ratio" class="project-health-value">Unavailable</span></div>
                     </div>
@@ -363,11 +367,14 @@
                     <div class="flex items-start justify-between gap-3 flex-wrap">
                         <div><h3 id="project-health-policy-title" class="text-base font-semibold text-white">Monitoring policy</h3><p class="text-sm text-gray-400 mt-1">Choose the project being evaluated and the destination used only for an operator-confirmed failover.</p></div>
                     </div>
-                    <form id="project-health-policy-form" class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+                    <form id="project-health-policy-form" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mt-4">
                         <label class="block"><span class="project-health-label">Primary project</span><select id="project-health-primary-project" required class="project-health-input"><option value="">Select primary project</option></select></label>
                         <label class="block"><span class="project-health-label">Fallback project</span><select id="project-health-fallback-project" required class="project-health-input"><option value="">Select fallback project</option></select></label>
                         <label class="block"><span class="project-health-label">Canary allocation</span><div class="flex items-center gap-2"><input id="project-health-canary-percent" type="number" min="1" max="100" value="5" required class="project-health-input"><span class="text-gray-400">%</span></div><span class="project-health-help">Recommended 5%; minimum 3 and maximum 10 Warriors.</span></label>
-                        <div class="md:col-span-3 flex justify-end gap-3 flex-wrap">
+                        <label class="block"><span class="project-health-label">Minimum baseline</span><div class="flex items-center gap-2"><input id="project-health-minimum-baseline-hours" type="number" min="1" max="48" value="6" required class="project-health-input"><span class="text-gray-400">hours</span></div><span class="project-health-help">Enables advisory health and manual failover. Default: 6 hours.</span></label>
+                        <label class="block"><span class="project-health-label">Full baseline</span><div class="flex items-center gap-2"><input id="project-health-full-baseline-hours" type="number" min="1" max="48" value="24" required class="project-health-input"><span class="text-gray-400">hours</span></div><span class="project-health-help">Marks the baseline fully established. Default: 24 hours.</span></label>
+                        <div class="md:col-span-2 lg:col-span-5 rounded-lg border border-amber-900/60 bg-amber-950/20 px-4 py-3 text-sm text-amber-200"><strong>Testing note:</strong> Shorter windows produce faster results but are more sensitive to brief spikes, quiet periods, and time-of-day variation. Full baseline cannot be shorter than minimum baseline.</div>
+                        <div class="md:col-span-2 lg:col-span-5 flex justify-end gap-3 flex-wrap">
                             <button id="btn-save-project-health-policy" type="submit" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm font-semibold">Save policy</button>
                             <button id="btn-freeze-project-health-baseline" type="button" disabled class="bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed px-4 py-2 rounded-lg text-sm font-semibold">Freeze complete baseline</button>
                         </div>
@@ -376,6 +383,16 @@
 
                 <section class="project-health-section" aria-labelledby="project-health-groups-title">
                     <div class="flex items-start justify-between gap-3 flex-wrap"><div><h3 id="project-health-groups-title" class="text-base font-semibold text-white">Failover group preview</h3><p class="text-sm text-gray-400 mt-1">Recommendations spread Primary canaries across unique host IPs where possible.</p></div><button id="btn-preview-project-health-groups" type="button" class="bg-gray-800 hover:bg-gray-700 border border-gray-700 px-4 py-2 rounded-lg text-sm font-semibold">Generate recommendation</button></div>
+                    <div class="mt-4 rounded-lg border border-gray-700 bg-gray-950/40 p-4 space-y-3 text-sm text-gray-300">
+                        <p><strong class="text-white">What are canaries?</strong> Primary canaries are a small, representative group of Warriors that remain on the primary project during a manual failover. Their continued activity helps show whether the primary project has recovered while the rest of the assigned fleet runs the fallback project.</p>
+                        <p>The dashboard recommends <strong class="text-white">5%</strong> of eligible Warriors, with a minimum of <strong class="text-white">3</strong> and maximum of <strong class="text-white">10</strong>. It prioritizes different host IPs so one host or network failure is less likely to distort the signal.</p>
+                        <p><strong class="text-amber-300">Review before saving:</strong> IP diversity is only an approximation of infrastructure diversity. Multiple IPs can still share a physical host, ISP, VPN, storage system, or other failure domain. Prefer stable Warriors distributed across genuinely separate hosts and locations where known.</p>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 pt-1">
+                            <div class="rounded-md border border-green-900/60 bg-green-950/20 p-3"><strong class="text-green-300">Primary canaries</strong><span class="block mt-1 text-gray-400">Stay on the primary project during failover.</span></div>
+                            <div class="rounded-md border border-blue-900/60 bg-blue-950/20 p-3"><strong class="text-blue-300">Fallback fleet</strong><span class="block mt-1 text-gray-400">Moves only after explicit manual confirmation.</span></div>
+                            <div class="rounded-md border border-gray-700 bg-gray-900/60 p-3"><strong class="text-gray-200">No automatic switching</strong><span class="block mt-1 text-gray-400">Health states never move Warriors in v4.5.1.</span></div>
+                        </div>
+                    </div>
                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
                         <div class="rounded-lg border border-green-900/70 bg-green-950/20 p-4"><div class="flex justify-between gap-3"><h4 class="font-semibold text-green-300">Primary canaries</h4><span id="project-health-canary-count" class="text-xs text-green-400">0 Warriors</span></div><p class="project-health-help mt-1">Remain on the primary project during manual failover.</p><div id="project-health-primary-canaries" class="project-health-group-list"><p class="text-sm text-gray-500">Generate a recommendation to preview this group.</p></div></div>
                         <div class="rounded-lg border border-blue-900/70 bg-blue-950/20 p-4"><div class="flex justify-between gap-3"><h4 class="font-semibold text-blue-300">Fallback fleet</h4><span id="project-health-fallback-count" class="text-xs text-blue-400">0 Warriors</span></div><p class="project-health-help mt-1">Switches only after explicit manual confirmation.</p><div id="project-health-fallback-fleet" class="project-health-group-list"><p class="text-sm text-gray-500">Generate a recommendation to preview this group.</p></div></div>
