@@ -3,7 +3,15 @@ FROM python:3.15-alpine AS base
 # Patch OS-level vulnerabilities (xz, etc.)
 RUN apk upgrade --no-cache
 # Patch pip itself before installing dependencies
-RUN pip install --no-cache-dir --upgrade pip
+RUN python -m pip install \
+    --no-cache-dir \
+    --upgrade \
+    "pip" \
+    "setuptools>=78.1.1" \
+    && python -m pip install \
+        --no-cache-dir \
+        -r requirements.txt \
+    && python -m pip show setuptools
 
 WORKDIR /app
 
