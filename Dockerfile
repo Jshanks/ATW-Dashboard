@@ -5,24 +5,21 @@ RUN apk upgrade --no-cache
 
 COPY requirements.txt .
 
-# Patch pip itself before installing dependencies
 RUN python -m pip install \
-    --no-cache-dir \
-    --upgrade \
-    "pip" \
-    "setuptools>=78.1.1" \
-    && python -m pip install \
         --no-cache-dir \
         -r requirements.txt \
+    && python -m pip install \
+        --no-cache-dir \
+        --upgrade \
+        "pip" \
+        "setuptools>=78.1.1" \
+    && python -c "import importlib.metadata; version = tuple(int(part) for part in importlib.metadata.version('setuptools').split('.')[:3]); assert version >= (78, 1, 1), f'Vulnerable setuptools version remains installed: {version}'" \
     && python -m pip show setuptools
 
 WORKDIR /app
 
 # Install build dependencies for any C extensions (uvloop, etc.)
 RUN apk add --no-cache --virtual .build-deps build-base
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Remove build dependencies — no longer needed at runtime
 RUN apk del .build-deps
