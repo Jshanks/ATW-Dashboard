@@ -21,6 +21,7 @@
  * v4.5.1: editable minimum/full baseline windows and header progress indicator.
  * v4.5.2: rolling health baseline and whole-card Warrior selection.
  * v4.6.0: monitoring control, automatic failover, and destructive baseline reset.
+ * v4.6.3: project queue availability in manual and Project Health selectors.
  */
 (function () {
     "use strict";
@@ -57,6 +58,7 @@
     catch (ignored) { collapsedGroups = {}; }
     var lastLayoutKey = "";
     var projectTitles = {};  // slug -> display title, filled from /api/projects
+    var projectMetadata = {}; // slug -> structured project record including queue availability
 
     var grid = document.getElementById("instance-grid");
     var totalOnlineEl = document.getElementById("total-online");
@@ -1160,8 +1162,8 @@ activityChart.update("none");
         }
     });
     // ---- Projects (sessionStorage cached) ----
-var PROJECTS_CACHE_KEY = "atw-projects-cache-v2";  // v2: sorted list with Choice entry
-var PROJECTS_CACHE_TTL = 600000; // 10 minutes in ms
+var PROJECTS_CACHE_KEY = "atw-projects-cache-v3";  // v3: structured queue metadata
+var PROJECTS_CACHE_TTL = 1800000; // 30 minutes; backend owns the same refresh interval
 
 function loadProjects() {
     var cached = sessionStorage.getItem(PROJECTS_CACHE_KEY);
@@ -1170,7 +1172,7 @@ function loadProjects() {
             var parsed = JSON.parse(cached);
             if (Date.now() - parsed.timestamp < PROJECTS_CACHE_TTL) {
                 applyProjectList(parsed.data);
-                return;
+                // Display cached data immediately, then revalidate in the background.
             }
         } catch (ignored) { /* stale or corrupt — fetch fresh */ }
     }
@@ -1185,6 +1187,24 @@ function loadProjects() {
             applyProjectList(data);
         })
         .catch(function (e) { console.error("Load projects error:", e); });
+}
+
+function formatTodoItems(items) {
+    if (items === null || items === undefined || !Number.isFinite(Number(items))) return null;
+    var value = Math.max(0, Number(items));
+    if (value >= 1000000000) return (value / 1000000000).toFixed(value >= 10000000000 ? 1 : 2).replace(/\.?0+$/, "") + "B";
+    if (value >= 1000000) return (value / 1000000).toFixed(value >= 100000000 ? 1 : 2).replace(/\.?0+$/, "") + "M";
+    if (value >= 1000) return (value / 1000).toFixed(value >= 100000 ? 0 : 1).replace(/\.?0+$/, "") + "K";
+    return Math.round(value).toLocaleString();
+}
+
+function projectSelectorLabel(slug, fallbackName) {
+    if (slug === AUTO_PROJECT_SLUG) return fallbackName;
+    var metadata = projectMetadata[slug];
+    if (!metadata) return fallbackName;
+    var formattedCount = formatTodoItems(metadata.todo_items);
+    if (formattedCount === null) return fallbackName + " · to do unavailable";
+    return fallbackName + " · " + formattedCount + " to do" + (metadata.todo_stale ? " (stale)" : "");
 }
 
 function applyProjectList(data) {
@@ -1202,7 +1222,11 @@ function applyProjectList(data) {
             if (actualTargets.length) displayName += " (\u2192 " + actualTargets.join(", ") + ")";
             else if (item.resolves_to) displayName += " (\u2192 " + item.resolves_to + ")";
         }
-        if (typeof item === "object" && item.title) projectTitles[slug] = item.title;
+        if (typeof item === "object") {
+            projectMetadata[slug] = item;
+            if (item.title) projectTitles[slug] = item.title;
+        }
+        displayName = projectSelectorLabel(slug, displayName);
         html += '<option value="' + escapeHtml(slug) + '">' + escapeHtml(displayName) + '</option>';
     }
     projectSelect.innerHTML = html;
@@ -1847,7 +1871,8 @@ function applyVersionBadge(cfg) {
         function fill(select, placeholder, selected) {
             var html = '<option value="">' + escapeHtml(placeholder) + '</option>';
             slugs.forEach(function (slug) {
-                html += '<option value="' + escapeHtml(slug) + '">' + escapeHtml(projectTitles[slug] || slug) + '</option>';
+                var baseName = projectTitles[slug] || slug;
+                html += '<option value="' + escapeHtml(slug) + '">' + escapeHtml(projectSelectorLabel(slug, baseName)) + '</option>';
             });
             select.innerHTML = html;
             select.value = selected || "";

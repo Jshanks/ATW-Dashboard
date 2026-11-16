@@ -660,11 +660,18 @@ async def bulk_update_settings(request: BulkSettingsRequest):
 # -- Projects --
 @app.get("/api/projects")
 async def list_projects():
-    """Active project list — upstream caches 30min, we cache response 10min."""
+    """Return cached projects plus manual-selection queue availability metadata.
+
+    The backend owns the 30-minute refresh and stale-count policy. Clients must
+    revalidate so a refreshed queue count is visible on their next request.
+    """
     project_list = await projects.get_projects()
     return JSONResponse(
         content=project_list,
-        headers={"Cache-Control": "public, max-age=600"},
+        headers={
+            "Cache-Control": "no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
     )
 
 

@@ -1001,3 +1001,11 @@ body.has-selection #instances-grid {
         animation: none;
     }
 }
+
+/* --------------------------------------------------------------------------
+   Project queue labels (v4.6.3)
+
+   Queue availability is appended to native project <option> labels by app.js.
+   Native select rendering is intentionally retained for keyboard, mobile, and
+   screen-reader compatibility; no custom dropdown styling is required.
+   -------------------------------------------------------------------------- */
