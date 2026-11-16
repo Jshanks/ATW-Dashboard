@@ -2,6 +2,9 @@ FROM python:3.15-alpine AS base
 
 # Patch OS-level vulnerabilities (xz, etc.)
 RUN apk upgrade --no-cache
+
+COPY requirements.txt .
+
 # Patch pip itself before installing dependencies
 RUN python -m pip install \
     --no-cache-dir \
