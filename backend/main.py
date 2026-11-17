@@ -214,12 +214,12 @@ async def _tracker_poll_loop():
                         total_items_delta += items_delta
                     else:
                         logger.warning(
-                            "Tracker items delta %d for '%s' exceeds cap %d — resetting baseline",
+                            "Tracker items delta %d for '%s' exceeds cap %d â€” resetting baseline",
                             candidate_delta, project_slug, MAX_TRACKER_DELTA_PER_POLL,
                         )
                 elif previous_items > 0 and items_done < previous_items:
                     logger.info(
-                        "Tracker items for '%s' decreased (%d → %d) — resetting baseline",
+                        "Tracker items for '%s' decreased (%d â†’ %d) â€” resetting baseline",
                         project_slug, previous_items, items_done,
                     )
 
@@ -228,7 +228,7 @@ async def _tracker_poll_loop():
                     total_bytes_delta += bytes_delta
                 elif previous_bytes > 0 and bytes_used < previous_bytes:
                     logger.info(
-                        "Tracker bytes for '%s' decreased (%d → %d) — resetting baseline",
+                        "Tracker bytes for '%s' decreased (%d â†’ %d) â€” resetting baseline",
                         project_slug, previous_bytes, bytes_used,
                     )
 
@@ -244,6 +244,14 @@ async def _tracker_poll_loop():
                 baselines_changed = True
 
             if baselines_changed:
+                # Record the aggregate tracker deltas used by the main 24-hour
+                # dashboard chart. Project Health records per-project samples
+                # above, while the main history chart needs one combined sample
+                # for the current polling cycle.
+                history.record_tracker(
+                    total_items_delta,
+                    total_bytes_delta,
+                )
                 _save_tracker_baselines()
 
         except asyncio.CancelledError:
@@ -448,7 +456,7 @@ async def health_check():
 
 @app.get("/api/config")
 async def get_config():
-    """Dashboard config — rarely changes, safe to cache 5 minutes."""
+    """Dashboard config â€” rarely changes, safe to cache 5 minutes."""
     response_data = {
         "title": config.title,
         "poll_interval": config.poll_interval,
