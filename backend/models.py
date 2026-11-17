@@ -143,6 +143,91 @@ class DashboardState(BaseModel):
     total_items_active: int = 0
 
 
+class LiveItemStatus(BaseModel):
+    """Minimal item state required by the live dashboard grid."""
+
+    item_id: str = ""
+    state: ItemState = ItemState.UNKNOWN
+
+
+class LiveWarriorStatus(BaseModel):
+    """Compact, explicit schema for routine browser state broadcasts.
+
+    Full item names and task descriptions remain available from the existing
+    per-instance HTTP endpoint and are intentionally excluded here.
+    """
+
+    name: str
+    host: str
+    port: int
+    url: str = ""
+    connection_state: ConnectionState = ConnectionState.OFFLINE
+    reconnect_attempts: int = 0
+    current_project: str = ""
+    project_slug: str = ""
+    selected_project: str = ""
+    downloader: str = ""
+    concurrent_items: int = 0
+    items: list[LiveItemStatus] = Field(default_factory=list)
+    last_seen: Optional[str] = None
+    error_message: str = ""
+    bandwidth_down: float = 0.0
+    bandwidth_up: float = 0.0
+    bytes_downloaded: int = 0
+    bytes_uploaded: int = 0
+    completed_items: int = 0
+    restarting: bool = False
+
+    @classmethod
+    def from_warrior_status(cls, status: WarriorStatus) -> LiveWarriorStatus:
+        return cls(
+            name=status.name,
+            host=status.host,
+            port=status.port,
+            url=status.url,
+            connection_state=status.connection_state,
+            reconnect_attempts=status.reconnect_attempts,
+            current_project=status.current_project,
+            project_slug=status.project_slug,
+            selected_project=status.selected_project,
+            downloader=status.downloader,
+            concurrent_items=status.concurrent_items,
+            items=[
+                LiveItemStatus(item_id=item.item_id, state=item.state)
+                for item in status.items
+            ],
+            last_seen=status.last_seen,
+            error_message=status.error_message,
+            bandwidth_down=status.bandwidth_down,
+            bandwidth_up=status.bandwidth_up,
+            bytes_downloaded=status.bytes_downloaded,
+            bytes_uploaded=status.bytes_uploaded,
+            completed_items=status.completed_items,
+            restarting=status.restarting,
+        )
+
+
+class LiveDashboardState(BaseModel):
+    """Validated WebSocket state contract for the live dashboard."""
+
+    instances: list[LiveWarriorStatus] = Field(default_factory=list)
+    total_online: int = 0
+    total_offline: int = 0
+    total_items_active: int = 0
+
+    @classmethod
+    def from_dashboard_state(cls, state: DashboardState) -> LiveDashboardState:
+        return cls(
+            instances=[
+                LiveWarriorStatus.from_warrior_status(instance)
+                for instance in state.instances
+            ],
+            total_online=state.total_online,
+            total_offline=state.total_offline,
+            total_items_active=state.total_items_active,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Project Health automation and baseline management (v4.6.0)
 # ---------------------------------------------------------------------------

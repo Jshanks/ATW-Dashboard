@@ -146,6 +146,17 @@ jobs:
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --label "org.opencontainers.image.version=${GITHUB_REF_NAME}" \
             --tag atw-dashboard:release \
+
+      - name: Run WebSocket contract smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run \
+            --rm \
+            --entrypoint python \
+            atw-dashboard:release \
+            -m backend.websocket_smoke
             .
 
       - name: Run Trivy release-image scan

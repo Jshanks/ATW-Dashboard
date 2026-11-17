@@ -19,6 +19,7 @@ from backend.models import (
     BulkSettingsRequest,
     ConnectionState,
     DashboardState,
+    LiveDashboardState,
     EditInstanceRequest,
     PauseRequest,
     ResumeRequest,
@@ -384,7 +385,7 @@ async def _broadcast_loop():
             if not ws_connections:
                 continue
             now = time.monotonic()
-            state_dict = _build_dashboard_state().model_dump(mode="json")
+            state_dict = _build_live_dashboard_state().model_dump(mode="json")
             # Attach supplementary data when their intervals elapse
             if now - last_history_time >= _HISTORY_BROADCAST_INTERVAL:
                 state_dict["history"] = history.get_bucketed()
@@ -415,6 +416,16 @@ async def _broadcast_loop():
         except Exception as e:
             logger.error("Broadcast error: %s", e)
             await asyncio.sleep(5)
+
+
+def _build_live_dashboard_state():
+    """Return the validated compact state used by WebSocket clients.
+
+    HTTP endpoints continue to use the full DashboardState contract. The live
+    contract keeps all grid-visible Warrior fields but reduces each item to its
+    identifier and state, excluding large item names and task descriptions.
+    """
+    return LiveDashboardState.from_dashboard_state(_build_dashboard_state())
 
 
 def _build_dashboard_state():
@@ -1128,7 +1139,7 @@ async def websocket_endpoint(ws: WebSocket):
     ws_connections.append(ws)
     logger.info("WebSocket client connected (%d total)", len(ws_connections))
     try:
-        init_state = _build_dashboard_state().model_dump(mode="json")
+        init_state = _build_live_dashboard_state().model_dump(mode="json")
         init_state["history"] = history.get_bucketed()
         try:
             tracker_data = await _build_tracker_stats()
