@@ -22,6 +22,7 @@
  * v4.5.2: rolling health baseline and whole-card Warrior selection.
  * v4.6.0: monitoring control, automatic failover, and destructive baseline reset.
  * v4.6.3: project queue availability in manual and Project Health selectors.
+ * v4.6.11: patch changed card regions in place instead of replacing entire cards.
  */
 (function () {
     "use strict";
@@ -220,6 +221,30 @@ function findCardByName(name) {
         }
     }
     return null;
+}
+function updateInstanceCard(card, inst) {
+    // Build the latest card off-DOM, then copy only the regions whose visible
+    // values may have changed. The live card, focus state, hover state, and
+    // event-delegation target remain intact.
+    var template = document.createElement("template");
+    template.innerHTML = renderInstanceCard(inst).trim();
+    var freshCard = template.content.firstElementChild;
+    if (!freshCard) return false;
+
+    card.className = freshCard.className;
+    card.setAttribute("aria-selected", freshCard.getAttribute("aria-selected") || "false");
+
+    var slots = ["identity", "project", "metrics", "error", "last-seen"];
+    for (var i = 0; i < slots.length; i++) {
+        var selector = '[data-card-slot="' + slots[i] + '"]';
+        var currentSlot = card.querySelector(selector);
+        var freshSlot = freshCard.querySelector(selector);
+        if (currentSlot && freshSlot && currentSlot.innerHTML !== freshSlot.innerHTML) {
+            currentSlot.innerHTML = freshSlot.innerHTML;
+            currentSlot.className = freshSlot.className;
+        }
+    }
+    return true;
 }
 
     // ---- Filter / grouping helpers ----
@@ -674,7 +699,7 @@ function findCardByName(name) {
         }
         var card = findCardByName(changedInst.name);
         if (card) {
-            card.outerHTML = renderInstanceCard(changedInst);
+            updateInstanceCard(card, changedInst);
         }
         instanceFingerprints[changedInst.name] = fingerprint;
     }
@@ -767,17 +792,18 @@ function findCardByName(name) {
         return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group' + (isSelected ? " card-selected" : "") + '" data-instance-name="' + escapeHtml(inst.name) + '" role="option" tabindex="0" aria-selected="' + (isSelected ? "true" : "false") + '">' +
             // Name row: the name truncates instead of running under the badge/buttons
             // (host:port default names are long on narrow cards)
-            '<div class="flex items-center gap-2 ' + (projectBadgeHtml ? "mb-1.5" : "mb-2") + '">' + selectBox + statusDot +
+            '<div data-card-slot="identity" class="flex items-center gap-2 ' + (projectBadgeHtml ? "mb-1.5" : "mb-2") + '">' + selectBox + statusDot +
                 '<h3 class="font-semibold text-sm truncate min-w-0" title="' + escapeHtml(inst.name) + '">' + escapeHtml(inst.name) + '</h3>' + reconnectInfo +
             '</div>' +
             // Edit/remove overlay the end of the name row on hover, so they never take width from the name
             '<div class="card-actions absolute top-3 right-3 flex items-center gap-1.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">' + editBtn + removeBtn + '</div>' +
-            (projectBadgeHtml ? '<div class="mb-2 flex">' + projectBadgeHtml + '</div>' : '') +
-            '<div class="text-xs text-gray-400 space-y-0.5">' +
+            '<div data-card-slot="project" class="' + (projectBadgeHtml ? "mb-2 flex" : "hidden") + '">' + projectBadgeHtml + '</div>' +
+            '<div data-card-slot="metrics" class="text-xs text-gray-400 space-y-0.5">' +
 '<p><span class="text-gray-500">URL:</span> <a href="' + escapeHtml(inst.url) + '" target="_blank" class="text-blue-400 hover:text-blue-300 hover:underline">' + escapeHtml(inst.url) + '</a></p>' +
             (isOnline && !isPaused ? '<p><span class="text-gray-500">Items:</span> ' + itemsLine + '</p>' + doneHtml + bwHtml : "") +
-            '</div>' + errorMsg +
-            (!isOnline && !isRestarting && inst.last_seen ? '<p class="text-xs text-gray-600 mt-2">Last seen: ' + formatTime(inst.last_seen) + '</p>' : "") +
+            '</div>' +
+            '<div data-card-slot="error">' + errorMsg + '</div>' +
+            '<div data-card-slot="last-seen">' + (!isOnline && !isRestarting && inst.last_seen ? '<p class="text-xs text-gray-600 mt-2">Last seen: ' + formatTime(inst.last_seen) + '</p>' : "") + '</div>' +
             '</div>';
     }
 
