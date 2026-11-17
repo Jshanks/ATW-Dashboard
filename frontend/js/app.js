@@ -23,6 +23,7 @@
  * v4.6.0: monitoring control, automatic failover, and destructive baseline reset.
  * v4.6.3: project queue availability in manual and Project Health selectors.
  * v4.6.11: patch changed card regions in place instead of replacing entire cards.
+ * v4.6.12: refresh visible cards immediately and throttle offscreen cards.
  */
 (function () {
     "use strict";
@@ -43,6 +44,11 @@
     var pendingDashboardState = null;
     var renderFrameId = null;
     var instanceFingerprints = {};
+    var structuralFingerprints = {};
+    var lastCardUpdateTimes = {};
+    var visibleInstanceNames = new Set();
+    var cardVisibilityObserver = null;
+    var OFFSCREEN_CARD_UPDATE_INTERVAL = 60000;
     var dataSourceTracker = [];
 
     // ---- View options (filter / grouping), persisted in localStorage ----
@@ -223,9 +229,6 @@ function findCardByName(name) {
     return null;
 }
 function updateInstanceCard(card, inst) {
-    // Build the latest card off-DOM, then copy only the regions whose visible
-    // values may have changed. The live card, focus state, hover state, and
-    // event-delegation target remain intact.
     var template = document.createElement("template");
     template.innerHTML = renderInstanceCard(inst).trim();
     var freshCard = template.content.firstElementChild;
@@ -608,6 +611,67 @@ function updateInstanceCard(card, inst) {
     }
 
     // ---- Rendering ----
+    function getStructuralFingerprint(inst) {
+        var itemStates = (inst.items || []).map(function (item) { return item.state; }).join(",");
+        var pauseEntry = pauseState[inst.name];
+        var pauseKey = pauseEntry ? String(pauseEntry.resume_at || "paused") : "running";
+        return [
+            inst.connection_state,
+            inst.restarting ? "1" : "0",
+            inst.current_project || "",
+            inst.project_slug || "",
+            inst.selected_project || "",
+            inst.error_message || "",
+            inst.reconnect_attempts || 0,
+            pauseKey,
+            itemStates
+        ].join("|");
+    }
+
+    function findLatestInstance(name) {
+        var instances = dashboardState.instances || [];
+        for (var i = 0; i < instances.length; i++) {
+            if (instances[i].name === name) return instances[i];
+        }
+        return null;
+    }
+
+    function refreshCardVisibilityObserver() {
+        visibleInstanceNames.clear();
+        if (cardVisibilityObserver) cardVisibilityObserver.disconnect();
+        if (!("IntersectionObserver" in window)) {
+            var fallbackCards = grid.querySelectorAll("[data-instance-name]");
+            for (var f = 0; f < fallbackCards.length; f++) {
+                visibleInstanceNames.add(fallbackCards[f].dataset.instanceName);
+            }
+            return;
+        }
+        cardVisibilityObserver = new IntersectionObserver(function (entries) {
+            for (var i = 0; i < entries.length; i++) {
+                var card = entries[i].target;
+                var name = card.dataset.instanceName;
+                if (!name) continue;
+                if (entries[i].isIntersecting) {
+                    visibleInstanceNames.add(name);
+                    var latest = findLatestInstance(name);
+                    if (!latest) continue;
+                    var latestFingerprint = getInstanceFingerprint(latest);
+                    if (instanceFingerprints[name] !== latestFingerprint) {
+                        updateInstanceCard(card, latest);
+                        instanceFingerprints[name] = latestFingerprint;
+                        structuralFingerprints[name] = getStructuralFingerprint(latest);
+                        lastCardUpdateTimes[name] = Date.now();
+                    }
+                } else {
+                    visibleInstanceNames.delete(name);
+                }
+            }
+        }, { root: null, rootMargin: "240px 0px", threshold: 0 });
+
+        var cards = grid.querySelectorAll("[data-instance-name]");
+        for (var c = 0; c < cards.length; c++) cardVisibilityObserver.observe(cards[c]);
+    }
+
     function render() {
     var state = dashboardState;
     totalOnlineEl.textContent = state.total_online || 0;
@@ -636,6 +700,10 @@ function updateInstanceCard(card, inst) {
             '<p class="text-lg">No warrior instances yet.</p>' +
             '<p class="text-sm mt-2">Click <strong>Add Instance</strong> to connect your first warrior.</p></div>';
         instanceFingerprints = {};
+        structuralFingerprints = {};
+        lastCardUpdateTimes = {};
+        visibleInstanceNames.clear();
+        if (cardVisibilityObserver) cardVisibilityObserver.disconnect();
         knownInstances = new Set();
         selectedInstances.clear();
         lastGroups = [];
@@ -659,6 +727,8 @@ function updateInstanceCard(card, inst) {
         // a warrior moved between groups, or a group was collapsed/expanded
         var html = "";
         instanceFingerprints = {};
+        structuralFingerprints = {};
+        lastCardUpdateTimes = {};
         var visibleCount = 0;
         if (viewGrouped) {
             for (var g = 0; g < groups.length; g++) {
@@ -677,31 +747,53 @@ function updateInstanceCard(card, inst) {
             }
         }
         // Fingerprint every instance (hidden ones too) so targeted updates stay quiet
+        var rebuildTime = Date.now();
         for (var f = 0; f < state.instances.length; f++) {
-            instanceFingerprints[state.instances[f].name] = getInstanceFingerprint(state.instances[f]);
+            var rebuiltInstance = state.instances[f];
+            instanceFingerprints[rebuiltInstance.name] = getInstanceFingerprint(rebuiltInstance);
+            structuralFingerprints[rebuiltInstance.name] = getStructuralFingerprint(rebuiltInstance);
+            lastCardUpdateTimes[rebuiltInstance.name] = rebuildTime;
         }
         if (visibleCount === 0 && !(viewGrouped && groups.length > 0)) {
             html = '<div class="text-center text-gray-500 py-12" style="grid-column: 1 / -1;">' +
                 '<p class="text-sm">No warriors match the <strong>' + escapeHtml(viewFilter) + '</strong> filter.</p></div>';
         }
         grid.innerHTML = html;
+        refreshCardVisibilityObserver();
         lastLayoutKey = layoutKey;
         updateSelectionUI();
         return;
     }
 
-    // Targeted update — only touch cards whose data actually changed
+    // Visible/near-visible cards update immediately. Offscreen telemetry-only
+    // changes are coalesced and applied at most once per minute. Structural
+    // changes still apply immediately regardless of visibility.
+    var targetedUpdateTime = Date.now();
     for (var idx2 = 0; idx2 < state.instances.length; idx2++) {
         var changedInst = state.instances[idx2];
+        var name = changedInst.name;
         var fingerprint = getInstanceFingerprint(changedInst);
-        if (instanceFingerprints[changedInst.name] === fingerprint) {
-            continue; // Nothing changed — skip entirely
+        if (instanceFingerprints[name] === fingerprint) continue;
+
+        var card = findCardByName(name);
+        if (!card) {
+            instanceFingerprints[name] = fingerprint;
+            structuralFingerprints[name] = getStructuralFingerprint(changedInst);
+            continue;
         }
-        var card = findCardByName(changedInst.name);
-        if (card) {
-            updateInstanceCard(card, changedInst);
-        }
-        instanceFingerprints[changedInst.name] = fingerprint;
+
+        var structuralFingerprint = getStructuralFingerprint(changedInst);
+        var structureChangedForCard = structuralFingerprints[name] !== structuralFingerprint;
+        var cardIsVisible = visibleInstanceNames.has(name);
+        var lastUpdate = lastCardUpdateTimes[name] || 0;
+        var offscreenUpdateDue = targetedUpdateTime - lastUpdate >= OFFSCREEN_CARD_UPDATE_INTERVAL;
+
+        if (!structureChangedForCard && !cardIsVisible && !offscreenUpdateDue) continue;
+
+        updateInstanceCard(card, changedInst);
+        instanceFingerprints[name] = fingerprint;
+        structuralFingerprints[name] = structuralFingerprint;
+        lastCardUpdateTimes[name] = targetedUpdateTime;
     }
 
     // Refresh group header labels/stats in place (cheap: one per group)
