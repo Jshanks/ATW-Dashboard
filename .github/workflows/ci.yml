@@ -140,12 +140,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           docker build \
             --build-arg "APP_VERSION=${GITHUB_REF_NAME}" \
             --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --label "org.opencontainers.image.version=${GITHUB_REF_NAME}" \
-            --tag atw-dashboard:release \
+            --tag "atw-dashboard:release" \
+            .
 
       - name: Run WebSocket contract smoke tests
         shell: bash
@@ -157,7 +159,7 @@ jobs:
             --entrypoint python \
             atw-dashboard:release \
             -m backend.websocket_smoke
-            .
+
 
       - name: Run Trivy release-image scan
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
