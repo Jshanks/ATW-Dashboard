@@ -19,9 +19,6 @@
  * v4.5.0: monitor-only Project Health policy, baseline, canary preview,
  *         persistent decisions, and operator-confirmed manual failover.
  * v4.5.1: editable minimum/full baseline windows and header progress indicator.
- * v4.5.2: rolling health baseline and whole-card Warrior selection.
- * v4.6.0: monitoring control, automatic failover, and destructive baseline reset.
- * v4.6.3: project queue availability in manual and Project Health selectors.
  */
 (function () {
     "use strict";
@@ -58,7 +55,6 @@
     catch (ignored) { collapsedGroups = {}; }
     var lastLayoutKey = "";
     var projectTitles = {};  // slug -> display title, filled from /api/projects
-    var projectMetadata = {}; // slug -> structured project record including queue availability
 
     var grid = document.getElementById("instance-grid");
     var totalOnlineEl = document.getElementById("total-online");
@@ -96,8 +92,6 @@
     var connectionBadge = document.getElementById("connection-badge");
     var selectAllVisible = document.getElementById("select-all-visible");
     var selectionCount = document.getElementById("selection-count");
-    var selectionToolbarInline = document.getElementById("selection-toolbar-inline");
-    var clearSelectionInline = document.getElementById("clear-selection-inline");
     var selectionBar = document.getElementById("selection-bar");
     var selectionBarText = document.getElementById("selection-bar-text");
     var selectionBarCount = document.getElementById("selection-bar-count");
@@ -319,12 +313,12 @@ function findCardByName(name) {
             : (group.key === GROUP_OFFLINE ? "text-red-400"
             : (group.key === GROUP_PAUSED ? "text-amber-400" : "text-blue-300"));
         return '<div class="group-header flex items-center gap-3 pt-2 pb-1 border-b border-gray-800" style="grid-column: 1 / -1;" data-group-header="' + escapeHtml(group.key) + '">' +
+            '<input type="checkbox" data-select-group="' + escapeHtml(group.key) + '" class="rounded" title="Select every warrior in this group" aria-label="Select all in ' + escapeHtml(getGroupLabel(group.key, group.members)) + '">' +
             '<button type="button" data-toggle-group="' + escapeHtml(group.key) + '" class="flex items-center gap-2 text-sm font-semibold ' + accentClass + ' hover:text-white" aria-expanded="' + (isCollapsed ? "false" : "true") + '">' +
             '<span class="text-gray-500 w-3 inline-block">' + chevron + '</span>' +
             '<span data-group-label>' + escapeHtml(getGroupLabel(group.key, group.members)) + '</span></button>' +
             '<span class="text-xs" data-group-stats>' + getGroupStatsHtml(group.members) + '</span>' +
             '<span class="text-xs text-blue-400" data-group-selected></span>' +
-            '<button type="button" data-select-group="' + escapeHtml(group.key) + '" class="group-select-btn ml-auto text-xs text-indigo-300 hover:text-indigo-200">Select group</button>' +
             '</div>';
     }
 
@@ -387,15 +381,14 @@ function findCardByName(name) {
         syncCardSelection(name);
     }
 
-    // Update one card's visual and accessible selection state without re-rendering it
+    // Update one card's checkbox and highlight without re-rendering it
     function syncCardSelection(name) {
         var card = findCardByName(name);
-        if (!card) return;
+        if (!card) return;   // collapsed group or hidden by filter
         var isSelected = selectedInstances.has(name);
         card.classList.toggle("card-selected", isSelected);
-        card.setAttribute("aria-selected", isSelected ? "true" : "false");
-        var indicator = card.querySelector("[data-selection-indicator]");
-        if (indicator) indicator.classList.toggle("hidden", !isSelected);
+        var checkbox = card.querySelector("input[data-select-instance]");
+        if (checkbox) checkbox.checked = isSelected;
     }
 
     // Drop selections for warriors that no longer exist
@@ -413,6 +406,13 @@ function findCardByName(name) {
         selectedInstances.forEach(function (name) {
             if (!visibleNames.has(name)) selectedInstances.delete(name);
         });
+    }
+
+    function setCheckboxState(checkbox, selectedCount, totalCount) {
+        if (!checkbox) return;
+        checkbox.checked = totalCount > 0 && selectedCount === totalCount;
+        checkbox.indeterminate = selectedCount > 0 && selectedCount < totalCount;
+        checkbox.disabled = totalCount === 0;
     }
 
     function describeSelection(selectedNames) {
@@ -441,9 +441,7 @@ function findCardByName(name) {
         var totalSelected = selectedNames.length;
         var hiddenSelected = totalSelected - visibleSelected;
 
-        selectionToolbarInline.classList.toggle("hidden", totalSelected === 0);
-        selectionToolbarInline.classList.toggle("flex", totalSelected > 0);
-        selectAllVisible.textContent = visibleSelected === visibleInstances.length && visibleInstances.length ? "Clear visible" : "Select all visible";
+        setCheckboxState(selectAllVisible, visibleSelected, visibleInstances.length);
         selectionCount.textContent = totalSelected
             ? totalSelected + " of " + (dashboardState.instances || []).length + " selected"
             : "";
@@ -454,8 +452,7 @@ function findCardByName(name) {
                 var header = grid.querySelector('[data-group-header="' + cssEscape(lastGroups[g].key) + '"]');
                 if (!header) continue;
                 var groupSelected = countSelectedIn(lastGroups[g].members);
-                var groupButton = header.querySelector("[data-select-group]");
-                if (groupButton) groupButton.textContent = groupSelected === lastGroups[g].members.length && lastGroups[g].members.length ? "Clear group" : (groupSelected ? "Select remaining" : "Select group");
+                setCheckboxState(header.querySelector("input[data-select-group]"), groupSelected, lastGroups[g].members.length);
                 var groupSelectedLabel = header.querySelector("[data-group-selected]");
                 if (groupSelectedLabel) {
                     groupSelectedLabel.textContent = groupSelected
@@ -743,9 +740,10 @@ function findCardByName(name) {
         var editBtn = '<button data-edit-instance="' + escapeHtml(inst.name) + '" class="text-gray-600 hover:text-blue-400 " title="Edit" aria-label="Edit ' + escapeHtml(inst.name) + '"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg></button>';
         var removeBtn = '<button data-remove-instance="' + escapeHtml(inst.name) + '" class="text-gray-600 hover:text-red-400 " title="Remove" aria-label="Remove ' + escapeHtml(inst.name) + '"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>';
         var isSelected = selectedInstances.has(inst.name);
-        var selectBox = '<span data-selection-indicator class="card-selection-indicator' + (isSelected ? '' : ' hidden') + '" aria-hidden="true">&#10003;</span>';
-
-        return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group' + (isSelected ? " card-selected" : "") + '" data-instance-name="' + escapeHtml(inst.name) + '" role="option" tabindex="0" aria-selected="' + (isSelected ? "true" : "false") + '">' +
+        var selectBox = '<label class="card-select-hit" title="Select (Shift-click to select a range)">' +
+            '<input type="checkbox" class="rounded" data-select-instance="' + escapeHtml(inst.name) + '"' + (isSelected ? " checked" : "") +
+            ' aria-label="Select ' + escapeHtml(inst.name) + '"></label>';
+        return '<div class="instance-card bg-gray-900 border-l-4 ' + stateClass + ' rounded-lg p-4 relative group' + (isSelected ? " card-selected" : "") + '" data-instance-name="' + escapeHtml(inst.name) + '">' +
             // Name row: the name truncates instead of running under the badge/buttons
             // (host:port default names are long on narrow cards)
             '<div class="flex items-center gap-2 ' + (projectBadgeHtml ? "mb-1.5" : "mb-2") + '">' + selectBox + statusDot +
@@ -1162,8 +1160,8 @@ activityChart.update("none");
         }
     });
     // ---- Projects (sessionStorage cached) ----
-var PROJECTS_CACHE_KEY = "atw-projects-cache-v3";  // v3: structured queue metadata
-var PROJECTS_CACHE_TTL = 1800000; // 30 minutes; backend owns the same refresh interval
+var PROJECTS_CACHE_KEY = "atw-projects-cache-v2";  // v2: sorted list with Choice entry
+var PROJECTS_CACHE_TTL = 600000; // 10 minutes in ms
 
 function loadProjects() {
     var cached = sessionStorage.getItem(PROJECTS_CACHE_KEY);
@@ -1172,7 +1170,7 @@ function loadProjects() {
             var parsed = JSON.parse(cached);
             if (Date.now() - parsed.timestamp < PROJECTS_CACHE_TTL) {
                 applyProjectList(parsed.data);
-                // Display cached data immediately, then revalidate in the background.
+                return;
             }
         } catch (ignored) { /* stale or corrupt — fetch fresh */ }
     }
@@ -1187,24 +1185,6 @@ function loadProjects() {
             applyProjectList(data);
         })
         .catch(function (e) { console.error("Load projects error:", e); });
-}
-
-function formatTodoItems(items) {
-    if (items === null || items === undefined || !Number.isFinite(Number(items))) return null;
-    var value = Math.max(0, Number(items));
-    if (value >= 1000000000) return (value / 1000000000).toFixed(value >= 10000000000 ? 1 : 2).replace(/\.?0+$/, "") + "B";
-    if (value >= 1000000) return (value / 1000000).toFixed(value >= 100000000 ? 1 : 2).replace(/\.?0+$/, "") + "M";
-    if (value >= 1000) return (value / 1000).toFixed(value >= 100000 ? 0 : 1).replace(/\.?0+$/, "") + "K";
-    return Math.round(value).toLocaleString();
-}
-
-function projectSelectorLabel(slug, fallbackName) {
-    if (slug === AUTO_PROJECT_SLUG) return fallbackName;
-    var metadata = projectMetadata[slug];
-    if (!metadata) return fallbackName;
-    var formattedCount = formatTodoItems(metadata.todo_items);
-    if (formattedCount === null) return fallbackName + " · to do unavailable";
-    return fallbackName + " · " + formattedCount + " to do" + (metadata.todo_stale ? " (stale)" : "");
 }
 
 function applyProjectList(data) {
@@ -1222,11 +1202,7 @@ function applyProjectList(data) {
             if (actualTargets.length) displayName += " (\u2192 " + actualTargets.join(", ") + ")";
             else if (item.resolves_to) displayName += " (\u2192 " + item.resolves_to + ")";
         }
-        if (typeof item === "object") {
-            projectMetadata[slug] = item;
-            if (item.title) projectTitles[slug] = item.title;
-        }
-        displayName = projectSelectorLabel(slug, displayName);
+        if (typeof item === "object" && item.title) projectTitles[slug] = item.title;
         html += '<option value="' + escapeHtml(slug) + '">' + escapeHtml(displayName) + '</option>';
     }
     projectSelect.innerHTML = html;
@@ -1604,48 +1580,62 @@ function applyProjectList(data) {
     buildViewControls();
 
     // ---- Event delegation for instance cards ----
-grid.addEventListener("click", function (event) {
-    var groupButton = event.target.closest("button[data-select-group]");
-    if (groupButton) {
-        for (var groupIndex = 0; groupIndex < lastGroups.length; groupIndex++) {
-            if (lastGroups[groupIndex].key === groupButton.dataset.selectGroup) { toggleSelectionFor(lastGroups[groupIndex].members); break; }
+grid.addEventListener("click", function (e) {
+    // Card checkbox (label clicks are forwarded to the input by the browser)
+    var cardCheckbox = e.target.closest("input[data-select-instance]");
+    if (cardCheckbox) {
+        var clickedName = cardCheckbox.dataset.selectInstance;
+        var newState = cardCheckbox.checked;
+        if (e.shiftKey && lastClickedInstance && lastClickedInstance !== clickedName) {
+            // Range in on-screen order (collapsed/filtered cards are not in the DOM)
+            var orderedNames = Array.prototype.map.call(
+                grid.querySelectorAll("input[data-select-instance]"),
+                function (input) { return input.dataset.selectInstance; }
+            );
+            var anchorIndex = orderedNames.indexOf(lastClickedInstance);
+            var clickedIndex = orderedNames.indexOf(clickedName);
+            if (anchorIndex !== -1 && clickedIndex !== -1) {
+                var rangeStart = Math.min(anchorIndex, clickedIndex);
+                var rangeEnd = Math.max(anchorIndex, clickedIndex);
+                for (var r = rangeStart; r <= rangeEnd; r++) setInstanceSelected(orderedNames[r], newState);
+            } else {
+                setInstanceSelected(clickedName, newState);
+            }
+        } else {
+            setInstanceSelected(clickedName, newState);
+        }
+        lastClickedInstance = clickedName;
+        updateSelectionUI();
+        return;
+    }
+    // Group header checkbox: select/clear every member, including collapsed ones
+    var groupCheckbox = e.target.closest("input[data-select-group]");
+    if (groupCheckbox) {
+        var selectedGroupKey = groupCheckbox.dataset.selectGroup;
+        for (var g = 0; g < lastGroups.length; g++) {
+            if (lastGroups[g].key === selectedGroupKey) { toggleSelectionFor(lastGroups[g].members); break; }
         }
         return;
     }
-    var groupToggle = event.target.closest("[data-toggle-group]");
+    var groupToggle = e.target.closest("[data-toggle-group]");
     if (groupToggle) {
         var groupKey = groupToggle.dataset.toggleGroup;
-        if (collapsedGroups[groupKey]) delete collapsedGroups[groupKey]; else collapsedGroups[groupKey] = true;
-        localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify(collapsedGroups)); render(); return;
+        if (collapsedGroups[groupKey]) delete collapsedGroups[groupKey];
+        else collapsedGroups[groupKey] = true;
+        localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify(collapsedGroups));
+        render();
+        return;
     }
-    var editButton = event.target.closest("[data-edit-instance]");
-    if (editButton) { editInstance(editButton.dataset.editInstance); return; }
-    var removeButton = event.target.closest("[data-remove-instance]");
-    if (removeButton) { removeInstance(removeButton.dataset.removeInstance); return; }
-    if (event.target.closest("a, button, input, select, textarea, label")) return;
-    var card = event.target.closest("[data-instance-name]");
-    if (!card) return;
-    var clickedName = card.dataset.instanceName;
-    var newState = !selectedInstances.has(clickedName);
-    if (event.shiftKey && lastClickedInstance) {
-        var orderedNames = Array.from(grid.querySelectorAll("[data-instance-name]")).map(function (item) { return item.dataset.instanceName; });
-        var anchorIndex = orderedNames.indexOf(lastClickedInstance), clickedIndex = orderedNames.indexOf(clickedName);
-        if (anchorIndex !== -1 && clickedIndex !== -1) {
-            for (var rangeIndex = Math.min(anchorIndex, clickedIndex); rangeIndex <= Math.max(anchorIndex, clickedIndex); rangeIndex++) setInstanceSelected(orderedNames[rangeIndex], newState);
-        } else setInstanceSelected(clickedName, newState);
-    } else setInstanceSelected(clickedName, newState);
-    lastClickedInstance = clickedName; updateSelectionUI();
-});
-
-grid.addEventListener("keydown", function (event) {
-    if (event.key !== " " && event.key !== "Enter") return;
-    if (event.target.closest("a, button, input, select, textarea")) return;
-    var card = event.target.closest("[data-instance-name]");
-    if (!card) return;
-    event.preventDefault();
-    var name = card.dataset.instanceName;
-    setInstanceSelected(name, !selectedInstances.has(name));
-    lastClickedInstance = name; updateSelectionUI();
+    var editBtn = e.target.closest("[data-edit-instance]");
+    if (editBtn) {
+        editInstance(editBtn.dataset.editInstance);
+        return;
+    }
+    var removeBtn = e.target.closest("[data-remove-instance]");
+    if (removeBtn) {
+        removeInstance(removeBtn.dataset.removeInstance);
+        return;
+    }
 });
 
     // ---- Immediate restart (/api/stop_now) ----
@@ -1734,7 +1724,6 @@ grid.addEventListener("keydown", function (event) {
         lastClickedInstance = null;
         updateSelectionUI();
     });
-    clearSelectionInline.addEventListener("click", function () { btnSelClear.click(); });
     btnSelSettings.addEventListener("click", openSettingsPanel);
     btnSelPause.addEventListener("click", function () {
         loadPauseStatus();
@@ -1781,7 +1770,7 @@ function applyVersionBadge(cfg) {
     }
 }
 
-    // ---- Project Health (v4.6.0: monitoring, automation, and reset) ----
+    // ---- Project Health (v4.5.1, monitor-only) ----
     var projectHealthState = null;
     var projectHealthPreview = null;
     var projectHealthBusy = false;
@@ -1798,25 +1787,11 @@ function applyVersionBadge(cfg) {
     var projectHealthHeaderIndicator = document.getElementById("project-health-header-indicator");
     var projectHealthHeaderIndicatorLabel = document.getElementById("project-health-header-indicator-label");
     var projectHealthHeaderIndicatorDetail = document.getElementById("project-health-header-indicator-detail");
+    var btnFreezeBaseline = document.getElementById("btn-freeze-project-health-baseline");
     var btnPreviewGroups = document.getElementById("btn-preview-project-health-groups");
     var btnSaveRoles = document.getElementById("btn-save-project-health-roles");
     var failoverConfirmationInput = document.getElementById("project-health-failover-confirmation");
     var btnExecuteFailover = document.getElementById("btn-execute-project-health-failover");
-    var monitoringEnabledInput = document.getElementById("project-health-monitoring-enabled");
-    var automaticFailoverEnabledInput = document.getElementById("project-health-automatic-failover-enabled");
-    var stalledEvaluationsInput = document.getElementById("project-health-stalled-evaluations");
-    var cooldownHoursInput = document.getElementById("project-health-cooldown-hours");
-    var stabilizationMinutesInput = document.getElementById("project-health-stabilization-minutes");
-    var monitoringBadge = document.getElementById("project-health-monitoring-badge");
-    var automationBadge = document.getElementById("project-health-automation-badge");
-    var monitoringOffBanner = document.getElementById("project-health-off-banner");
-    var automationStateElement = document.getElementById("project-health-automation-state");
-    var resetDialog = document.getElementById("project-health-reset-dialog");
-    var resetConfirmationInput = document.getElementById("project-health-reset-confirmation");
-    var resetHelp = document.getElementById("project-health-reset-help");
-    var btnOpenReset = document.getElementById("btn-open-project-health-reset");
-    var btnCancelReset = document.getElementById("btn-cancel-project-health-reset");
-    var btnConfirmReset = document.getElementById("btn-confirm-project-health-reset");
 
     function projectHealthErrorDetail(response) {
         return response.json().then(function (data) {
@@ -1843,7 +1818,7 @@ function applyVersionBadge(cfg) {
 
     function setProjectHealthBusy(isBusy) {
         projectHealthBusy = isBusy;
-        [btnRefreshProjectHealth, btnPreviewGroups, btnSaveRoles, btnExecuteFailover].forEach(function (button) {
+        [btnRefreshProjectHealth, btnFreezeBaseline, btnPreviewGroups, btnSaveRoles, btnExecuteFailover].forEach(function (button) {
             if (button) button.dataset.busy = isBusy ? "1" : "0";
         });
         updateProjectHealthActions();
@@ -1871,8 +1846,7 @@ function applyVersionBadge(cfg) {
         function fill(select, placeholder, selected) {
             var html = '<option value="">' + escapeHtml(placeholder) + '</option>';
             slugs.forEach(function (slug) {
-                var baseName = projectTitles[slug] || slug;
-                html += '<option value="' + escapeHtml(slug) + '">' + escapeHtml(projectSelectorLabel(slug, baseName)) + '</option>';
+                html += '<option value="' + escapeHtml(slug) + '">' + escapeHtml(projectTitles[slug] || slug) + '</option>';
             });
             select.innerHTML = html;
             select.value = selected || "";
@@ -1950,36 +1924,22 @@ function applyVersionBadge(cfg) {
     function renderProjectHealthHeaderIndicator(state) {
         if (!projectHealthHeaderIndicator) return;
         var policy = state.policy || {};
-        var runtime = state.runtime || {};
         var evaluation = (state.health || {})[policy.primary_project] || null;
         var readiness = evaluation ? evaluation.baseline : null;
-        var nowSeconds = Date.now() / 1000;
-        projectHealthHeaderIndicator.classList.remove("project-health-header-indicator-provisional", "project-health-header-indicator-off", "project-health-header-indicator-danger");
-        if (runtime.failover_in_progress) {
-            projectHealthHeaderIndicatorLabel.textContent = "Failover in progress";
-            projectHealthHeaderIndicatorDetail.textContent = "Automatic";
-            projectHealthHeaderIndicator.classList.add("project-health-header-indicator-danger");
-        } else if (!policy.monitoring_enabled) {
-            projectHealthHeaderIndicatorLabel.textContent = "Project Health Off";
-            projectHealthHeaderIndicatorDetail.textContent = "Manual control";
-            projectHealthHeaderIndicator.classList.add("project-health-header-indicator-off");
-        } else if (runtime.stabilization_until && runtime.stabilization_until > nowSeconds) {
-            projectHealthHeaderIndicatorLabel.textContent = "Stabilizing";
-            projectHealthHeaderIndicatorDetail.textContent = Math.ceil((runtime.stabilization_until - nowSeconds) / 60) + "m";
-            projectHealthHeaderIndicator.classList.add("project-health-header-indicator-provisional");
-        } else if (runtime.automatic_failover_state === "confirming_stall") {
-            projectHealthHeaderIndicatorLabel.textContent = "Likely stalled";
-            projectHealthHeaderIndicatorDetail.textContent = runtime.consecutive_stalled_evaluations + "/" + policy.stalled_evaluations_required;
-            projectHealthHeaderIndicator.classList.add("project-health-header-indicator-danger");
-        } else if (!policy.primary_project || !readiness || readiness.full_complete) {
-            projectHealthHeaderIndicator.classList.add("hidden"); return;
-        } else {
-            var window = readiness.phase === "building" ? readiness.minimum : readiness.full;
-            var coverage = Number(window.coverage_percent || 0);
-            projectHealthHeaderIndicatorLabel.textContent = readiness.phase === "building" ? "Baseline " + coverage.toFixed(0) + "%" : "Provisional " + coverage.toFixed(0) + "%";
-            projectHealthHeaderIndicatorDetail.textContent = formatBaselineHours(Number(window.span_seconds || 0) / 3600) + " / " + formatBaselineHours(Number(window.hours || 0));
-            if (readiness.phase !== "building") projectHealthHeaderIndicator.classList.add("project-health-header-indicator-provisional");
+        if (!policy.primary_project || !readiness || readiness.full_complete) {
+            projectHealthHeaderIndicator.classList.add("hidden");
+            return;
         }
+        var minimum = readiness.minimum || {};
+        var full = readiness.full || {};
+        var phase = readiness.phase || "building";
+        var window = phase === "building" ? minimum : full;
+        var coverage = Number(window.coverage_percent || 0);
+        var observedHours = Number(window.span_seconds || 0) / 3600;
+        var targetHours = Number(window.hours || (phase === "building" ? policy.minimum_baseline_hours : policy.full_baseline_hours) || 0);
+        projectHealthHeaderIndicatorLabel.textContent = phase === "building" ? "Baseline " + coverage.toFixed(0) + "%" : "Provisional " + coverage.toFixed(0) + "%";
+        projectHealthHeaderIndicatorDetail.textContent = formatBaselineHours(observedHours) + " / " + formatBaselineHours(targetHours);
+        projectHealthHeaderIndicator.classList.toggle("project-health-header-indicator-provisional", phase !== "building");
         projectHealthHeaderIndicator.classList.remove("hidden");
     }
 
@@ -1992,19 +1952,6 @@ function applyVersionBadge(cfg) {
         canaryPercentInput.value = policy.canary_percent || 5;
         minimumBaselineHoursInput.value = policy.minimum_baseline_hours || 6;
         fullBaselineHoursInput.value = policy.full_baseline_hours || 24;
-        monitoringEnabledInput.checked = policy.monitoring_enabled !== false;
-        automaticFailoverEnabledInput.checked = Boolean(policy.automatic_failover_enabled);
-        stalledEvaluationsInput.value = policy.stalled_evaluations_required || 3;
-        cooldownHoursInput.value = policy.cooldown_hours || 6;
-        stabilizationMinutesInput.value = policy.resume_stabilization_minutes || 30;
-        monitoringBadge.textContent = policy.monitoring_enabled !== false ? "Monitoring on" : "Monitoring off";
-        automationBadge.textContent = policy.automatic_failover_enabled ? "Automatic failover on" : "Automatic failover off";
-        monitoringOffBanner.classList.toggle("hidden", policy.monitoring_enabled !== false);
-        var runtime = state.runtime || {};
-        var automationReasons = state.automation && state.automation.reasons ? state.automation.reasons : [];
-        automationStateElement.textContent = runtime.failover_in_progress ? "Automatic failover is in progress." :
-            (runtime.automatic_failover_state === "confirming_stall" ? "Stall confirmation " + runtime.consecutive_stalled_evaluations + " of " + policy.stalled_evaluations_required + "." :
-            (policy.automatic_failover_enabled ? (automationReasons.length ? "Automatic failover armed but blocked: " + automationReasons.join("; ") + "." : "Automatic failover is armed.") : "Automatic failover is disabled."));
         var evaluation = (state.health || {})[policy.primary_project] || null;
         var stateElement = document.getElementById("project-health-primary-state");
         stateElement.textContent = evaluation ? evaluation.state : "Not configured";
@@ -2044,11 +1991,10 @@ function applyVersionBadge(cfg) {
         var policy = projectHealthState.policy || {};
         var evaluation = (projectHealthState.health || {})[policy.primary_project];
         var baselineComplete = Boolean(evaluation && evaluation.baseline && evaluation.baseline.complete);
+        btnFreezeBaseline.disabled = projectHealthBusy || !baselineComplete;
         btnPreviewGroups.disabled = projectHealthBusy || !policy.primary_project || !policy.fallback_project;
         btnSaveRoles.disabled = projectHealthBusy || !projectHealthPreview || !projectHealthPreview.primary_canaries.length;
-        var monitoringEnabled = projectHealthState.policy && projectHealthState.policy.monitoring_enabled !== false;
-        var failoverAvailable = monitoringEnabled && Boolean(projectHealthState.failover && projectHealthState.failover.available);
-        btnOpenReset.disabled = projectHealthBusy || !(projectHealthState.policy && projectHealthState.policy.primary_project);
+        var failoverAvailable = Boolean(projectHealthState.failover && projectHealthState.failover.available);
         btnExecuteFailover.disabled = projectHealthBusy || !failoverAvailable || failoverConfirmationInput.value.trim() !== "FAILOVER";
         btnRefreshProjectHealth.disabled = projectHealthBusy;
     }
@@ -2083,18 +2029,6 @@ function applyVersionBadge(cfg) {
     projectHealthModal.addEventListener("click", function (event) { if (event.target === projectHealthModal) closeProjectHealth(); });
     failoverConfirmationInput.addEventListener("input", updateProjectHealthActions);
 
-    monitoringEnabledInput.addEventListener("change", function () {
-        if (!monitoringEnabledInput.checked && !window.confirm("Turn off Project Health monitoring? Baseline collection, health evaluation, manual failover, and automatic failover will stop. Existing configuration and history will be retained, and Warrior projects will remain unchanged.")) {
-            monitoringEnabledInput.checked = true;
-        }
-    });
-
-    automaticFailoverEnabledInput.addEventListener("change", function () {
-        if (automaticFailoverEnabledInput.checked && !window.confirm("Enable automatic failover? The saved Fallback fleet may be switched after the configured consecutive stalled evaluations. Primary canaries remain on the primary project. Automatic failback is not enabled.")) {
-            automaticFailoverEnabledInput.checked = false;
-        }
-    });
-
     projectHealthPolicyForm.addEventListener("submit", function (event) {
         event.preventDefault();
         var primaryProject = primaryProjectSelect.value;
@@ -2102,21 +2036,23 @@ function applyVersionBadge(cfg) {
         var canaryPercent = parseInt(canaryPercentInput.value, 10);
         var minimumBaselineHours = parseInt(minimumBaselineHoursInput.value, 10);
         var fullBaselineHours = parseInt(fullBaselineHoursInput.value, 10);
-        var stalledEvaluations = parseInt(stalledEvaluationsInput.value, 10);
-        var cooldownHours = parseInt(cooldownHoursInput.value, 10);
-        var stabilizationMinutes = parseInt(stabilizationMinutesInput.value, 10);
         if (!primaryProject || !fallbackProject) return setProjectHealthMessage("Select both a primary and fallback project.", "error");
         if (primaryProject === fallbackProject) return setProjectHealthMessage("Primary and fallback projects must be different.", "error");
         if (!Number.isInteger(canaryPercent) || canaryPercent < 1 || canaryPercent > 100) return setProjectHealthMessage("Canary allocation must be a whole number from 1 to 100.", "error");
         if (!Number.isInteger(minimumBaselineHours) || minimumBaselineHours < 1 || minimumBaselineHours > 48) return setProjectHealthMessage("Minimum baseline must be a whole number from 1 to 48 hours.", "error");
         if (!Number.isInteger(fullBaselineHours) || fullBaselineHours < 1 || fullBaselineHours > 48) return setProjectHealthMessage("Full baseline must be a whole number from 1 to 48 hours.", "error");
         if (fullBaselineHours < minimumBaselineHours) return setProjectHealthMessage("Full baseline cannot be shorter than the minimum baseline.", "error");
-        if (!Number.isInteger(stalledEvaluations) || stalledEvaluations < 2 || stalledEvaluations > 10) return setProjectHealthMessage("Stalled evaluations must be from 2 to 10.", "error");
-        if (!Number.isInteger(cooldownHours) || cooldownHours < 1 || cooldownHours > 48) return setProjectHealthMessage("Cooldown must be from 1 to 48 hours.", "error");
-        if (!Number.isInteger(stabilizationMinutes) || stabilizationMinutes < 15 || stabilizationMinutes > 120) return setProjectHealthMessage("Resume stabilization must be from 15 to 120 minutes.", "error");
         setProjectHealthBusy(true);
-        projectHealthRequest("api/project-health/policy", { method: "PUT", body: JSON.stringify({ primary_project: primaryProject, fallback_project: fallbackProject, canary_percent: canaryPercent, minimum_baseline_hours: minimumBaselineHours, full_baseline_hours: fullBaselineHours, monitoring_enabled: monitoringEnabledInput.checked, automatic_failover_enabled: automaticFailoverEnabledInput.checked, stalled_evaluations_required: stalledEvaluations, cooldown_hours: cooldownHours, resume_stabilization_minutes: stabilizationMinutes }) })
+        projectHealthRequest("api/project-health/policy", { method: "PUT", body: JSON.stringify({ primary_project: primaryProject, fallback_project: fallbackProject, canary_percent: canaryPercent, minimum_baseline_hours: minimumBaselineHours, full_baseline_hours: fullBaselineHours }) })
             .then(function () { projectHealthPreview = null; showToast("Project Health policy saved", "success"); return loadProjectHealth(); })
+            .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
+            .finally(function () { setProjectHealthBusy(false); });
+    });
+
+    btnFreezeBaseline.addEventListener("click", function () {
+        setProjectHealthBusy(true);
+        projectHealthRequest("api/project-health/baseline/freeze", { method: "POST", body: JSON.stringify({ actor: "dashboard" }) })
+            .then(function () { showToast("Primary-project baseline frozen", "success"); return loadProjectHealth(); })
             .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
             .finally(function () { setProjectHealthBusy(false); });
     });
@@ -2135,40 +2071,6 @@ function applyVersionBadge(cfg) {
         setProjectHealthBusy(true);
         projectHealthRequest("api/project-health/roles", { method: "PUT", body: JSON.stringify({ primary_canaries: projectHealthPreview.primary_canaries.map(function (item) { return item.name; }), fallback_fleet: projectHealthPreview.fallback_fleet.map(function (item) { return item.name; }) }) })
             .then(function () { showToast("Project Health group assignments saved", "success"); return loadProjectHealth(); })
-            .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
-            .finally(function () { setProjectHealthBusy(false); });
-    });
-
-    function closeBaselineResetDialog() {
-        resetDialog.classList.add("hidden");
-        resetConfirmationInput.value = "";
-        btnConfirmReset.disabled = true;
-    }
-    btnOpenReset.addEventListener("click", function () {
-        var primary = projectHealthState && projectHealthState.policy ? projectHealthState.policy.primary_project : "";
-        if (!primary) return;
-        var phrase = "RESET " + primary;
-        resetHelp.textContent = "Type " + phrase + " exactly. Coverage will return to 0% and must rebuild.";
-        resetConfirmationInput.placeholder = phrase;
-        resetDialog.classList.remove("hidden");
-        resetConfirmationInput.focus();
-    });
-    btnCancelReset.addEventListener("click", closeBaselineResetDialog);
-    resetDialog.addEventListener("click", function (event) { if (event.target === resetDialog) closeBaselineResetDialog(); });
-    resetConfirmationInput.addEventListener("input", function () {
-        var primary = projectHealthState && projectHealthState.policy ? projectHealthState.policy.primary_project : "";
-        btnConfirmReset.disabled = resetConfirmationInput.value.trim() !== "RESET " + primary;
-    });
-    btnConfirmReset.addEventListener("click", function () {
-        var phrase = resetConfirmationInput.value.trim();
-        if (!phrase || btnConfirmReset.disabled) return;
-        setProjectHealthBusy(true);
-        projectHealthRequest("api/project-health/baseline/reset", { method: "POST", body: JSON.stringify({ confirmation: phrase, actor: "dashboard" }) })
-            .then(function (result) {
-                closeBaselineResetDialog();
-                showToast("Deleted " + result.deleted_samples + " baseline samples for " + result.project, "success");
-                return loadProjectHealth();
-            })
             .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
             .finally(function () { setProjectHealthBusy(false); });
     });

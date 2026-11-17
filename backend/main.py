@@ -66,7 +66,10 @@ automatic_failover_task = None
 # so a warrior on ArchiveTeam's Choice resumes as "auto", not pinned to the resolved project.
 _pause_state = {}
 
-# Supplementary WS broadcast intervals (seconds)
+# WebSocket cadence and supplementary broadcast intervals (seconds).
+# Five-second fleet updates remain responsive while materially reducing browser
+# allocation churn for large fleets.
+_WS_BROADCAST_INTERVAL = 5
 _HISTORY_BROADCAST_INTERVAL = 30
 _TRACKER_BROADCAST_INTERVAL = 60
 _PAUSE_BROADCAST_INTERVAL = 30
@@ -371,7 +374,7 @@ async def _broadcast_loop():
     last_broadcast_message = ""
     while True:
         try:
-            await asyncio.sleep(2)
+            await asyncio.sleep(_WS_BROADCAST_INTERVAL)
             for client in clients.values():
                 s = client.status
                 if s.connection_state == ConnectionState.ONLINE:
@@ -381,8 +384,7 @@ async def _broadcast_loop():
             if not ws_connections:
                 continue
             now = time.monotonic()
-            state = _build_dashboard_state()
-            state_dict = state.model_dump(mode="json")
+            state_dict = _build_live_dashboard_state_dict()
             # Attach supplementary data when their intervals elapse
             if now - last_history_time >= _HISTORY_BROADCAST_INTERVAL:
                 state_dict["history"] = history.get_bucketed()
@@ -413,6 +415,27 @@ async def _broadcast_loop():
         except Exception as e:
             logger.error("Broadcast error: %s", e)
             await asyncio.sleep(5)
+
+
+def _build_live_dashboard_state_dict():
+    """Build the compact state used for routine WebSocket broadcasts.
+
+    The full Warrior item name can contain hundreds of null-separated tracker
+    work units. The dashboard UI only uses item state, so routine broadcasts omit
+    item names and task descriptions to avoid repeatedly allocating and parsing
+    large strings in every connected browser. Full details remain available from
+    GET /api/instances/{name}.
+    """
+    state_dict = _build_dashboard_state().model_dump(mode="json")
+    for instance in state_dict.get("instances", []):
+        compact_items = []
+        for item in instance.get("items", []):
+            compact_items.append({
+                "item_id": item.get("item_id", ""),
+                "state": item.get("state", "unknown"),
+            })
+        instance["items"] = compact_items
+    return state_dict
 
 
 def _build_dashboard_state():
@@ -1126,7 +1149,7 @@ async def websocket_endpoint(ws: WebSocket):
     ws_connections.append(ws)
     logger.info("WebSocket client connected (%d total)", len(ws_connections))
     try:
-        init_state = _build_dashboard_state().model_dump(mode="json")
+        init_state = _build_live_dashboard_state_dict()
         init_state["history"] = history.get_bucketed()
         try:
             tracker_data = await _build_tracker_stats()
