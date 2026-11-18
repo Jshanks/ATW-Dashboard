@@ -158,7 +158,72 @@ jobs:
             --rm \
             --entrypoint sh \
             atw-dashboard:release \
-            -c '              test -s /app/frontend/static/css/tailwind.css &&               grep -q "/static/css/tailwind.css" /app/frontend/index.html &&               ! grep -q "cdn.tailwindcss.com" /app/frontend/index.html &&               ! grep -q "tailwind.config" /app/frontend/index.html            '
+            -c '              test -s /app/frontend/css/tailwind.css &&               grep -q "/static/css/tailwind.css" /app/frontend/index.html &&               ! grep -q "cdn.tailwindcss.com" /app/frontend/index.html &&               ! grep -q "tailwind.config" /app/frontend/index.html            '
+
+          container_id="$(
+            docker run \
+              --detach \
+              --publish 127.0.0.1::8080 \
+              atw-dashboard:release
+          )"
+
+          cleanup() {
+            docker rm --force "${container_id}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          host_port="$(
+            docker port "${container_id}" 8080/tcp |
+              awk -F: 'NR == 1 {print $NF}'
+          )"
+
+          if [[ -z "${host_port}" ]]; then
+            docker logs "${container_id}"
+            echo "::error::Could not determine the published dashboard port."
+            exit 1
+          fi
+
+          dashboard_ready=false
+          for attempt in $(seq 1 30); do
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              "http://127.0.0.1:${host_port}/api/health" \
+              >/dev/null; then
+              dashboard_ready=true
+              break
+            fi
+
+            if ! docker inspect \
+              --format '{{.State.Running}}' \
+              "${container_id}" |
+              grep -qx true; then
+              docker logs "${container_id}"
+              echo "::error::Dashboard container exited before becoming healthy."
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          if [[ "${dashboard_ready}" != true ]]; then
+            docker logs "${container_id}"
+            echo "::error::Dashboard did not become healthy within 30 seconds."
+            exit 1
+          fi
+
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --dump-header /tmp/tailwind-headers.txt \
+            --output /tmp/tailwind.css \
+            "http://127.0.0.1:${host_port}/static/css/tailwind.css"
+
+          test -s /tmp/tailwind.css
+          grep -qi '^content-type: text/css' /tmp/tailwind-headers.txt
+          grep -q 'tailwindcss v4.3.0' /tmp/tailwind.css
 
       - name: Run WebSocket contract smoke tests
         shell: bash

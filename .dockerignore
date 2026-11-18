@@ -12,4 +12,4 @@ docker-compose*.yml
 venv/
 .venv/
 node_modules
-frontend/static/css/tailwind.css
+frontend/css/tailwind.css
