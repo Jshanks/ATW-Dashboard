@@ -9,6 +9,7 @@ production Project Health data volume.
 """
 from __future__ import annotations
 
+import ast
 import copy
 import os
 import tempfile
@@ -284,6 +285,103 @@ class ProjectHealthSmokeTests(unittest.TestCase):
         self.assertEqual(
             status["health"][PROJECT]["queue"]["todo_items"],
             40_720_000,
+        )
+
+
+class ManualFailoverContractTests(unittest.TestCase):
+    """Source-level contract checks that do not require FastAPI or Pydantic."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        backend_directory = Path(__file__).resolve().parent
+        cls.models_source = (backend_directory / "models.py").read_text(
+            encoding="utf-8"
+        )
+        cls.main_source = (backend_directory / "main.py").read_text(
+            encoding="utf-8"
+        )
+        cls.models_tree = ast.parse(cls.models_source)
+        cls.main_tree = ast.parse(cls.main_source)
+
+    def test_manual_failover_model_accepts_only_saved_roles(self) -> None:
+        target_class = next(
+            node
+            for node in self.models_tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "ManualFailoverTarget"
+        )
+        enum_values = {
+            statement.targets[0].id: statement.value.value
+            for statement in target_class.body
+            if isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and isinstance(statement.value, ast.Constant)
+        }
+        self.assertEqual(
+            enum_values,
+            {"PRIMARY": "primary", "SECONDARY": "secondary"},
+        )
+
+        request_class = next(
+            node
+            for node in self.models_tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "ManualFailoverRequest"
+        )
+        annotated_fields = {
+            statement.target.id: ast.unparse(statement.annotation)
+            for statement in request_class.body
+            if isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+        }
+        self.assertEqual(
+            annotated_fields.get("target"),
+            "ManualFailoverTarget",
+        )
+        self.assertNotIn("confirmation", annotated_fields)
+
+    def test_manual_endpoint_resolves_primary_and_secondary_destinations(self) -> None:
+        endpoint = next(
+            node
+            for node in self.main_tree.body
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+            and node.name == "execute_manual_project_failover"
+        )
+        endpoint_source = ast.get_source_segment(self.main_source, endpoint) or ""
+
+        required_source = (
+            "target_role = request.target.value",
+            'if target_role == "primary"',
+            'policy.get("primary_project", "")',
+            'policy.get("fallback_project", "")',
+            '"target": target_role',
+            '"target_project": target_project',
+            '_switch_failover_instance(name, target_project)',
+        )
+        for required_text in required_source:
+            with self.subTest(required_text=required_text):
+                self.assertIn(required_text, endpoint_source)
+
+        self.assertNotIn("request.confirmation", endpoint_source)
+        self.assertNotIn(
+            "project_health.failover_availability()",
+            endpoint_source,
+        )
+
+    def test_automatic_failover_still_targets_secondary_project(self) -> None:
+        automatic_endpoint = next(
+            node
+            for node in self.main_tree.body
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+            and node.name == "_execute_automatic_failover"
+        )
+        automatic_source = (
+            ast.get_source_segment(self.main_source, automatic_endpoint) or ""
+        )
+        self.assertIn(
+            '_switch_failover_instance(name, policy["fallback_project"])',
+            automatic_source,
         )
 
 

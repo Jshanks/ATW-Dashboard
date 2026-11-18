@@ -1109,7 +1109,7 @@ _MANUAL_FAILOVER_BATCH_DELAY_SECONDS = 1
 _manual_failover_lock = asyncio.Lock()
 
 
-async def _switch_failover_instance(name, fallback_project):
+async def _switch_failover_instance(name, target_project):
     client = clients.get(name)
     if not client:
         return name, {"status": "error", "detail": "Not found"}
@@ -1120,7 +1120,7 @@ async def _switch_failover_instance(name, fallback_project):
     if name in _pause_state:
         return name, {"status": "error", "detail": "Warrior is paused"}
     try:
-        success = await client.change_project(fallback_project)
+        success = await client.change_project(target_project)
     except Exception as error:
         logger.error("Manual failover error for %s: %s", _safe_log(name), error)
         success = False
@@ -1129,10 +1129,12 @@ async def _switch_failover_instance(name, fallback_project):
 
 @app.post("/api/project-health/failover")
 async def execute_manual_project_failover(request: ManualFailoverRequest):
-    """Switch only the saved fallback fleet. No background task calls this endpoint."""
-    availability = project_health.failover_availability()
-    if not availability["available"]:
-        raise HTTPException(status_code=409, detail=availability["message"])
+    """Move the saved fallback fleet to the configured primary or secondary project.
+
+    Manual switching intentionally does not require baseline readiness. The
+    operator may use these controls to put non-critical Warriors back to useful
+    work even while Project Health is building or monitoring is disabled.
+    """
     if _manual_failover_lock.locked():
         raise HTTPException(status_code=409, detail="Another manual failover is running")
 
@@ -1143,18 +1145,43 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
     if not fallback_names:
         raise HTTPException(status_code=409, detail="No Fallback fleet is assigned")
 
-    project_health.log_manual_failover_decision(
-        "requested", request.actor,
-        {"primary_project": policy["primary_project"], "fallback_project": policy["fallback_project"],
-         "primary_canaries": primary_canaries, "fallback_fleet": fallback_names},
+    target_role = request.target.value
+    target_project = (
+        policy.get("primary_project", "")
+        if target_role == "primary"
+        else policy.get("fallback_project", "")
     )
+    if not target_project:
+        raise HTTPException(
+            status_code=409,
+            detail=f"No {target_role} project is configured",
+        )
+
+    event_details = {
+        "target_role": target_role,
+        "target_project": target_project,
+        "primary_project": policy.get("primary_project", ""),
+        "fallback_project": policy.get("fallback_project", ""),
+        "primary_canaries": primary_canaries,
+        "fallback_fleet": fallback_names,
+    }
+    project_health.log_manual_failover_decision(
+        "requested",
+        request.actor,
+        event_details,
+    )
+
     results = {}
     async with _manual_failover_lock:
-        project_health.log_manual_failover_decision("confirmed", request.actor, {"confirmation": request.confirmation})
+        project_health.log_manual_failover_decision(
+            "confirmed",
+            request.actor,
+            {"target_role": target_role, "target_project": target_project},
+        )
         for start in range(0, len(fallback_names), _MANUAL_FAILOVER_BATCH_SIZE):
             batch = fallback_names[start:start + _MANUAL_FAILOVER_BATCH_SIZE]
             for name, result in await asyncio.gather(*(
-                _switch_failover_instance(name, policy["fallback_project"]) for name in batch
+                _switch_failover_instance(name, target_project) for name in batch
             )):
                 results[name] = result
             if start + _MANUAL_FAILOVER_BATCH_SIZE < len(fallback_names):
@@ -1162,17 +1189,31 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
 
     switched = sum(1 for result in results.values() if result["status"] == "ok")
     failed = len(results) - switched
+    final_details = {
+        **event_details,
+        "switched": switched,
+        "failed": failed,
+        "results": results,
+        "primary_canaries_unchanged": primary_canaries,
+    }
     project_health.log_manual_failover_decision(
-        "completed" if failed == 0 else "failed", request.actor,
-        {"switched": switched, "failed": failed, "results": results,
-         "primary_canaries_unchanged": primary_canaries},
+        "completed" if failed == 0 else "failed",
+        request.actor,
+        final_details,
     )
     return {
-        "status": "ok" if failed == 0 else "partial", "mode": "manual",
-        "automatic_switching_enabled": project_health.get_policy().get("automatic_failover_enabled", False),
+        "status": "ok" if failed == 0 else "partial",
+        "mode": "manual",
+        "target": target_role,
+        "target_project": target_project,
+        "automatic_switching_enabled": policy.get("automatic_failover_enabled", False),
         "primary_canaries_unchanged": primary_canaries,
-        "fallback_project": policy["fallback_project"],
-        "switched": switched, "failed": failed, "results": results,
+        "switched": switched,
+        "failed": failed,
+        "results": results,
+        "project_health": project_health.get_status(
+            client.status for client in clients.values()
+        ),
     }
 
 

@@ -575,6 +575,7 @@ function updateInstanceCard(card, inst) {
             }
             return;
         }
+        loadProjectHealth();
         if (!hiddenStatePending) return;
         hiddenStatePending = false;
         // Prevent an overdue telemetry-only refresh from touching every offscreen
@@ -1986,8 +1987,9 @@ function applyVersionBadge(cfg) {
     var projectHealthHeaderIndicatorDetail = document.getElementById("project-health-header-indicator-detail");
     var btnPreviewGroups = document.getElementById("btn-preview-project-health-groups");
     var btnSaveRoles = document.getElementById("btn-save-project-health-roles");
-    var failoverConfirmationInput = document.getElementById("project-health-failover-confirmation");
-    var btnExecuteFailover = document.getElementById("btn-execute-project-health-failover");
+    var btnFailoverSecondary = document.getElementById("btn-project-health-failover-secondary");
+    var btnFailoverPrimary = document.getElementById("btn-project-health-failover-primary");
+    var PROJECT_HEALTH_REFRESH_INTERVAL = 60000;
     var monitoringEnabledInput = document.getElementById("project-health-monitoring-enabled");
     var automaticFailoverEnabledInput = document.getElementById("project-health-automatic-failover-enabled");
     var stalledEvaluationsInput = document.getElementById("project-health-stalled-evaluations");
@@ -2029,7 +2031,7 @@ function applyVersionBadge(cfg) {
 
     function setProjectHealthBusy(isBusy) {
         projectHealthBusy = isBusy;
-        [btnRefreshProjectHealth, btnPreviewGroups, btnSaveRoles, btnExecuteFailover].forEach(function (button) {
+        [btnRefreshProjectHealth, btnPreviewGroups, btnSaveRoles, btnFailoverSecondary, btnFailoverPrimary].forEach(function (button) {
             if (button) button.dataset.busy = isBusy ? "1" : "0";
         });
         updateProjectHealthActions();
@@ -2172,7 +2174,22 @@ function applyVersionBadge(cfg) {
         return Math.round(seconds / 60) + "m ago";
     }
 
-    function projectHealthExplanation(evaluation, policy, runtime) {
+    function activeBaselineWindow(readiness, policy) {
+        readiness = readiness || {};
+        policy = policy || {};
+        var useFull = Boolean(readiness.full_established);
+        var windowData = useFull ? readiness.full : readiness.minimum;
+        var configuredHours = useFull
+            ? Number(policy.full_baseline_hours || 24)
+            : Number(policy.minimum_baseline_hours || 6);
+        return {
+            label: useFull ? "Full baseline" : "Minimum baseline",
+            hours: Number((windowData && windowData.hours) || configuredHours),
+            data: windowData || {}
+        };
+    }
+
+    function projectHealthExplanation(evaluation, policy, runtime, readiness) {
         if (!evaluation) return "Project Health has not evaluated the configured primary project yet.";
         var primary = (policy && policy.primary_project) || evaluation.project || "The primary project";
         var queue = evaluation.queue || {};
@@ -2182,7 +2199,10 @@ function applyVersionBadge(cfg) {
         if (evaluation.state === "Queue nearly exhausted") return primary + " has an estimated queue runway under " + Math.round(queue.low_runway_threshold_minutes || 30) + " minutes. Automatic failover confirmation is " + confirmation + " of " + required + ".";
         if (evaluation.state === "Likely stalled") return primary + " reports queued work, but both item and byte activity are below 25% of baseline. Automatic failover confirmation is " + confirmation + " of " + required + ".";
         if (evaluation.state === "Monitoring delayed") return "The baseline is retained, but the latest tracker sample is too old for a current automatic decision.";
-        if (evaluation.state === "Building baseline") return primary + " has not yet established the six-hour baseline with at least 75% coverage.";
+        if (evaluation.state === "Building baseline") {
+            var minimumHours = Number((readiness && readiness.minimum && readiness.minimum.hours) || (policy && policy.minimum_baseline_hours) || 6);
+            return primary + " has not yet established the configured " + minimumHours + "-hour minimum baseline with at least 75% coverage.";
+        }
         if (evaluation.state === "Healthy") return primary + " is processing normally. At least one activity signal remains above the stalled threshold" + (queue.available ? ", and the tracker reports " + formatProjectHealthTodo(queue.todo_items).replace(" TODO", " queued items") : "") + ".";
         return primary + " is currently classified as " + String(evaluation.state || "unavailable").toLowerCase() + ".";
     }
@@ -2253,9 +2273,11 @@ function applyVersionBadge(cfg) {
         var fallbackEvaluation = state.health && policy.fallback_project ? state.health[policy.fallback_project] : null;
         var fallbackQueue = fallbackEvaluation && fallbackEvaluation.queue ? fallbackEvaluation.queue : null;
         document.getElementById("project-health-fallback-queue").textContent = fallbackQueue ? formatProjectHealthTodo(fallbackQueue.todo_items) : "Unavailable";
-        document.getElementById("project-health-decision-explanation").textContent = projectHealthExplanation(evaluation, policy, runtime);
+        document.getElementById("project-health-decision-explanation").textContent = projectHealthExplanation(evaluation, policy, runtime, readiness);
         if (readiness.minimum) {
-            document.getElementById("project-health-coverage-detail").textContent = "Six-hour coverage: " + Number(readiness.coverage_percent || 0).toFixed(1) + "% · " + Number(readiness.sample_count || 0) + " / " + Number(readiness.expected_sample_count || 0) + " samples · " + Number(readiness.missing_sample_count || 0) + " missing · 75% required";
+            var baselineWindow = activeBaselineWindow(readiness, policy);
+            var baselineData = baselineWindow.data;
+            document.getElementById("project-health-coverage-detail").textContent = baselineWindow.label + " (" + baselineWindow.hours + "h) coverage: " + Number(baselineData.coverage_percent || 0).toFixed(1) + "% · " + Number(baselineData.sample_count || 0) + " / " + Number(baselineData.expected_sample_count || 0) + " samples · " + Number(baselineData.missing_sample_count || 0) + " missing · 75% required";
         } else {
             document.getElementById("project-health-coverage-detail").textContent = "Coverage details unavailable.";
         }
@@ -2328,7 +2350,11 @@ function applyVersionBadge(cfg) {
         var monitoringEnabled = projectHealthState.policy && projectHealthState.policy.monitoring_enabled !== false;
         var failoverAvailable = monitoringEnabled && Boolean(projectHealthState.failover && projectHealthState.failover.available);
         btnOpenReset.disabled = projectHealthBusy || !(projectHealthState.policy && projectHealthState.policy.primary_project);
-        btnExecuteFailover.disabled = projectHealthBusy || !failoverAvailable || failoverConfirmationInput.value.trim() !== "FAILOVER";
+        var policy = projectHealthState ? (projectHealthState.policy || {}) : {};
+        var assignments = projectHealthState ? (projectHealthState.role_assignments || {}) : {};
+        var hasFallbackFleet = Object.keys(assignments).some(function (name) { return assignments[name] === "fallback_fleet"; });
+        btnFailoverSecondary.disabled = projectHealthBusy || !hasFallbackFleet || !policy.fallback_project;
+        btnFailoverPrimary.disabled = projectHealthBusy || !hasFallbackFleet || !policy.primary_project;
         btnRefreshProjectHealth.disabled = projectHealthBusy;
     }
 
@@ -2352,7 +2378,6 @@ function applyVersionBadge(cfg) {
     function closeProjectHealth() {
         projectHealthModal.classList.add("hidden");
         document.body.classList.remove("overflow-hidden");
-        failoverConfirmationInput.value = "";
         projectHealthLogVisibleCount = PROJECT_HEALTH_LOG_PAGE_SIZE;
     }
 
@@ -2369,7 +2394,6 @@ function applyVersionBadge(cfg) {
         renderProjectHealthDecisionLog(projectHealthState ? projectHealthState.decision_log : []);
     });
     projectHealthModal.addEventListener("click", function (event) { if (event.target === projectHealthModal) closeProjectHealth(); });
-    failoverConfirmationInput.addEventListener("input", updateProjectHealthActions);
 
     monitoringEnabledInput.addEventListener("change", function () {
         if (!monitoringEnabledInput.checked && !window.confirm("Turn off Project Health monitoring? Baseline collection, health evaluation, manual failover, and automatic failover will stop. Existing configuration and history will be retained, and Warrior projects will remain unchanged.")) {
@@ -2461,14 +2485,40 @@ function applyVersionBadge(cfg) {
             .finally(function () { setProjectHealthBusy(false); });
     });
 
-    btnExecuteFailover.addEventListener("click", function () {
-        if (failoverConfirmationInput.value.trim() !== "FAILOVER") return;
-        if (!window.confirm("Manually switch the saved Fallback fleet to the fallback project? Primary canaries will remain unchanged.")) return;
+    function executeManualProjectSwitch(target) {
+        var policy = projectHealthState ? (projectHealthState.policy || {}) : {};
+        var targetProject = target === "primary" ? policy.primary_project : policy.fallback_project;
+        if (!targetProject) {
+            setProjectHealthMessage("No " + target + " project is configured.", "error");
+            return;
+        }
+        if (!window.confirm("Move the saved Fallback fleet to " + targetProject + " (" + target + ")? Primary canaries will remain unchanged.")) return;
+
         setProjectHealthBusy(true);
-        projectHealthRequest("api/project-health/failover", { method: "POST", body: JSON.stringify({ confirmation: "FAILOVER", actor: "dashboard" }) })
-            .then(function (result) { failoverConfirmationInput.value = ""; showToast("Manual failover finished: " + result.switched + " switched, " + result.failed + " failed", result.failed ? "info" : "success"); return loadProjectHealth(); })
+        projectHealthRequest("api/project-health/failover", {
+            method: "POST",
+            body: JSON.stringify({ target: target, actor: "dashboard" })
+        })
+            .then(function (result) {
+                showToast(
+                    "Manual switch to " + target + " finished: " + result.switched + " switched, " + result.failed + " failed",
+                    result.failed ? "info" : "success"
+                );
+                if (result.project_health) {
+                    projectHealthState = result.project_health;
+                    renderProjectHealth(projectHealthState);
+                }
+                return loadProjectHealth();
+            })
             .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
             .finally(function () { setProjectHealthBusy(false); });
+    }
+
+    btnFailoverSecondary.addEventListener("click", function () {
+        executeManualProjectSwitch("secondary");
+    });
+    btnFailoverPrimary.addEventListener("click", function () {
+        executeManualProjectSwitch("primary");
     });
 
 
@@ -2480,5 +2530,8 @@ loadConfigCached();
     loadTrackerStats();
     loadPauseStatus();
     loadProjectHealth();
+    setInterval(function () {
+        if (pageIsVisible && !projectHealthBusy) loadProjectHealth();
+    }, PROJECT_HEALTH_REFRESH_INTERVAL);
 
 })();

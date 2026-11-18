@@ -400,26 +400,21 @@ class ManualFailoverDecisionRequest(BaseModel):
         return normalized_value or "dashboard"
 
 
-class ManualFailoverRequest(BaseModel):
-    """Explicit operator request for a manual failover operation.
+class ManualFailoverTarget(str, Enum):
+    PRIMARY = "primary"
+    SECONDARY = "secondary"
 
-    The endpoint using this model must still enforce baseline readiness and use
-    the persisted role assignments. This model does not enable background or
-    automatic switching.
+
+class ManualFailoverRequest(BaseModel):
+    """Explicit operator request to move the saved fallback fleet.
+
+    The backend resolves the requested role to the configured primary or
+    fallback project. The browser never supplies an arbitrary project slug.
+    Baseline readiness and saved role assignments remain server-enforced.
     """
 
-    confirmation: str = Field(
-        ...,
-        description="Must be exactly 'FAILOVER' to authorize the manual operation",
-    )
+    target: ManualFailoverTarget
     actor: str = Field("dashboard", min_length=1, max_length=200)
-
-    @field_validator("confirmation")
-    @classmethod
-    def require_explicit_confirmation(cls, value: str) -> str:
-        if value.strip() != "FAILOVER":
-            raise ValueError("Type FAILOVER to confirm the manual failover")
-        return "FAILOVER"
 
     @field_validator("actor")
     @classmethod

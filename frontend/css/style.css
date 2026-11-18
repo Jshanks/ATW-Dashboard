@@ -1219,3 +1219,40 @@ body.has-selection #instances-grid {
         transition: none;
     }
 }
+
+/* ------------------------------------------------------------------
+   Project Health manual fleet switching
+   ------------------------------------------------------------------ */
+
+.project-health-danger-section {
+    border-color: rgba(127, 29, 29, 0.9);
+    background:
+        linear-gradient(
+            145deg,
+            rgba(69, 10, 10, 0.28),
+            rgba(17, 24, 39, 0.86)
+        );
+}
+
+#project-health-manual-failover-help {
+    flex: 1 1 18rem;
+    line-height: 1.15rem;
+}
+
+#btn-project-health-failover-secondary,
+#btn-project-health-failover-primary {
+    min-width: 11.5rem;
+}
+
+#btn-project-health-failover-secondary:focus-visible,
+#btn-project-health-failover-primary:focus-visible {
+    outline: 2px solid #f87171;
+    outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+    #btn-project-health-failover-secondary,
+    #btn-project-health-failover-primary {
+        width: 100%;
+    }
+}

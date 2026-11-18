@@ -467,11 +467,51 @@
                     <div class="flex justify-end mt-4"><button id="btn-save-project-health-roles" type="button" disabled class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed px-4 py-2 rounded-lg text-sm font-semibold">Save group assignments</button></div>
                 </section>
 
-                <section class="project-health-section" aria-labelledby="project-health-failover-title">
-                    <h3 id="project-health-failover-title" class="text-base font-semibold text-white">Manual failover</h3>
-                    <p class="text-sm text-gray-400 mt-1">This changes the saved Fallback fleet to the configured fallback project. Primary canaries remain on the primary project.</p>
-                    <div class="mt-4 flex flex-col sm:flex-row gap-3 sm:items-end"><label class="block flex-1"><span class="project-health-label">Confirmation</span><input id="project-health-failover-confirmation" type="text" autocomplete="off" placeholder="Type FAILOVER" class="project-health-input"><span class="project-health-help">This action remains available when monitoring prerequisites are satisfied, even if automatic failover is off.</span></label><button id="btn-execute-project-health-failover" type="button" disabled class="bg-red-700 hover:bg-red-600 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed px-5 py-2.5 rounded-lg text-sm font-semibold whitespace-nowrap">Execute manual failover</button></div>
-                </section>
+                <section
+    class="project-health-section project-health-danger-section"
+    aria-labelledby="project-health-failover-title"
+>
+    <h3
+        id="project-health-failover-title"
+        class="text-base font-semibold text-red-300"
+    >
+        Manual fleet switching
+    </h3>
+
+    <p class="text-sm text-gray-400 mt-1">
+        Moves Warriors assigned to the saved Fallback fleet between the
+        configured primary and secondary projects. Primary canaries remain
+        unchanged. Each action runs in batches of 10 with a one-second delay
+        between batches.
+    </p>
+
+    <div class="mt-4 flex flex-col sm:flex-row gap-3 sm:items-center">
+        <button
+            id="btn-project-health-failover-secondary"
+            type="button"
+            class="bg-red-950 hover:bg-red-900 border border-red-800 text-red-200 disabled:bg-gray-800 disabled:border-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed px-4 py-2 rounded-lg text-sm font-semibold whitespace-nowrap"
+        >
+            Fail over to secondary
+        </button>
+
+        <button
+            id="btn-project-health-failover-primary"
+            type="button"
+            class="bg-red-950 hover:bg-red-900 border border-red-800 text-red-200 disabled:bg-gray-800 disabled:border-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed px-4 py-2 rounded-lg text-sm font-semibold whitespace-nowrap"
+        >
+            Fail over to primary
+        </button>
+
+        <p
+            id="project-health-manual-failover-help"
+            class="text-xs text-gray-500"
+        >
+            The configured destination and saved role assignments are
+            resolved by the server. A confirmation prompt appears before
+            switching.
+        </p>
+    </div>
+</section>
 
                 <section class="project-health-section project-health-danger-section" aria-labelledby="project-health-reset-title">
                     <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
