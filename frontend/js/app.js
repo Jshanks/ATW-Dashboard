@@ -24,6 +24,7 @@
  * v4.6.3: project queue availability in manual and Project Health selectors.
  * v4.6.11: patch changed card regions in place instead of replacing entire cards.
  * v4.6.12: refresh visible cards immediately and throttle offscreen cards.
+ * v4.6.13: suspend dashboard rendering while hidden and reconcile on return.
  */
 (function () {
     "use strict";
@@ -49,6 +50,8 @@
     var visibleInstanceNames = new Set();
     var cardVisibilityObserver = null;
     var OFFSCREEN_CARD_UPDATE_INTERVAL = 60000;
+    var pageIsVisible = document.visibilityState === "visible";
+    var hiddenStatePending = false;
     var dataSourceTracker = [];
 
     // ---- View options (filter / grouping), persisted in localStorage ----
@@ -534,17 +537,59 @@ function updateInstanceCard(card, inst) {
 
     // ---- WebSocket ----
     function queueDashboardState(state) {
+        // Always retain the latest fleet state, but do no dashboard DOM work
+        // while the tab is hidden. Intermediate hidden states are discarded.
+        dashboardState = state;
+        if (!pageIsVisible) {
+            pendingDashboardState = null;
+            hiddenStatePending = true;
+            if (renderFrameId !== null) {
+                window.cancelAnimationFrame(renderFrameId);
+                renderFrameId = null;
+            }
+            return;
+        }
         pendingDashboardState = state;
         if (renderFrameId !== null) return;
         renderFrameId = window.requestAnimationFrame(function () {
             var stateToRender = pendingDashboardState;
             pendingDashboardState = null;
             renderFrameId = null;
-            if (!stateToRender) return;
+            if (!stateToRender || !pageIsVisible) {
+                if (!pageIsVisible) hiddenStatePending = true;
+                return;
+            }
             dashboardState = stateToRender;
+            hiddenStatePending = false;
             render();
         });
     }
+    function handlePageVisibilityChange() {
+        pageIsVisible = document.visibilityState === "visible";
+        if (!pageIsVisible) {
+            hiddenStatePending = true;
+            pendingDashboardState = null;
+            if (renderFrameId !== null) {
+                window.cancelAnimationFrame(renderFrameId);
+                renderFrameId = null;
+            }
+            return;
+        }
+        if (!hiddenStatePending) return;
+        hiddenStatePending = false;
+        // Prevent an overdue telemetry-only refresh from touching every offscreen
+        // card at once. Structural changes still update immediately, and cards
+        // synchronize as they enter the observer's preload region.
+        var visibleAgainTime = Date.now();
+        var instances = dashboardState.instances || [];
+        for (var i = 0; i < instances.length; i++) {
+            if (!visibleInstanceNames.has(instances[i].name)) {
+                lastCardUpdateTimes[instances[i].name] = visibleAgainTime;
+            }
+        }
+        render();
+    }
+    document.addEventListener("visibilitychange", handlePageVisibilityChange);
     function setConnectionStatus(text) {
         wsStatusText.textContent = text;
         // Status text is visually hidden on narrower headers; keep it as a tooltip
