@@ -757,6 +757,15 @@ body {
     color: rgb(254 243 199);
 }
 
+/*
+ * The header indicator begins hidden until the initial Project Health request
+ * succeeds. This must override the indicator's normal flex display because the
+ * custom stylesheet loads after compiled Tailwind.
+ */
+.project-health-header-indicator.hidden {
+    display: none;
+}
+
 .project-health-header-indicator:focus-visible {
     outline: 2px solid rgb(251 191 36);
     outline-offset: 2px;

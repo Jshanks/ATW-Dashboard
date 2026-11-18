@@ -2479,5 +2479,6 @@ loadConfigCached();
     loadHistory();
     loadTrackerStats();
     loadPauseStatus();
+    loadProjectHealth();
 
 })();
