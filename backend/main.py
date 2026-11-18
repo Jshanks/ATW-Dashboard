@@ -84,8 +84,10 @@ TRACKER_BASELINE_FILE = os.path.join(DATA_DIR, "tracker_baseline.json")
 # Anything above this is treated as a baseline reset (project switch
 # residue, tracker API anomaly, container restart, etc.)
 MAX_TRACKER_DELTA_PER_POLL = 10000
+# Baselines older than this cannot be assigned to the current chart interval.
+MAX_TRACKER_SAMPLE_GAP = 180
 
-_tracker_baselines = {}  # {project_slug: last_known_items_done}
+_tracker_baselines = {}  # {project_slug: {items, bytes, updated_at}}
 
 
 def _load_tracker_baselines():
@@ -98,7 +100,11 @@ def _load_tracker_baselines():
         # Migrate old format (bare int) to new format (dict with items + bytes)
         for slug, val in list(_tracker_baselines.items()):
             if isinstance(val, (int, float)):
-                _tracker_baselines[slug] = {"items": val, "bytes": 0}
+                _tracker_baselines[slug] = {"items": val, "bytes": 0, "updated_at": 0}
+            elif isinstance(val, dict):
+                val.setdefault("items", 0)
+                val.setdefault("bytes", 0)
+                val.setdefault("updated_at", 0)
         logger.info("Loaded tracker baselines for %d project(s)", len(_tracker_baselines))
     except Exception as exc:
         logger.warning("Failed to load tracker baselines: %s", exc)
@@ -207,10 +213,33 @@ async def _tracker_poll_loop():
                     baseline = {"items": baseline, "bytes": 0}
 
                 previous_items = baseline.get("items", 0)
-                previous_bytes = baseline.get("bytes", 0)
-                items_delta = 0
-                bytes_delta = 0
+            previous_bytes = baseline.get("bytes", 0)
+            previous_timestamp = baseline.get("updated_at", 0)
+            items_delta = 0
+            bytes_delta = 0
 
+            elapsed_seconds = (
+                sample_timestamp - previous_timestamp
+                if previous_timestamp > 0
+                else None
+            )
+            sample_gap_valid = (
+                elapsed_seconds is not None
+                and 0 < elapsed_seconds <= MAX_TRACKER_SAMPLE_GAP
+            )
+
+            if not sample_gap_valid:
+                if previous_timestamp > 0 and elapsed_seconds is not None:
+                    logger.info(
+                        "Tracker sample gap %.1fs for '%s' exceeds valid range; resetting baseline",
+                        elapsed_seconds, project_slug,
+                    )
+                elif previous_items > 0 or previous_bytes > 0:
+                    logger.info(
+                        "Tracker baseline for '%s' has no timestamp; migrating without catch-up delta",
+                        project_slug,
+                    )
+            else:
                 if previous_items > 0 and items_done >= previous_items:
                     candidate_delta = items_done - previous_items
                     if candidate_delta <= MAX_TRACKER_DELTA_PER_POLL:
@@ -218,12 +247,12 @@ async def _tracker_poll_loop():
                         total_items_delta += items_delta
                     else:
                         logger.warning(
-                            "Tracker items delta %d for '%s' exceeds cap %d â€” resetting baseline",
+                            "Tracker items delta %d for '%s' exceeds cap %d; resetting baseline",
                             candidate_delta, project_slug, MAX_TRACKER_DELTA_PER_POLL,
                         )
                 elif previous_items > 0 and items_done < previous_items:
                     logger.info(
-                        "Tracker items for '%s' decreased (%d â†’ %d) â€” resetting baseline",
+                        "Tracker items for '%s' decreased (%d to %d); resetting baseline",
                         project_slug, previous_items, items_done,
                     )
 
@@ -232,18 +261,20 @@ async def _tracker_poll_loop():
                     total_bytes_delta += bytes_delta
                 elif previous_bytes > 0 and bytes_used < previous_bytes:
                     logger.info(
-                        "Tracker bytes for '%s' decreased (%d â†’ %d) â€” resetting baseline",
+                        "Tracker bytes for '%s' decreased (%d to %d); resetting baseline",
                         project_slug, previous_bytes, bytes_used,
                     )
 
-                # Zero-delta samples are retained so 24-hour coverage is measurable.
+            # Zero-delta samples are retained so 24-hour coverage is measurable.
                 project_health.record_project_activity(
                     project_slug, items_delta, bytes_delta, timestamp=sample_timestamp
                 )
                 project_health.update_health_state_log(project_slug)
+
                 _tracker_baselines[project_slug] = {
                     "items": items_done,
                     "bytes": bytes_used,
+                    "updated_at": sample_timestamp,
                 }
                 baselines_changed = True
 
