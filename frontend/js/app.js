@@ -2351,7 +2351,13 @@ function applyVersionBadge(cfg) {
         var failoverAvailable = monitoringEnabled && Boolean(projectHealthState.failover && projectHealthState.failover.available);
         btnOpenReset.disabled = projectHealthBusy || !(projectHealthState.policy && projectHealthState.policy.primary_project);
         var policy = projectHealthState ? (projectHealthState.policy || {}) : {};
-        var assignments = projectHealthState ? (projectHealthState.role_assignments || {}) : {};
+        var assignments = projectHealthState
+            ? (
+                projectHealthState.roles ||
+                projectHealthState.role_assignments ||
+                {}
+            )
+            : {};
         var hasFallbackFleet = Object.keys(assignments).some(function (name) { return assignments[name] === "fallback_fleet"; });
         btnFailoverSecondary.disabled = projectHealthBusy || !hasFallbackFleet || !policy.fallback_project;
         btnFailoverPrimary.disabled = projectHealthBusy || !hasFallbackFleet || !policy.primary_project;
