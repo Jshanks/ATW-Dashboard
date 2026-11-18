@@ -1,0 +1,17 @@
+{
+  "name": "atw-dashboard-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Build-time frontend assets for ATW Dashboard",
+  "scripts": {
+    "build:css": "tailwindcss -i frontend/css/tailwind-input.css -o frontend/static/css/tailwind.css --minify",
+    "watch:css": "tailwindcss -i frontend/css/tailwind-input.css -o frontend/static/css/tailwind.css --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "4.3.0",
+    "tailwindcss": "4.3.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

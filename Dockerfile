@@ -1,3 +1,21 @@
+FROM node:24-alpine AS css-builder
+
+WORKDIR /build
+
+# Install the exact dependency graph pinned by package-lock.json. Copying the
+# package metadata first keeps this layer cacheable when frontend sources change.
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Tailwind scans only these declared frontend sources through @source rules in
+# frontend/css/tailwind-input.css.
+COPY frontend/index.html ./frontend/index.html
+COPY frontend/js/app.js ./frontend/js/app.js
+COPY frontend/css/tailwind-input.css ./frontend/css/tailwind-input.css
+
+RUN npm run build:css \
+    && test -s frontend/static/css/tailwind.css
+
 FROM python:3.15-alpine AS base
 
 # Patch OS-level vulnerabilities.
@@ -97,6 +115,10 @@ RUN apk del .build-deps
 
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
+# The generated stylesheet is built from the pinned Node dependency graph and
+# copied into the runtime image. Node, npm, and node_modules remain behind in
+# the css-builder stage.
+COPY --from=css-builder /build/frontend/static/css/tailwind.css ./frontend/static/css/tailwind.css
 COPY config.example.yml ./config.example.yml
 
 RUN addgroup -S appuser \

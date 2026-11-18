@@ -1,0 +1,24 @@
+/*
+ * ATW Dashboard compiled Tailwind CSS entrypoint.
+ *
+ * Tailwind is generated at image-build time. Browser-side Tailwind execution
+ * and the Play CDN are intentionally not used in production.
+ */
+@import "tailwindcss" source(none);
+
+/* Source paths are relative to this file: frontend/css/tailwind-input.css */
+@source "../index.html";
+@source "../js/app.js";
+
+/* Preserve the existing class-based dark-mode behavior on <html class="dark">. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Preserve the custom colors previously defined by inline tailwind.config. */
+@theme {
+    --color-surface: #1a1a2e;
+    --color-surface-light: #16213e;
+    --color-surface-lighter: #0f3460;
+
+    --color-accent: #e94560;
+    --color-accent-light: #ff6b6b;
+}

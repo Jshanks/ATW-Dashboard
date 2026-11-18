@@ -11,3 +11,5 @@ docker-compose*.yml
 .github/
 venv/
 .venv/
+node_modules
+frontend/static/css/tailwind.css

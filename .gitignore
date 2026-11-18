@@ -21,3 +21,4 @@ config.yml
 .DS_Store
 node_modules/
 data/
+frontend/static/css/tailwind.css
