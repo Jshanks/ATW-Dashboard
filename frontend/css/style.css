@@ -1009,3 +1009,204 @@ body.has-selection #instances-grid {
    Native select rendering is intentionally retained for keyboard, mobile, and
    screen-reader compatibility; no custom dropdown styling is required.
    -------------------------------------------------------------------------- */
+
+/* ------------------------------------------------------------------
+   Project Health operational evidence and log pagination
+   ------------------------------------------------------------------ */
+
+.project-health-summary-card,
+.project-health-evidence-panel {
+    border: 1px solid rgba(55, 65, 81, 0.9);
+    border-radius: 0.75rem;
+    background:
+        linear-gradient(
+            145deg,
+            rgba(17, 24, 39, 0.94),
+            rgba(3, 7, 18, 0.92)
+        );
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.16);
+}
+
+.project-health-summary-card {
+    min-height: 8.25rem;
+    padding: 1rem;
+}
+
+.project-health-summary-label {
+    color: #9ca3af;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    line-height: 1rem;
+    text-transform: uppercase;
+}
+
+.project-health-summary-value {
+    margin-top: 0.5rem;
+    color: #f9fafb;
+    font-size: 1.125rem;
+    font-weight: 700;
+    line-height: 1.55rem;
+    overflow-wrap: anywhere;
+}
+
+.project-health-summary-detail {
+    margin-top: 0.5rem;
+    color: #9ca3af;
+    font-size: 0.75rem;
+    line-height: 1.15rem;
+    overflow-wrap: anywhere;
+}
+
+.project-health-evidence-panel {
+    padding: 1rem;
+}
+
+.project-health-evidence-list {
+    display: grid;
+    gap: 0.625rem;
+}
+
+.project-health-evidence-list > div {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 1rem;
+    align-items: start;
+    border-bottom: 1px solid rgba(55, 65, 81, 0.5);
+    padding-bottom: 0.625rem;
+}
+
+.project-health-evidence-list > div:last-child {
+    border-bottom: 0;
+    padding-bottom: 0;
+}
+
+.project-health-evidence-list dt {
+    color: #9ca3af;
+    font-size: 0.75rem;
+    line-height: 1.1rem;
+}
+
+.project-health-evidence-list dd {
+    color: #f3f4f6;
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.1rem;
+    text-align: right;
+}
+
+#project-health-decision-explanation {
+    min-height: 3rem;
+}
+
+#project-health-log-count {
+    align-self: flex-start;
+}
+
+#project-health-log-controls:not(.hidden) {
+    display: flex;
+}
+
+/* Established and operating normally. */
+.project-health-header-healthy {
+    border-color: rgba(34, 197, 94, 0.7);
+    background:
+        linear-gradient(
+            135deg,
+            rgba(20, 83, 45, 0.92),
+            rgba(6, 78, 59, 0.9)
+        );
+    color: #dcfce7;
+}
+
+.project-health-header-healthy:hover {
+    border-color: rgba(74, 222, 128, 0.9);
+    background:
+        linear-gradient(
+            135deg,
+            rgba(21, 128, 61, 0.96),
+            rgba(5, 108, 76, 0.94)
+        );
+}
+
+/*
+ * Building baseline, reduced activity, queue exhaustion confirmation,
+ * likely-stalled confirmation, and delayed monitoring.
+ */
+.project-health-header-building,
+.project-health-header-warning {
+    border-color: rgba(245, 158, 11, 0.72);
+    background:
+        linear-gradient(
+            135deg,
+            rgba(120, 53, 15, 0.94),
+            rgba(113, 63, 18, 0.92)
+        );
+    color: #fef3c7;
+}
+
+.project-health-header-building:hover,
+.project-health-header-warning:hover {
+    border-color: rgba(251, 191, 36, 0.95);
+    background:
+        linear-gradient(
+            135deg,
+            rgba(146, 64, 14, 0.97),
+            rgba(133, 77, 14, 0.96)
+        );
+}
+
+/* Unavailable state or configuration requiring attention. */
+.project-health-header-attention {
+    border-color: rgba(239, 68, 68, 0.76);
+    background:
+        linear-gradient(
+            135deg,
+            rgba(127, 29, 29, 0.94),
+            rgba(136, 19, 55, 0.92)
+        );
+    color: #fee2e2;
+}
+
+.project-health-header-attention:hover {
+    border-color: rgba(248, 113, 113, 0.96);
+    background:
+        linear-gradient(
+            135deg,
+            rgba(153, 27, 27, 0.97),
+            rgba(157, 23, 77, 0.95)
+        );
+}
+
+@media (max-width: 640px) {
+    .project-health-summary-card {
+        min-height: 0;
+    }
+
+    .project-health-evidence-list > div {
+        grid-template-columns: 1fr;
+        gap: 0.2rem;
+    }
+
+    .project-health-evidence-list dd {
+        text-align: left;
+    }
+
+    #project-health-log-controls:not(.hidden) {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    #project-health-log-controls button {
+        width: 100%;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .project-health-header-healthy,
+    .project-health-header-building,
+    .project-health-header-warning,
+    .project-health-header-attention {
+        transition: none;
+    }
+}

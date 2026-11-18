@@ -90,6 +90,42 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  project-health-smoke:
+    name: Project Health smoke tests
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Compile Project Health modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile \
+            backend/main.py \
+            backend/project_health.py \
+            backend/project_health_smoke.py \
+            backend/projects.py \
+            backend/tracker.py
+      - name: Run Project Health smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m backend.project_health_smoke
+
   release:
     name: Build, scan, and publish release image
     if: startsWith(github.ref, 'refs/tags/v')
@@ -236,6 +272,17 @@ jobs:
             atw-dashboard:release \
             -m backend.websocket_smoke
 
+
+      - name: Run Project Health release-image smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run \
+            --rm \
+            --entrypoint python \
+            atw-dashboard:release \
+            -m backend.project_health_smoke
 
       - name: Run Trivy release-image scan
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8

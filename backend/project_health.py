@@ -1,9 +1,9 @@
 """Persistent Project Health monitoring, baseline management, and failover state.
 
-v4.6.0 adds an independent monitoring master switch, persistent automatic-failover
-policy and runtime state, and destructive primary-baseline reset. Network project
-switches remain in main.py; this module owns evaluation, prerequisites, counters,
-cooldowns, persistence, and the auditable decision log.
+The current implementation separates durable baseline establishment from rolling
+sample quality, includes tracker queue evidence, evaluates automatic failover on
+new observations, and preserves the existing policy, role, reset, cooldown, and
+auditable decision-log contracts. Network project switches remain in main.py.
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ MINIMUM_ALLOWED_BASELINE_HOURS = 1
 MAXIMUM_ALLOWED_BASELINE_HOURS = 48
 RECENT_WINDOW_SECONDS = 60 * 60
 SAMPLE_INTERVAL_SECONDS = 60
-MINIMUM_BASELINE_COVERAGE = 0.90
+MINIMUM_BASELINE_COVERAGE = 0.75
 MAX_HISTORY_SAMPLES_PER_PROJECT = HISTORY_SECONDS // SAMPLE_INTERVAL_SECONDS + 10
 MAX_DECISION_LOG_ENTRIES = 500
 DEFAULT_STALLED_EVALUATIONS = 3
@@ -58,11 +58,15 @@ MINIMUM_BASELINE_BYTES_PER_HOUR = 1024 * 1024
 # excluding that recent hour so current activity does not grade itself.
 HEALTHY_RATIO = 0.75
 REDUCED_RATIO = 0.35
-STALLED_RATIO = 0.10
+STALLED_RATIO = 0.25
 RECOVERY_RATIO = 0.35
+MAXIMUM_CURRENT_SAMPLE_AGE_SECONDS = 10 * 60
+LOW_QUEUE_RUNWAY_MINUTES = 30.0
 
 _lock = threading.RLock()
 _project_history: dict[str, deque] = {}
+_baseline_established: dict[str, dict[str, float | None]] = {}
+_project_queue: dict[str, dict[str, Any]] = {}
 _policy: dict[str, Any] = {}
 _role_assignments: dict[str, str] = {}
 _runtime: dict[str, Any] = {}
@@ -99,6 +103,9 @@ def _default_runtime() -> dict[str, Any]:
         "failover_in_progress": False,
         "last_automatic_failover_at": None,
         "last_automatic_result": None,
+        "last_evaluated_sample_at": None,
+        "last_evaluation_at": None,
+        "last_evaluation_reason": None,
     }
 def _normalize_project_slug(value: Any) -> str:
     if not isinstance(value, str):
@@ -169,8 +176,10 @@ def _serialize_locked() -> dict[str, Any]:
             list(sample) for sample in samples if sample[0] >= cutoff
         ]
     return {
-        "version": 2,
+        "version": 3,
         "history": history_data,
+        "baseline_established": copy.deepcopy(_baseline_established),
+        "project_queue": copy.deepcopy(_project_queue),
         "policy": copy.deepcopy(_policy),
         "role_assignments": copy.deepcopy(_role_assignments),
         "baseline_mode": "rolling_excluding_recent_hour",
@@ -202,7 +211,7 @@ def save() -> None:
 
 def load() -> None:
     """Load project-health state and discard tracker samples older than 48 hours."""
-    global _policy, _role_assignments, _runtime, _decision_log
+    global _policy, _role_assignments, _runtime, _decision_log, _baseline_established, _project_queue
     if not os.path.exists(STATE_FILE):
         with _lock:
             _policy = _default_policy()
@@ -241,6 +250,33 @@ def load() -> None:
                 if samples:
                     _project_history[normalized_slug] = samples
         _policy = _normalize_policy(raw_state.get("policy"))
+        raw_established = raw_state.get("baseline_established", {})
+        _baseline_established = {}
+        if isinstance(raw_established, dict):
+            for project_slug, raw_value in raw_established.items():
+                normalized_slug = _normalize_project_slug(project_slug)
+                if not normalized_slug or not isinstance(raw_value, dict):
+                    continue
+                minimum_at = raw_value.get("minimum_established_at")
+                full_at = raw_value.get("full_established_at")
+                _baseline_established[normalized_slug] = {
+                    "minimum_established_at": float(minimum_at) if isinstance(minimum_at, (int, float)) and not isinstance(minimum_at, bool) else None,
+                    "full_established_at": float(full_at) if isinstance(full_at, (int, float)) and not isinstance(full_at, bool) else None,
+                }
+        raw_queue = raw_state.get("project_queue", {})
+        _project_queue = {}
+        if isinstance(raw_queue, dict):
+            for project_slug, raw_value in raw_queue.items():
+                normalized_slug = _normalize_project_slug(project_slug)
+                if not normalized_slug or not isinstance(raw_value, dict):
+                    continue
+                todo_items = raw_value.get("todo_items")
+                updated_at = raw_value.get("updated_at")
+                _project_queue[normalized_slug] = {
+                    "todo_items": max(0, int(todo_items)) if isinstance(todo_items, (int, float)) and not isinstance(todo_items, bool) else None,
+                    "updated_at": float(updated_at) if isinstance(updated_at, (int, float)) and not isinstance(updated_at, bool) else None,
+                    "stale": bool(raw_value.get("stale", False)),
+                }
         raw_assignments = raw_state.get("role_assignments", {})
         _role_assignments = {
             str(instance_name): role
@@ -294,6 +330,49 @@ def record_project_activity(
     save()
 
 
+def update_project_queue(
+    project_slug: str,
+    todo_items: int | None,
+    updated_at: float | None = None,
+    stale: bool = False,
+) -> dict[str, Any]:
+    """Save the latest tracker queue observation for Project Health.
+
+    A missing queue is represented by ``None`` and is never converted to zero.
+    The caller owns tracker refresh policy; Project Health records the evidence
+    used by the evaluator and exposes it in the status payload and decision log.
+    """
+    normalized_slug = _normalize_project_slug(project_slug)
+    if not normalized_slug:
+        raise ValueError("Project slug is required")
+    normalized_todo = None
+    if todo_items is not None and not isinstance(todo_items, bool):
+        normalized_todo = max(0, int(todo_items))
+    normalized_updated_at = None
+    if isinstance(updated_at, (int, float)) and not isinstance(updated_at, bool):
+        normalized_updated_at = float(updated_at)
+    with _lock:
+        _project_queue[normalized_slug] = {
+            "todo_items": normalized_todo,
+            "updated_at": normalized_updated_at,
+            "stale": bool(stale),
+        }
+    save()
+    return get_project_queue(normalized_slug)
+
+
+def get_project_queue(project_slug: str) -> dict[str, Any]:
+    normalized_slug = _normalize_project_slug(project_slug)
+    with _lock:
+        queue = copy.deepcopy(_project_queue.get(normalized_slug, {}))
+    return {
+        "todo_items": queue.get("todo_items"),
+        "updated_at": queue.get("updated_at"),
+        "stale": bool(queue.get("stale", False)),
+        "available": queue.get("todo_items") is not None,
+    }
+
+
 def _window_samples(project_slug: str, start_time: float, end_time: float) -> list[tuple]:
     with _lock:
         samples = list(_project_history.get(project_slug, ()))
@@ -319,10 +398,14 @@ def _window_readiness(project_slug: str, window_hours: int, current_time: float)
     span_seconds = 0.0
     if first_sample_at is not None and last_sample_at is not None:
         span_seconds = max(0.0, last_sample_at - first_sample_at)
+    # Coverage may be imperfect, but baseline establishment still requires a real
+    # elapsed history window. One sample interval of tolerance accounts for the
+    # endpoints of a one-minute sampling series.
+    required_span_seconds = max(0, duration_seconds - SAMPLE_INTERVAL_SECONDS)
     complete = (
         sample_count >= required_samples
         and coverage >= MINIMUM_BASELINE_COVERAGE
-        and span_seconds >= duration_seconds * MINIMUM_BASELINE_COVERAGE
+        and span_seconds >= required_span_seconds
     )
     sufficient_volume = (
         items_total >= MINIMUM_BASELINE_ITEMS_PER_HOUR * window_hours
@@ -334,10 +417,14 @@ def _window_readiness(project_slug: str, window_hours: int, current_time: float)
         "coverage": coverage,
         "coverage_percent": round(coverage * 100, 1),
         "sample_count": sample_count,
+        "expected_sample_count": expected_samples,
         "required_sample_count": required_samples,
+        "missing_sample_count": max(0, expected_samples - sample_count),
+        "minimum_coverage_percent": MINIMUM_BASELINE_COVERAGE * 100,
         "first_sample_at": first_sample_at,
         "last_sample_at": last_sample_at,
         "span_seconds": span_seconds,
+        "required_span_seconds": required_span_seconds,
         "items_total": items_total,
         "bytes_total": bytes_total,
         "items_per_hour": items_total / window_hours,
@@ -345,28 +432,56 @@ def _window_readiness(project_slug: str, window_hours: int, current_time: float)
         "sufficient_volume": sufficient_volume,
     }
 
-
 def get_baseline_readiness(project_slug: str, now: float | None = None) -> dict[str, Any]:
-    """Return minimum and full baseline readiness using the saved policy windows."""
+    """Return durable establishment plus current-window data quality.
+
+    Once the configured minimum or full baseline is earned, a later rolling
+    coverage gap does not erase it. Only ``reset_primary_baseline`` removes the
+    saved establishment timestamps.
+    """
     current_time = float(now if now is not None else time.time())
     policy = get_policy()
     minimum = _window_readiness(project_slug, policy["minimum_baseline_hours"], current_time)
     full = _window_readiness(project_slug, policy["full_baseline_hours"], current_time)
+    changed = False
+    with _lock:
+        established = _baseline_established.setdefault(
+            project_slug,
+            {"minimum_established_at": None, "full_established_at": None},
+        )
+        if minimum["complete"] and minimum["sufficient_volume"] and not established.get("minimum_established_at"):
+            established["minimum_established_at"] = current_time
+            changed = True
+        if full["complete"] and full["sufficient_volume"] and not established.get("full_established_at"):
+            established["full_established_at"] = current_time
+            changed = True
+        minimum_established_at = established.get("minimum_established_at")
+        full_established_at = established.get("full_established_at")
+    if changed:
+        force_save()
+    minimum_established = bool(minimum_established_at)
+    full_established = bool(full_established_at)
     phase = "building"
-    if minimum["complete"]:
-        phase = "full" if full["complete"] else "provisional"
+    if minimum_established:
+        phase = "full" if full_established else "established"
     return {
         "project": project_slug,
         "phase": phase,
-        "complete": minimum["complete"],
-        "full_complete": full["complete"],
+        "complete": minimum_established,
+        "established": minimum_established,
+        "full_complete": full_established,
+        "full_established": full_established,
+        "minimum_established_at": minimum_established_at,
+        "full_established_at": full_established_at,
         "coverage": minimum["coverage"],
         "coverage_percent": minimum["coverage_percent"],
+        "current_window_complete": minimum["complete"],
         "minimum": minimum,
         "full": full,
-        # Compatibility fields retained for the v4.5.0 UI and classifier.
         "sample_count": minimum["sample_count"],
+        "expected_sample_count": minimum["expected_sample_count"],
         "required_sample_count": minimum["required_sample_count"],
+        "missing_sample_count": minimum["missing_sample_count"],
         "first_sample_at": minimum["first_sample_at"],
         "last_sample_at": minimum["last_sample_at"],
         "span_seconds": minimum["span_seconds"],
@@ -376,7 +491,6 @@ def get_baseline_readiness(project_slug: str, now: float | None = None) -> dict[
         "bytes_per_hour": minimum["bytes_per_hour"],
         "sufficient_volume": minimum["sufficient_volume"],
     }
-
 
 def _ratio(current_value: float, baseline_value: float) -> float | None:
     if baseline_value <= 0:
@@ -394,25 +508,38 @@ def _classify_state(
     item_ratio: float | None,
     byte_ratio: float | None,
     previous_state: str | None,
+    recent_data_current: bool,
+    queue_reason: str | None,
 ) -> str:
-    if not readiness.get("complete"):
+    if not readiness.get("established"):
         return "Building baseline"
+    if queue_reason == "queue_exhausted":
+        return "Queue exhausted"
+    if queue_reason == "queue_low":
+        return "Queue nearly exhausted"
+    if not recent_data_current:
+        return "Monitoring delayed"
     if not readiness.get("sufficient_volume"):
         return "Insufficient volume"
-    limiting_ratio = _minimum_ratio(item_ratio, byte_ratio)
-    if limiting_ratio is None:
+    available = [ratio for ratio in (item_ratio, byte_ratio) if ratio is not None]
+    if not available:
         return "Insufficient volume"
-    if previous_state in ("Reduced activity", "Likely stalled") and limiting_ratio >= RECOVERY_RATIO:
-        if limiting_ratio < HEALTHY_RATIO:
-            return "Recovering"
-    if limiting_ratio >= HEALTHY_RATIO:
-        return "Healthy"
-    if limiting_ratio >= REDUCED_RATIO:
-        return "Reduced activity"
-    if limiting_ratio < STALLED_RATIO:
+    # Either productive signal is enough to show that useful work is flowing.
+    strongest_ratio = max(available)
+    both_stalled = (
+        item_ratio is not None
+        and byte_ratio is not None
+        and item_ratio < STALLED_RATIO
+        and byte_ratio < STALLED_RATIO
+    )
+    if both_stalled:
         return "Likely stalled"
+    if previous_state in ("Reduced activity", "Likely stalled") and strongest_ratio >= RECOVERY_RATIO:
+        if strongest_ratio < HEALTHY_RATIO:
+            return "Recovering"
+    if strongest_ratio >= HEALTHY_RATIO:
+        return "Healthy"
     return "Reduced activity"
-
 
 def _last_health_state_locked(project_slug: str) -> str | None:
     for entry in reversed(_decision_log):
@@ -422,45 +549,72 @@ def _last_health_state_locked(project_slug: str) -> str | None:
 
 
 def evaluate_project_health(project_slug: str, now: float | None = None) -> dict[str, Any]:
-    """Evaluate current activity against a rolling baseline excluding the latest hour."""
+    """Evaluate throughput, queue runway, and current sample freshness."""
     current_time = float(now if now is not None else time.time())
     readiness = get_baseline_readiness(project_slug, current_time)
     with _lock:
         previous_state = _last_health_state_locked(project_slug)
-
     policy = get_policy()
     baseline_hours = (
         policy["full_baseline_hours"]
-        if readiness["full_complete"]
+        if readiness["full_established"]
         else policy["minimum_baseline_hours"]
     )
     baseline_end = current_time - RECENT_WINDOW_SECONDS
     rolling_baseline = _window_readiness(project_slug, baseline_hours, baseline_end)
-    baseline_ready = readiness["complete"] and rolling_baseline["complete"]
-    comparison_readiness = copy.deepcopy(readiness)
-    comparison_readiness["complete"] = baseline_ready
-    comparison_readiness["sufficient_volume"] = rolling_baseline["sufficient_volume"]
-
-    recent_samples = _window_samples(
-        project_slug,
-        current_time - RECENT_WINDOW_SECONDS,
-        current_time,
-    )
+    baseline_values_available = rolling_baseline["sufficient_volume"] and rolling_baseline["sample_count"] > 0
+    recent_samples = _window_samples(project_slug, current_time - RECENT_WINDOW_SECONDS, current_time)
     recent_items = sum(sample[1] for sample in recent_samples)
     recent_bytes = sum(sample[2] for sample in recent_samples)
     recent_coverage = _coverage(len(recent_samples), RECENT_WINDOW_SECONDS)
+    latest_sample_at = recent_samples[-1][0] if recent_samples else None
+    latest_sample_age_seconds = (
+        max(0.0, current_time - latest_sample_at)
+        if latest_sample_at is not None
+        else None
+    )
+    recent_data_current = (
+        latest_sample_age_seconds is not None
+        and latest_sample_age_seconds <= MAXIMUM_CURRENT_SAMPLE_AGE_SECONDS
+    )
     item_ratio = _ratio(
         recent_items,
-        rolling_baseline["items_per_hour"] if baseline_ready else 0.0,
+        rolling_baseline["items_per_hour"] if readiness["established"] and baseline_values_available else 0.0,
     )
     byte_ratio = _ratio(
         recent_bytes,
-        rolling_baseline["bytes_per_hour"] if baseline_ready else 0.0,
+        rolling_baseline["bytes_per_hour"] if readiness["established"] and baseline_values_available else 0.0,
     )
-    state = _classify_state(comparison_readiness, item_ratio, byte_ratio, previous_state)
+    recent_items_per_minute = recent_items / max(1.0, RECENT_WINDOW_SECONDS / 60.0)
+    queue = get_project_queue(project_slug)
+    queue_runway_minutes = None
+    if queue["available"] and not queue["stale"] and recent_items_per_minute > 0:
+        queue_runway_minutes = queue["todo_items"] / recent_items_per_minute
+    queue_reason = None
+    if queue["available"] and not queue["stale"]:
+        if queue["todo_items"] == 0:
+            queue_reason = "queue_exhausted"
+        elif queue_runway_minutes is not None and queue_runway_minutes < LOW_QUEUE_RUNWAY_MINUTES:
+            queue_reason = "queue_low"
+    state = _classify_state(
+        readiness,
+        item_ratio,
+        byte_ratio,
+        previous_state,
+        recent_data_current,
+        queue_reason,
+    )
+    decision_reason = queue_reason
+    if decision_reason is None and state == "Likely stalled":
+        decision_reason = "throughput_stalled"
+    observation_at = latest_sample_at
+    if queue_reason and isinstance(queue.get("updated_at"), (int, float)):
+        observation_at = max(observation_at or 0.0, float(queue["updated_at"]))
     return {
         "project": project_slug,
         "state": state,
+        "decision_reason": decision_reason,
+        "observation_at": observation_at,
         "baseline": readiness,
         "rolling_baseline": rolling_baseline,
         "baseline_mode": "rolling_excluding_recent_hour",
@@ -468,12 +622,27 @@ def evaluate_project_health(project_slug: str, now: float | None = None) -> dict
             "window_seconds": RECENT_WINDOW_SECONDS,
             "coverage": recent_coverage,
             "coverage_percent": round(recent_coverage * 100, 1),
+            "sample_count": len(recent_samples),
             "items": recent_items,
             "bytes": recent_bytes,
+            "items_per_minute": recent_items_per_minute,
+            "latest_sample_at": latest_sample_at,
+            "latest_sample_age_seconds": latest_sample_age_seconds,
+            "current": recent_data_current,
+            "maximum_sample_age_seconds": MAXIMUM_CURRENT_SAMPLE_AGE_SECONDS,
+        },
+        "queue": {
+            **queue,
+            "runway_minutes": queue_runway_minutes,
+            "low_runway_threshold_minutes": LOW_QUEUE_RUNWAY_MINUTES,
         },
         "item_activity_ratio": item_ratio,
         "byte_activity_ratio": byte_ratio,
         "limiting_activity_ratio": _minimum_ratio(item_ratio, byte_ratio),
+        "strongest_activity_ratio": max(
+            [ratio for ratio in (item_ratio, byte_ratio) if ratio is not None],
+            default=None,
+        ),
     }
 
 def update_health_state_log(project_slug: str) -> dict[str, Any]:
@@ -711,8 +880,8 @@ def failover_availability() -> dict[str, Any]:
         reasons.append("Configure a fallback project")
     if readiness and not readiness.get("complete"):
         reasons.append(
-            "Complete the configured %d-hour minimum primary-project baseline with at least 90%% coverage"
-            % policy["minimum_baseline_hours"]
+            "Complete the configured %d-hour minimum primary-project baseline with at least %.0f%% coverage"
+            % (policy["minimum_baseline_hours"], MINIMUM_BASELINE_COVERAGE * 100)
         )
     if not get_role_assignments():
         reasons.append("Preview and save Primary canary and Fallback fleet assignments")
@@ -778,38 +947,60 @@ def automatic_failover_prerequisites(now: float | None = None) -> dict[str, Any]
 
 
 def register_automatic_evaluation(evaluation: dict[str, Any], now: float | None = None) -> dict[str, Any]:
-    """Persist one evaluator result and state whether main.py should switch the fleet."""
+    """Count one new five-minute evaluation and decide whether to fail over."""
     current_time = float(now if now is not None else time.time())
     policy = get_policy()
     prerequisites = automatic_failover_prerequisites(current_time)
-    item_ratio = evaluation.get("item_activity_ratio")
-    byte_ratio = evaluation.get("byte_activity_ratio")
-    both_stalled = (
-        evaluation.get("state") == "Likely stalled"
-        and item_ratio is not None and byte_ratio is not None
-        and item_ratio < STALLED_RATIO and byte_ratio < STALLED_RATIO
-    )
+    recent = evaluation.get("recent", {})
+    latest_sample_at = recent.get("latest_sample_at")
+    observation_at = evaluation.get("observation_at", latest_sample_at)
+    reason = evaluation.get("decision_reason")
+    qualifying_reason = reason in {"queue_exhausted", "queue_low", "throughput_stalled"}
     with _lock:
+        previous_sample_at = _runtime.get("last_evaluated_sample_at")
+        new_sample = (
+            isinstance(observation_at, (int, float))
+            and not isinstance(observation_at, bool)
+            and (previous_sample_at is None or float(observation_at) > float(previous_sample_at))
+        )
+        _runtime["last_evaluation_at"] = current_time
+        _runtime["last_evaluation_reason"] = reason
+        if new_sample:
+            _runtime["last_evaluated_sample_at"] = float(observation_at)
         if not prerequisites["available"]:
             _runtime["consecutive_stalled_evaluations"] = 0
             _runtime["automatic_failover_state"] = "blocked"
-        elif both_stalled:
+        elif not new_sample:
+            _runtime["automatic_failover_state"] = "waiting_for_new_sample"
+        elif qualifying_reason:
             _runtime["consecutive_stalled_evaluations"] = int(_runtime.get("consecutive_stalled_evaluations", 0)) + 1
-            _runtime["automatic_failover_state"] = "confirming_stall"
+            _runtime["automatic_failover_state"] = "confirming_" + reason
         else:
             _runtime["consecutive_stalled_evaluations"] = 0
             _runtime["automatic_failover_state"] = "armed"
         trigger = (
-            prerequisites["available"] and both_stalled
+            prerequisites["available"]
+            and new_sample
+            and qualifying_reason
             and _runtime["consecutive_stalled_evaluations"] >= policy["stalled_evaluations_required"]
         )
         if trigger:
             _runtime["failover_in_progress"] = True
             _runtime["automatic_failover_state"] = "failover_in_progress"
-            _append_decision_locked("automatic_failover_triggered", "Automatic failover threshold reached", "automation", {"evaluation": copy.deepcopy(evaluation)})
+            _append_decision_locked(
+                "automatic_failover_triggered",
+                "Automatic failover threshold reached",
+                "automation",
+                {"reason": reason, "evaluation": copy.deepcopy(evaluation)},
+            )
     force_save()
-    return {"trigger": trigger, "both_ratios_stalled": both_stalled, "runtime": get_runtime(), "prerequisites": prerequisites}
-
+    return {
+        "trigger": trigger,
+        "qualifying_reason": reason if qualifying_reason else None,
+        "new_sample": new_sample,
+        "runtime": get_runtime(),
+        "prerequisites": prerequisites,
+    }
 
 def complete_automatic_failover(switched: int, failed: int, results: dict[str, Any]) -> None:
     with _lock:
@@ -837,7 +1028,10 @@ def reset_primary_baseline(confirmation: str, actor: str = "dashboard") -> dict[
         previous_readiness = get_baseline_readiness(primary)
         deleted_samples = len(previous_samples)
         _project_history.pop(primary, None)
+        _baseline_established.pop(primary, None)
         _runtime["consecutive_stalled_evaluations"] = 0
+        _runtime["last_evaluated_sample_at"] = None
+        _runtime["last_evaluation_reason"] = None
         _runtime["automatic_failover_state"] = "waiting_for_baseline"
         _runtime["stabilization_until"] = None
         _append_decision_locked("baseline_reset", "Primary-project baseline history deleted", actor, {"project": primary, "deleted_samples": deleted_samples, "previous_minimum_coverage": previous_readiness["minimum"]["coverage_percent"], "previous_full_coverage": previous_readiness["full"]["coverage_percent"], "automatic_failover_enabled": policy.get("automatic_failover_enabled", False)})
@@ -921,6 +1115,9 @@ def get_status(instances: Iterable[Any] = ()) -> dict[str, Any]:
             "full_baseline_hours": policy["full_baseline_hours"],
             "history_hours": 48,
             "minimum_coverage_percent": MINIMUM_BASELINE_COVERAGE * 100,
+            "evaluation_interval_seconds": 300,
+            "maximum_current_sample_age_seconds": MAXIMUM_CURRENT_SAMPLE_AGE_SECONDS,
+            "low_queue_runway_minutes": LOW_QUEUE_RUNWAY_MINUTES,
             "healthy_ratio": HEALTHY_RATIO,
             "reduced_ratio": REDUCED_RATIO,
             "stalled_ratio": STALLED_RATIO,

@@ -1967,11 +1967,15 @@ function applyVersionBadge(cfg) {
     var projectHealthState = null;
     var projectHealthPreview = null;
     var projectHealthBusy = false;
+    var PROJECT_HEALTH_LOG_PAGE_SIZE = 20;
+    var projectHealthLogVisibleCount = PROJECT_HEALTH_LOG_PAGE_SIZE;
     var projectHealthModal = document.getElementById("project-health-modal");
     var btnProjectHealth = document.getElementById("btn-project-health");
     var btnCloseProjectHealth = document.getElementById("btn-close-project-health");
     var btnRefreshProjectHealth = document.getElementById("btn-refresh-project-health");
     var projectHealthPolicyForm = document.getElementById("project-health-policy-form");
+    var btnProjectHealthLogMore = document.getElementById("btn-project-health-log-more");
+    var btnProjectHealthLogLess = document.getElementById("btn-project-health-log-less");
     var primaryProjectSelect = document.getElementById("project-health-primary-project");
     var fallbackProjectSelect = document.getElementById("project-health-fallback-project");
     var canaryPercentInput = document.getElementById("project-health-canary-percent");
@@ -2111,16 +2115,76 @@ function applyVersionBadge(cfg) {
 
     function renderProjectHealthDecisionLog(entries) {
         var body = document.getElementById("project-health-decision-log");
+        var count = document.getElementById("project-health-log-count");
+        var controls = document.getElementById("project-health-log-controls");
         if (!body) return;
-        if (!entries || !entries.length) {
+        entries = Array.isArray(entries) ? entries : [];
+        var visibleEntries = entries.slice(0, projectHealthLogVisibleCount);
+        if (!entries.length) {
             body.innerHTML = '<tr><td colspan="4" class="py-6 text-center text-gray-500">No Project Health decisions recorded.</td></tr>';
-            return;
+        } else {
+            body.innerHTML = visibleEntries.map(function (entry) {
+                var details = entry.message || "";
+                if (entry.details && entry.details.to_state) details += " (" + entry.details.to_state + ")";
+                if (entry.details && entry.details.reason) details += " · " + String(entry.details.reason).replace(/_/g, " ");
+                return '<tr class="border-b border-gray-800/70 align-top"><td class="py-3 pr-4 whitespace-nowrap text-gray-400">' + escapeHtml(new Date(entry.timestamp * 1000).toLocaleString()) + '</td><td class="py-3 pr-4 text-gray-300">' + escapeHtml(String(entry.event || "").replace(/_/g, " ")) + '</td><td class="py-3 pr-4 text-gray-400">' + escapeHtml(entry.actor || "") + '</td><td class="py-3 text-gray-300">' + escapeHtml(details) + '</td></tr>';
+            }).join("");
         }
-        body.innerHTML = entries.map(function (entry) {
-            var details = entry.message || "";
-            if (entry.details && entry.details.to_state) details += " (" + entry.details.to_state + ")";
-            return '<tr class="border-b border-gray-800/70 align-top"><td class="py-3 pr-4 whitespace-nowrap text-gray-400">' + escapeHtml(new Date(entry.timestamp * 1000).toLocaleString()) + '</td><td class="py-3 pr-4 text-gray-300">' + escapeHtml(String(entry.event || "").replace(/_/g, " ")) + '</td><td class="py-3 pr-4 text-gray-400">' + escapeHtml(entry.actor || "") + '</td><td class="py-3 text-gray-300">' + escapeHtml(details) + '</td></tr>';
-        }).join("");
+        if (count) count.textContent = "Showing " + visibleEntries.length + " of " + entries.length + " entries";
+        if (controls) controls.classList.toggle("hidden", entries.length <= PROJECT_HEALTH_LOG_PAGE_SIZE);
+        if (btnProjectHealthLogMore) btnProjectHealthLogMore.classList.toggle("hidden", visibleEntries.length >= entries.length);
+        if (btnProjectHealthLogLess) btnProjectHealthLogLess.classList.toggle("hidden", projectHealthLogVisibleCount <= PROJECT_HEALTH_LOG_PAGE_SIZE);
+    }
+
+    function formatProjectHealthTodo(value) {
+        if (value === null || value === undefined || !isFinite(Number(value))) return "TODO unavailable";
+        var amount = Math.max(0, Number(value));
+        if (amount >= 1000000000) return (Math.round(amount / 100000000) / 10) + "B TODO";
+        if (amount >= 1000000) return (Math.round(amount / 100000) / 10) + "M TODO";
+        if (amount >= 1000) return (Math.round(amount / 100) / 10) + "K TODO";
+        return Math.round(amount).toLocaleString() + " TODO";
+    }
+
+    function formatProjectHealthBytes(value) {
+        value = Math.max(0, Number(value || 0));
+        var units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        var unitIndex = 0;
+        while (value >= 1024 && unitIndex < units.length - 1) {
+            value /= 1024;
+            unitIndex += 1;
+        }
+        var precision = value >= 100 || unitIndex === 0 ? 0 : 1;
+        return value.toFixed(precision).replace(/\.0$/, "") + " " + units[unitIndex];
+    }
+
+    function formatProjectHealthRunway(minutes) {
+        if (minutes === null || minutes === undefined || !isFinite(Number(minutes))) return "Estimated runway unavailable.";
+        minutes = Number(minutes);
+        if (minutes < 60) return "Estimated runway: " + Math.max(0, Math.round(minutes)) + " minutes";
+        if (minutes < 1440) return "Estimated runway: " + (Math.round(minutes / 6) / 10) + " hours";
+        return "Estimated runway: " + (Math.round(minutes / 144) / 10) + " days";
+    }
+
+    function formatProjectHealthAge(seconds) {
+        if (seconds === null || seconds === undefined || !isFinite(Number(seconds))) return "Unavailable";
+        seconds = Math.max(0, Number(seconds));
+        if (seconds < 60) return Math.round(seconds) + "s ago";
+        return Math.round(seconds / 60) + "m ago";
+    }
+
+    function projectHealthExplanation(evaluation, policy, runtime) {
+        if (!evaluation) return "Project Health has not evaluated the configured primary project yet.";
+        var primary = (policy && policy.primary_project) || evaluation.project || "The primary project";
+        var queue = evaluation.queue || {};
+        var confirmation = runtime ? Number(runtime.consecutive_stalled_evaluations || 0) : 0;
+        var required = policy ? Number(policy.stalled_evaluations_required || 3) : 3;
+        if (evaluation.state === "Queue exhausted") return primary + " reports zero queued items. Automatic failover confirmation is " + confirmation + " of " + required + ".";
+        if (evaluation.state === "Queue nearly exhausted") return primary + " has an estimated queue runway under " + Math.round(queue.low_runway_threshold_minutes || 30) + " minutes. Automatic failover confirmation is " + confirmation + " of " + required + ".";
+        if (evaluation.state === "Likely stalled") return primary + " reports queued work, but both item and byte activity are below 25% of baseline. Automatic failover confirmation is " + confirmation + " of " + required + ".";
+        if (evaluation.state === "Monitoring delayed") return "The baseline is retained, but the latest tracker sample is too old for a current automatic decision.";
+        if (evaluation.state === "Building baseline") return primary + " has not yet established the six-hour baseline with at least 75% coverage.";
+        if (evaluation.state === "Healthy") return primary + " is processing normally. At least one activity signal remains above the stalled threshold" + (queue.available ? ", and the tracker reports " + formatProjectHealthTodo(queue.todo_items).replace(" TODO", " queued items") : "") + ".";
+        return primary + " is currently classified as " + String(evaluation.state || "unavailable").toLowerCase() + ".";
     }
 
     function formatBaselineHours(hours) {
@@ -2130,39 +2194,71 @@ function applyVersionBadge(cfg) {
     }
 
     function renderProjectHealthHeaderIndicator(state) {
-        if (!projectHealthHeaderIndicator) return;
+        if (!projectHealthHeaderIndicator || !projectHealthHeaderIndicatorLabel || !projectHealthHeaderIndicatorDetail) return;
+        var policy = state && state.policy ? state.policy : {};
+        var primary = policy.primary_project || "";
+        var evaluation = state && state.health ? state.health[primary] : null;
+        var readiness = evaluation && evaluation.baseline ? evaluation.baseline : null;
+        var runtime = state && state.runtime ? state.runtime : {};
+        var stateName = evaluation ? evaluation.state : "Unavailable";
+        var classes = "project-health-header-indicator";
+        var label = "Project Health: " + stateName;
+        var detail = primary ? String(projectTitles[primary] || primary) : "No primary project";
+        if (policy.monitoring_enabled === false) {
+            label = "Project Health: Off";
+            detail = "Monitoring disabled";
+            classes += " project-health-header-off";
+        } else if (!readiness || !readiness.established) {
+            var coverage = readiness ? Number(readiness.coverage_percent || 0) : 0;
+            label = "Baseline: " + coverage.toFixed(1) + "%";
+            detail = readiness && readiness.minimum ? (formatBaselineHours(Number(readiness.minimum.span_seconds || 0) / 3600) + " / " + readiness.minimum.hours + "h") : "Building baseline";
+            classes += " project-health-header-building";
+        } else if (stateName === "Healthy" || stateName === "Recovering") {
+            classes += " project-health-header-healthy";
+        } else if (stateName === "Queue exhausted" || stateName === "Queue nearly exhausted" || stateName === "Likely stalled" || stateName === "Reduced activity") {
+            var current = Number(runtime.consecutive_stalled_evaluations || 0);
+            var required = Number(policy.stalled_evaluations_required || 3);
+            label = stateName + ": " + current + " / " + required;
+            classes += " project-health-header-warning";
+        } else if (stateName === "Monitoring delayed") {
+            classes += " project-health-header-warning";
+        } else {
+            classes += " project-health-header-attention";
+        }
+        projectHealthHeaderIndicator.className = classes;
+        projectHealthHeaderIndicatorLabel.textContent = label;
+        projectHealthHeaderIndicatorDetail.textContent = detail;
+        projectHealthHeaderIndicator.classList.remove("hidden");
+    }
+
+    function renderProjectHealthOperationalEvidence(state, evaluation) {
         var policy = state.policy || {};
         var runtime = state.runtime || {};
-        var evaluation = (state.health || {})[policy.primary_project] || null;
-        var readiness = evaluation ? evaluation.baseline : null;
-        var nowSeconds = Date.now() / 1000;
-        projectHealthHeaderIndicator.classList.remove("project-health-header-indicator-provisional", "project-health-header-indicator-off", "project-health-header-indicator-danger");
-        if (runtime.failover_in_progress) {
-            projectHealthHeaderIndicatorLabel.textContent = "Failover in progress";
-            projectHealthHeaderIndicatorDetail.textContent = "Automatic";
-            projectHealthHeaderIndicator.classList.add("project-health-header-indicator-danger");
-        } else if (!policy.monitoring_enabled) {
-            projectHealthHeaderIndicatorLabel.textContent = "Project Health Off";
-            projectHealthHeaderIndicatorDetail.textContent = "Manual control";
-            projectHealthHeaderIndicator.classList.add("project-health-header-indicator-off");
-        } else if (runtime.stabilization_until && runtime.stabilization_until > nowSeconds) {
-            projectHealthHeaderIndicatorLabel.textContent = "Stabilizing";
-            projectHealthHeaderIndicatorDetail.textContent = Math.ceil((runtime.stabilization_until - nowSeconds) / 60) + "m";
-            projectHealthHeaderIndicator.classList.add("project-health-header-indicator-provisional");
-        } else if (runtime.automatic_failover_state === "confirming_stall") {
-            projectHealthHeaderIndicatorLabel.textContent = "Likely stalled";
-            projectHealthHeaderIndicatorDetail.textContent = runtime.consecutive_stalled_evaluations + "/" + policy.stalled_evaluations_required;
-            projectHealthHeaderIndicator.classList.add("project-health-header-indicator-danger");
-        } else if (!policy.primary_project || !readiness || readiness.full_complete) {
-            projectHealthHeaderIndicator.classList.add("hidden"); return;
+        var readiness = evaluation && evaluation.baseline ? evaluation.baseline : {};
+        var recent = evaluation && evaluation.recent ? evaluation.recent : {};
+        var queue = evaluation && evaluation.queue ? evaluation.queue : {};
+        var stateName = evaluation ? evaluation.state : "Unavailable";
+        document.getElementById("project-health-current-state").textContent = stateName;
+        document.getElementById("project-health-current-state-detail").textContent = policy.primary_project ? String(projectTitles[policy.primary_project] || policy.primary_project) : "No primary project configured.";
+        document.getElementById("project-health-queue-todo").textContent = formatProjectHealthTodo(queue.todo_items);
+        document.getElementById("project-health-queue-runway").textContent = queue.stale ? "Queue observation is stale." : formatProjectHealthRunway(queue.runway_minutes);
+        document.getElementById("project-health-recent-items").textContent = (Math.round(Number(recent.items_per_minute || 0) * 10) / 10) + " items/min";
+        document.getElementById("project-health-recent-bytes").textContent = formatProjectHealthBytes(Number(recent.bytes || 0) / Math.max(1, Number(recent.window_seconds || 3600) / 60)) + "/min · newest sample " + formatProjectHealthAge(recent.latest_sample_age_seconds);
+        document.getElementById("project-health-comparison-ratios").textContent = "Items " + formatActivityRatio(evaluation && evaluation.item_activity_ratio) + " · Bytes " + formatActivityRatio(evaluation && evaluation.byte_activity_ratio);
+        document.getElementById("project-health-comparison-detail").textContent = readiness.established ? "Baseline established" : "Baseline not established";
+        var interval = state.thresholds ? Number(state.thresholds.evaluation_interval_seconds || 300) : 300;
+        document.getElementById("project-health-evaluation-interval").textContent = Math.round(interval / 60) + " minutes";
+        document.getElementById("project-health-confirmation-progress").textContent = Number(runtime.consecutive_stalled_evaluations || 0) + " / " + Number(policy.stalled_evaluations_required || 3);
+        document.getElementById("project-health-latest-sample").textContent = formatProjectHealthAge(recent.latest_sample_age_seconds);
+        var fallbackEvaluation = state.health && policy.fallback_project ? state.health[policy.fallback_project] : null;
+        var fallbackQueue = fallbackEvaluation && fallbackEvaluation.queue ? fallbackEvaluation.queue : null;
+        document.getElementById("project-health-fallback-queue").textContent = fallbackQueue ? formatProjectHealthTodo(fallbackQueue.todo_items) : "Unavailable";
+        document.getElementById("project-health-decision-explanation").textContent = projectHealthExplanation(evaluation, policy, runtime);
+        if (readiness.minimum) {
+            document.getElementById("project-health-coverage-detail").textContent = "Six-hour coverage: " + Number(readiness.coverage_percent || 0).toFixed(1) + "% · " + Number(readiness.sample_count || 0) + " / " + Number(readiness.expected_sample_count || 0) + " samples · " + Number(readiness.missing_sample_count || 0) + " missing · 75% required";
         } else {
-            var window = readiness.phase === "building" ? readiness.minimum : readiness.full;
-            var coverage = Number(window.coverage_percent || 0);
-            projectHealthHeaderIndicatorLabel.textContent = readiness.phase === "building" ? "Baseline " + coverage.toFixed(0) + "%" : "Provisional " + coverage.toFixed(0) + "%";
-            projectHealthHeaderIndicatorDetail.textContent = formatBaselineHours(Number(window.span_seconds || 0) / 3600) + " / " + formatBaselineHours(Number(window.hours || 0));
-            if (readiness.phase !== "building") projectHealthHeaderIndicator.classList.add("project-health-header-indicator-provisional");
+            document.getElementById("project-health-coverage-detail").textContent = "Coverage details unavailable.";
         }
-        projectHealthHeaderIndicator.classList.remove("hidden");
     }
 
     function renderProjectHealth(state) {
@@ -2201,7 +2297,7 @@ function applyVersionBadge(cfg) {
         } else if (readiness.phase === "provisional") {
             document.getElementById("project-health-baseline-detail").textContent = "Provisional; building toward " + readiness.full.hours + " hours";
         } else {
-            document.getElementById("project-health-baseline-detail").textContent = "Requires " + readiness.minimum.hours + " hours at 90% coverage";
+            document.getElementById("project-health-baseline-detail").textContent = "Requires " + readiness.minimum.hours + " elapsed hours at 75% coverage";
         }
         renderProjectHealthHeaderIndicator(state);
         document.getElementById("project-health-item-ratio").textContent = formatActivityRatio(evaluation && evaluation.item_activity_ratio);
@@ -2217,6 +2313,7 @@ function applyVersionBadge(cfg) {
         renderProjectHealthGroup("project-health-fallback-fleet", projectHealthPreview.fallback_fleet);
         document.getElementById("project-health-canary-count").textContent = projectHealthPreview.primary_canaries.length + " Warriors";
         document.getElementById("project-health-fallback-count").textContent = projectHealthPreview.fallback_fleet.length + " Warriors";
+        renderProjectHealthOperationalEvidence(state, evaluation);
         renderProjectHealthDecisionLog(state.decision_log || []);
         updateProjectHealthActions();
     }
@@ -2256,12 +2353,21 @@ function applyVersionBadge(cfg) {
         projectHealthModal.classList.add("hidden");
         document.body.classList.remove("overflow-hidden");
         failoverConfirmationInput.value = "";
+        projectHealthLogVisibleCount = PROJECT_HEALTH_LOG_PAGE_SIZE;
     }
 
     btnProjectHealth.addEventListener("click", openProjectHealth);
     projectHealthHeaderIndicator.addEventListener("click", openProjectHealth);
     btnCloseProjectHealth.addEventListener("click", closeProjectHealth);
     btnRefreshProjectHealth.addEventListener("click", loadProjectHealth);
+    if (btnProjectHealthLogMore) btnProjectHealthLogMore.addEventListener("click", function () {
+        projectHealthLogVisibleCount += PROJECT_HEALTH_LOG_PAGE_SIZE;
+        renderProjectHealthDecisionLog(projectHealthState ? projectHealthState.decision_log : []);
+    });
+    if (btnProjectHealthLogLess) btnProjectHealthLogLess.addEventListener("click", function () {
+        projectHealthLogVisibleCount = PROJECT_HEALTH_LOG_PAGE_SIZE;
+        renderProjectHealthDecisionLog(projectHealthState ? projectHealthState.decision_log : []);
+    });
     projectHealthModal.addEventListener("click", function (event) { if (event.target === projectHealthModal) closeProjectHealth(); });
     failoverConfirmationInput.addEventListener("input", updateProjectHealthActions);
 
