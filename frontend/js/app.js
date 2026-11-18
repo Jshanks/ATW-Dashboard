@@ -1129,37 +1129,32 @@ activityChart.update("none");
     btnClosePause.addEventListener("click", function () { pauseModal.classList.add("hidden"); });
     btnPauseSelected.addEventListener("click", async function () {
         var selected = getSelectedNames().filter(function (name) { return !pauseState[name]; });
-        if (selected.length === 0) { showToast("No running warriors selected", "error"); return; }
-        var durVal = pauseDuration.value;
-        var duration = durVal ? parseFloat(durVal) : null;
-        pauseActionStatus.textContent = "Pausing...";
+        if (!selected.length) { showToast("No running warriors selected", "error"); return; }
+        var duration = pauseDuration.value ? parseFloat(pauseDuration.value) : null;
         pauseActionStatus.className = "text-sm mb-3 text-yellow-400";
-        try {
-            var res = await fetch("/api/pause", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instance_names: selected, duration_hours: duration }) });
-            var data = await res.json();
-            var ok = Object.values(data.results).filter(function (r) { return r.status === "ok"; }).length;
-            var fail = Object.values(data.results).filter(function (r) { return r.status !== "ok"; }).length;
-            pauseActionStatus.textContent = ok + " paused" + (fail > 0 ? ", " + fail + " failed" : "");
-            pauseActionStatus.className = "text-sm mb-3 " + (fail > 0 ? "text-yellow-400" : "text-green-400");
-            showToast("Paused " + ok + " instance(s)", fail > 0 ? "error" : "success");
-            loadPauseStatus(); setTimeout(updateSelectionUI, 500);  // keep the result message visible
-        } catch (e) { pauseActionStatus.textContent = "Failed: " + e.message; pauseActionStatus.className = "text-sm mb-3 text-red-400"; }
+        var result = await runBulkBatches(selected, "Pausing", pauseActionStatus, async function (batch) {
+            var response = await fetch("/api/pause", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instance_names: batch, duration_hours: duration }) });
+            if (!response.ok) throw new Error(await readErrorDetail(response));
+            return countResults(await response.json());
+        });
+        pauseActionStatus.textContent = result.ok + " paused" + (result.failed ? ", " + result.failed + " failed" : "");
+        pauseActionStatus.className = "text-sm mb-3 " + (result.failed ? "text-yellow-400" : "text-green-400");
+        showToast("Paused " + result.ok + " instance(s)", result.failed ? "error" : "success");
+        loadPauseStatus(); setTimeout(updateSelectionUI, 500);
     });
     btnResumeSelected.addEventListener("click", async function () {
         var selected = getSelectedNames().filter(function (name) { return !!pauseState[name]; });
-        if (selected.length === 0) { showToast("No paused warriors selected", "error"); return; }
-        pauseActionStatus.textContent = "Resuming...";
+        if (!selected.length) { showToast("No paused warriors selected", "error"); return; }
         pauseActionStatus.className = "text-sm mb-3 text-yellow-400";
-        try {
-            var res = await fetch("/api/resume", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instance_names: selected }) });
-            var data = await res.json();
-            var ok = Object.values(data.results).filter(function (r) { return r.status === "ok"; }).length;
-            var fail = Object.values(data.results).filter(function (r) { return r.status !== "ok"; }).length;
-            pauseActionStatus.textContent = ok + " resumed" + (fail > 0 ? ", " + fail + " failed" : "");
-            pauseActionStatus.className = "text-sm mb-3 " + (fail > 0 ? "text-yellow-400" : "text-green-400");
-            showToast("Resumed " + ok + " instance(s)", fail > 0 ? "error" : "success");
-            loadPauseStatus(); setTimeout(updateSelectionUI, 500);  // keep the result message visible
-        } catch (e) { pauseActionStatus.textContent = "Failed: " + e.message; pauseActionStatus.className = "text-sm mb-3 text-red-400"; }
+        var result = await runBulkBatches(selected, "Resuming", pauseActionStatus, async function (batch) {
+            var response = await fetch("/api/resume", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instance_names: batch }) });
+            if (!response.ok) throw new Error(await readErrorDetail(response));
+            return countResults(await response.json());
+        });
+        pauseActionStatus.textContent = result.ok + " resumed" + (result.failed ? ", " + result.failed + " failed" : "");
+        pauseActionStatus.className = "text-sm mb-3 " + (result.failed ? "text-yellow-400" : "text-green-400");
+        showToast("Resumed " + result.ok + " instance(s)", result.failed ? "error" : "success");
+        loadPauseStatus(); setTimeout(updateSelectionUI, 500);
     });
     btnBannerResume.addEventListener("click", async function () {
         var allPaused = Object.keys(pauseState);
@@ -1282,6 +1277,29 @@ activityChart.update("none");
         return { ok: okCount, failed: results.length - okCount };
     }
 
+    var BULK_ACTION_BATCH_SIZE = 10;
+
+    function bulkActionProgressText(action, startIndex, batchLength, total) {
+        return action + " instances " + (startIndex + 1) + "–" + (startIndex + batchLength) + " of " + total;
+    }
+
+    async function runBulkBatches(instanceNames, action, statusElement, requestBatch) {
+        var aggregate = { ok: 0, failed: 0 };
+        for (var startIndex = 0; startIndex < instanceNames.length; startIndex += BULK_ACTION_BATCH_SIZE) {
+            var batch = instanceNames.slice(startIndex, startIndex + BULK_ACTION_BATCH_SIZE);
+            statusElement.textContent = bulkActionProgressText(action, startIndex, batch.length, instanceNames.length);
+            try {
+                var result = await requestBatch(batch);
+                aggregate.ok += Number(result.ok || 0);
+                aggregate.failed += Number(result.failed || 0);
+            } catch (error) {
+                aggregate.failed += batch.length;
+                console.error(action + " batch failed:", error);
+            }
+        }
+        return aggregate;
+    }
+
     async function postBulk(url, body) {
         var res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         if (!res.ok) throw new Error(await readErrorDetail(res));
@@ -1308,26 +1326,19 @@ activityChart.update("none");
         setSettingsStatus("Applying to " + selected.length + " warrior" + (selected.length === 1 ? "" : "s") + "\u2026", "info");
 
         try {
-            // Settings first, then the project switch
             if (hasSettings) {
-                try {
-                    var settingsResult = await postBulk("/api/settings/bulk", { instance_names: selected, settings: pending.settings });
-                    outcomeParts.push("Settings: " + settingsResult.ok + " updated" + (settingsResult.failed ? ", " + settingsResult.failed + " failed" : ""));
-                    if (settingsResult.failed) anyProblem = true;
-                } catch (settingsError) {
-                    outcomeParts.push("Settings failed: " + settingsError.message);
-                    anyProblem = true;
-                }
+                var settingsResult = await runBulkBatches(selected, "Applying settings to", settingsStatus, function (batch) {
+                    return postBulk("/api/settings/bulk", { instance_names: batch, settings: pending.settings });
+                });
+                outcomeParts.push("Settings: " + settingsResult.ok + " updated" + (settingsResult.failed ? ", " + settingsResult.failed + " failed" : ""));
+                if (settingsResult.failed) anyProblem = true;
             }
             if (pending.project) {
-                try {
-                    var projectResult = await postBulk("/api/project/bulk", { instance_names: selected, project_name: pending.project });
-                    outcomeParts.push("Project: " + projectResult.ok + " switched" + (projectResult.failed ? ", " + projectResult.failed + " failed" : ""));
-                    if (projectResult.failed) anyProblem = true;
-                } catch (projectError) {
-                    outcomeParts.push("Project switch failed: " + projectError.message);
-                    anyProblem = true;
-                }
+                var projectResult = await runBulkBatches(selected, "Applying project to", settingsStatus, function (batch) {
+                    return postBulk("/api/project/bulk", { instance_names: batch, project_name: pending.project });
+                });
+                outcomeParts.push("Project: " + projectResult.ok + " switched" + (projectResult.failed ? ", " + projectResult.failed + " failed" : ""));
+                if (projectResult.failed) anyProblem = true;
             }
         } finally {
             settingsApplyInFlight = false;
@@ -1870,15 +1881,15 @@ grid.addEventListener("keydown", function (event) {
         restartStatus.className = "text-sm min-h-[1.25rem] mb-3 text-yellow-400";
         updateSelectionUI();
         try {
-            var response = await fetch("/api/restart", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ instance_names: eligible })
-            });
-            if (!response.ok) throw new Error(await readErrorDetail(response));
-            var result = await response.json();
             var accepted = [];
-            Object.keys(result.results || {}).forEach(function (name) {
-                if (result.results[name].status === "ok") accepted.push(name);
+            var result = await runBulkBatches(eligible, "Restarting", restartStatus, async function (batch) {
+                var response = await fetch("/api/restart", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instance_names: batch }) });
+                if (!response.ok) throw new Error(await readErrorDetail(response));
+                var batchResult = await response.json();
+                Object.keys(batchResult.results || {}).forEach(function (name) {
+                    if (batchResult.results[name].status === "ok") accepted.push(name);
+                });
+                return { ok: Number(batchResult.accepted || 0), failed: Number(batchResult.failed || 0) };
             });
             (dashboardState.instances || []).forEach(function (inst) {
                 if (accepted.indexOf(inst.name) !== -1) {
@@ -1887,7 +1898,7 @@ grid.addEventListener("keydown", function (event) {
                     selectedInstances.delete(inst.name);
                 }
             });
-            var message = result.accepted + " restart" + (result.accepted === 1 ? "" : "s") + " accepted" +
+            var message = result.ok + " restart" + (result.ok === 1 ? "" : "s") + " accepted" +
                 (result.failed ? "; " + result.failed + " failed" : "");
             showToast(message, result.failed ? "info" : "success");
             restartStatus.textContent = message;
@@ -1968,7 +1979,7 @@ function applyVersionBadge(cfg) {
     var projectHealthState = null;
     var projectHealthPreview = null;
     var projectHealthBusy = false;
-    var PROJECT_HEALTH_LOG_PAGE_SIZE = 20;
+    var PROJECT_HEALTH_LOG_PAGE_SIZE = 10;
     var projectHealthLogVisibleCount = PROJECT_HEALTH_LOG_PAGE_SIZE;
     var projectHealthModal = document.getElementById("project-health-modal");
     var btnProjectHealth = document.getElementById("btn-project-health");
