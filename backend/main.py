@@ -96,15 +96,30 @@ def _load_tracker_baselines():
         return
     try:
         with open(TRACKER_BASELINE_FILE, "r") as fh:
-            _tracker_baselines = json.load(fh)
-        # Migrate old format (bare int) to new format (dict with items + bytes)
-        for slug, val in list(_tracker_baselines.items()):
-            if isinstance(val, (int, float)):
-                _tracker_baselines[slug] = {"items": val, "bytes": 0, "updated_at": 0}
-            elif isinstance(val, dict):
-                val.setdefault("items", 0)
-                val.setdefault("bytes", 0)
-                val.setdefault("updated_at", 0)
+            loaded_baselines = json.load(fh)
+        if not isinstance(loaded_baselines, dict):
+            raise ValueError("Tracker baseline root must be an object")
+
+        normalized_baselines = {}
+        for slug, value in loaded_baselines.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                value = {"items": value, "bytes": 0, "updated_at": 0}
+            elif not isinstance(value, dict):
+                value = {"items": 0, "bytes": 0, "updated_at": 0}
+            else:
+                value = dict(value)
+                value.setdefault("items", 0)
+                value.setdefault("bytes", 0)
+                timestamp = value.get("updated_at")
+                if (
+                    isinstance(timestamp, bool)
+                    or not isinstance(timestamp, (int, float))
+                    or timestamp <= 0
+                ):
+                    value["updated_at"] = 0
+            normalized_baselines[str(slug)] = value
+
+        _tracker_baselines = normalized_baselines
         logger.info("Loaded tracker baselines for %d project(s)", len(_tracker_baselines))
     except Exception as exc:
         logger.warning("Failed to load tracker baselines: %s", exc)
@@ -164,16 +179,16 @@ def _get_tracker_pair():
 async def _tracker_poll_loop():
     """Poll the ArchiveTeam tracker for per-project item and byte deltas.
 
-    Iterates ALL active project/downloader pairs, tracks baselines
-    per-project, caps deltas to catch anomalies, and records aggregated
-    deltas for the 24h history chart.
+    Iterates all active project/downloader pairs, tracks timestamped baselines
+    per project, rejects stale catch-up deltas, and records aggregate deltas for
+    the 24-hour history chart.
     """
     while True:
         try:
             await asyncio.sleep(60)
 
-            # Keep WarriorHQ's ArchiveTeam's Choice target fresh (served from the
-            # 30-minute cache; only hits WarriorHQ when the cache has expired)
+            # Keep WarriorHQ's ArchiveTeam's Choice target fresh. The project
+            # module serves its normal 30-minute cache when it remains current.
             try:
                 await projects.get_projects()
             except Exception as projects_error:
@@ -186,8 +201,10 @@ async def _tracker_poll_loop():
                     continue
                 if not warrior_status.downloader or not warrior_status.project_slug:
                     continue
-                if warrior_status.project_slug not in active_pairs:
-                    active_pairs[warrior_status.project_slug] = warrior_status.downloader
+                active_pairs.setdefault(
+                    warrior_status.project_slug,
+                    warrior_status.downloader,
+                )
 
             if not active_pairs:
                 continue
@@ -200,77 +217,104 @@ async def _tracker_poll_loop():
             for project_slug, downloader_name in active_pairs.items():
                 project_stats = await tracker.get_project_data(project_slug)
                 if not project_stats:
-                    # Do not convert a tracker outage into a zero-activity sample.
+                    # Preserve the old successful timestamp through an outage so
+                    # the next success can recognize and reject a stale gap.
                     continue
 
                 user_stats = tracker.build_user_stats(
-                    project_stats, downloader_name, project_slug
+                    project_stats,
+                    downloader_name,
+                    project_slug,
                 )
                 items_done = user_stats.get("user_items_done", 0)
                 bytes_used = user_stats.get("user_bytes", 0)
-                baseline = _tracker_baselines.get(project_slug, {"items": 0, "bytes": 0})
-                if isinstance(baseline, (int, float)):
-                    baseline = {"items": baseline, "bytes": 0}
+
+                baseline = _tracker_baselines.get(
+                    project_slug,
+                    {"items": 0, "bytes": 0, "updated_at": 0},
+                )
+                if isinstance(baseline, (int, float)) and not isinstance(baseline, bool):
+                    baseline = {"items": baseline, "bytes": 0, "updated_at": 0}
+                elif not isinstance(baseline, dict):
+                    baseline = {"items": 0, "bytes": 0, "updated_at": 0}
 
                 previous_items = baseline.get("items", 0)
-            previous_bytes = baseline.get("bytes", 0)
-            previous_timestamp = baseline.get("updated_at", 0)
-            items_delta = 0
-            bytes_delta = 0
+                previous_bytes = baseline.get("bytes", 0)
+                previous_timestamp = baseline.get("updated_at", 0)
+                if (
+                    isinstance(previous_timestamp, bool)
+                    or not isinstance(previous_timestamp, (int, float))
+                ):
+                    previous_timestamp = 0
 
-            elapsed_seconds = (
-                sample_timestamp - previous_timestamp
-                if previous_timestamp > 0
-                else None
-            )
-            sample_gap_valid = (
-                elapsed_seconds is not None
-                and 0 < elapsed_seconds <= MAX_TRACKER_SAMPLE_GAP
-            )
+                items_delta = 0
+                bytes_delta = 0
+                elapsed_seconds = (
+                    sample_timestamp - previous_timestamp
+                    if previous_timestamp > 0
+                    else None
+                )
+                sample_gap_valid = (
+                    elapsed_seconds is not None
+                    and 0 < elapsed_seconds <= MAX_TRACKER_SAMPLE_GAP
+                )
 
-            if not sample_gap_valid:
-                if previous_timestamp > 0 and elapsed_seconds is not None:
-                    logger.info(
-                        "Tracker sample gap %.1fs for '%s' exceeds valid range; resetting baseline",
-                        elapsed_seconds, project_slug,
-                    )
-                elif previous_items > 0 or previous_bytes > 0:
-                    logger.info(
-                        "Tracker baseline for '%s' has no timestamp; migrating without catch-up delta",
-                        project_slug,
-                    )
-            else:
-                if previous_items > 0 and items_done >= previous_items:
-                    candidate_delta = items_done - previous_items
-                    if candidate_delta <= MAX_TRACKER_DELTA_PER_POLL:
-                        items_delta = candidate_delta
-                        total_items_delta += items_delta
-                    else:
-                        logger.warning(
-                            "Tracker items delta %d for '%s' exceeds cap %d; resetting baseline",
-                            candidate_delta, project_slug, MAX_TRACKER_DELTA_PER_POLL,
+                if not sample_gap_valid:
+                    if previous_timestamp > 0 and elapsed_seconds is not None:
+                        logger.info(
+                            "Tracker sample gap %.1fs for '%s' exceeds valid range; resetting baseline",
+                            elapsed_seconds,
+                            project_slug,
                         )
-                elif previous_items > 0 and items_done < previous_items:
-                    logger.info(
-                        "Tracker items for '%s' decreased (%d to %d); resetting baseline",
-                        project_slug, previous_items, items_done,
-                    )
+                    elif previous_items > 0 or previous_bytes > 0:
+                        logger.info(
+                            "Tracker baseline for '%s' has no timestamp; migrating without catch-up delta",
+                            project_slug,
+                        )
+                else:
+                    if previous_items > 0 and items_done >= previous_items:
+                        candidate_delta = items_done - previous_items
+                        if candidate_delta <= MAX_TRACKER_DELTA_PER_POLL:
+                            items_delta = candidate_delta
+                            total_items_delta += items_delta
+                        else:
+                            logger.warning(
+                                "Tracker items delta %d for '%s' exceeds cap %d; resetting baseline",
+                                candidate_delta,
+                                project_slug,
+                                MAX_TRACKER_DELTA_PER_POLL,
+                            )
+                    elif previous_items > 0 and items_done < previous_items:
+                        logger.info(
+                            "Tracker items for '%s' decreased (%d to %d); resetting baseline",
+                            project_slug,
+                            previous_items,
+                            items_done,
+                        )
 
-                if previous_bytes > 0 and bytes_used >= previous_bytes:
-                    bytes_delta = bytes_used - previous_bytes
-                    total_bytes_delta += bytes_delta
-                elif previous_bytes > 0 and bytes_used < previous_bytes:
-                    logger.info(
-                        "Tracker bytes for '%s' decreased (%d to %d); resetting baseline",
-                        project_slug, previous_bytes, bytes_used,
-                    )
+                    if previous_bytes > 0 and bytes_used >= previous_bytes:
+                        bytes_delta = bytes_used - previous_bytes
+                        total_bytes_delta += bytes_delta
+                    elif previous_bytes > 0 and bytes_used < previous_bytes:
+                        logger.info(
+                            "Tracker bytes for '%s' decreased (%d to %d); resetting baseline",
+                            project_slug,
+                            previous_bytes,
+                            bytes_used,
+                        )
 
-            # Zero-delta samples are retained so 24-hour coverage is measurable.
+                # Retain zero-delta samples so Project Health coverage remains
+                # measurable, including deliberate stale-gap resets.
                 project_health.record_project_activity(
-                    project_slug, items_delta, bytes_delta, timestamp=sample_timestamp
+                    project_slug,
+                    items_delta,
+                    bytes_delta,
+                    timestamp=sample_timestamp,
                 )
                 project_health.update_health_state_log(project_slug)
 
+                # Every successful tracker observation becomes the new baseline,
+                # even when migration or stale-gap protection rejected its delta.
                 _tracker_baselines[project_slug] = {
                     "items": items_done,
                     "bytes": bytes_used,
@@ -279,10 +323,6 @@ async def _tracker_poll_loop():
                 baselines_changed = True
 
             if baselines_changed:
-                # Record the aggregate tracker deltas used by the main 24-hour
-                # dashboard chart. Project Health records per-project samples
-                # above, while the main history chart needs one combined sample
-                # for the current polling cycle.
                 history.record_tracker(
                     total_items_delta,
                     total_bytes_delta,
