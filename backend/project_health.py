@@ -176,13 +176,13 @@ def _serialize_locked() -> dict[str, Any]:
             list(sample) for sample in samples if sample[0] >= cutoff
         ]
     return {
-        "version": 3,
+        "version": 4,
         "history": history_data,
         "baseline_established": copy.deepcopy(_baseline_established),
         "project_queue": copy.deepcopy(_project_queue),
         "policy": copy.deepcopy(_policy),
         "role_assignments": copy.deepcopy(_role_assignments),
-        "baseline_mode": "rolling_excluding_recent_hour",
+        "baseline_mode": "per_eligible_warrior_rolling_excluding_recent_hour",
         "runtime": copy.deepcopy(_runtime),
         "decision_log": list(_decision_log),
     }
@@ -238,14 +238,17 @@ def load() -> None:
                 for raw_sample in raw_samples:
                     if not isinstance(raw_sample, (list, tuple)) or len(raw_sample) < 3:
                         continue
+                    if len(raw_sample) < 4:
+                        continue
                     try:
                         timestamp = float(raw_sample[0])
                         items_delta = max(0, int(raw_sample[1]))
                         bytes_delta = max(0, int(raw_sample[2]))
+                        eligible_warriors = max(0, int(raw_sample[3]))
                     except (TypeError, ValueError):
                         continue
-                    if timestamp >= cutoff:
-                        samples.append((timestamp, items_delta, bytes_delta))
+                    if timestamp >= cutoff and eligible_warriors > 0:
+                        samples.append((timestamp, items_delta, bytes_delta, eligible_warriors))
                         loaded_samples += 1
                 if samples:
                     _project_history[normalized_slug] = samples
@@ -306,6 +309,7 @@ def record_project_activity(
     project_slug: str,
     items_delta: int,
     bytes_delta: int,
+    eligible_warriors: int,
     timestamp: float | None = None,
 ) -> None:
     """Record one per-project tracker sample.
@@ -317,7 +321,10 @@ def record_project_activity(
     if not normalized_slug or not get_policy().get("monitoring_enabled", True):
         return
     sample_time = float(timestamp if timestamp is not None else time.time())
-    sample = (sample_time, max(0, int(items_delta)), max(0, int(bytes_delta)))
+    eligible_warriors = max(0, int(eligible_warriors))
+    if eligible_warriors <= 0:
+        return
+    sample = (sample_time, max(0, int(items_delta)), max(0, int(bytes_delta)), eligible_warriors)
     cutoff = sample_time - HISTORY_SECONDS
     with _lock:
         samples = _project_history.setdefault(
@@ -393,6 +400,9 @@ def _window_readiness(project_slug: str, window_hours: int, current_time: float)
     coverage = _coverage(sample_count, duration_seconds)
     items_total = sum(sample[1] for sample in samples)
     bytes_total = sum(sample[2] for sample in samples)
+    warrior_samples = sum(sample[3] for sample in samples)
+    normalized_items_total = sum(sample[1] / sample[3] for sample in samples)
+    normalized_bytes_total = sum(sample[2] / sample[3] for sample in samples)
     first_sample_at = samples[0][0] if samples else None
     last_sample_at = samples[-1][0] if samples else None
     span_seconds = 0.0
@@ -427,8 +437,13 @@ def _window_readiness(project_slug: str, window_hours: int, current_time: float)
         "required_span_seconds": required_span_seconds,
         "items_total": items_total,
         "bytes_total": bytes_total,
-        "items_per_hour": items_total / window_hours,
-        "bytes_per_hour": bytes_total / window_hours,
+        "eligible_warrior_samples": warrior_samples,
+        "average_eligible_warriors": warrior_samples / sample_count if sample_count else 0.0,
+        "items_per_hour": normalized_items_total / window_hours,
+        "bytes_per_hour": normalized_bytes_total / window_hours,
+        "raw_items_per_hour": items_total / window_hours,
+        "raw_bytes_per_hour": bytes_total / window_hours,
+        "normalization": "per_eligible_warrior",
         "sufficient_volume": sufficient_volume,
     }
 
@@ -564,8 +579,12 @@ def evaluate_project_health(project_slug: str, now: float | None = None) -> dict
     rolling_baseline = _window_readiness(project_slug, baseline_hours, baseline_end)
     baseline_values_available = rolling_baseline["sufficient_volume"] and rolling_baseline["sample_count"] > 0
     recent_samples = _window_samples(project_slug, current_time - RECENT_WINDOW_SECONDS, current_time)
-    recent_items = sum(sample[1] for sample in recent_samples)
-    recent_bytes = sum(sample[2] for sample in recent_samples)
+    recent_raw_items = sum(sample[1] for sample in recent_samples)
+    recent_raw_bytes = sum(sample[2] for sample in recent_samples)
+    recent_items = sum(sample[1] / sample[3] for sample in recent_samples)
+    recent_bytes = sum(sample[2] / sample[3] for sample in recent_samples)
+    recent_warrior_samples = sum(sample[3] for sample in recent_samples)
+    recent_average_eligible_warriors = recent_warrior_samples / len(recent_samples) if recent_samples else 0.0
     recent_coverage = _coverage(len(recent_samples), RECENT_WINDOW_SECONDS)
     latest_sample_at = recent_samples[-1][0] if recent_samples else None
     latest_sample_age_seconds = (
@@ -617,7 +636,7 @@ def evaluate_project_health(project_slug: str, now: float | None = None) -> dict
         "observation_at": observation_at,
         "baseline": readiness,
         "rolling_baseline": rolling_baseline,
-        "baseline_mode": "rolling_excluding_recent_hour",
+        "baseline_mode": "per_eligible_warrior_rolling_excluding_recent_hour",
         "recent": {
             "window_seconds": RECENT_WINDOW_SECONDS,
             "coverage": recent_coverage,
@@ -625,7 +644,11 @@ def evaluate_project_health(project_slug: str, now: float | None = None) -> dict
             "sample_count": len(recent_samples),
             "items": recent_items,
             "bytes": recent_bytes,
+            "raw_items": recent_raw_items,
+            "raw_bytes": recent_raw_bytes,
+            "average_eligible_warriors": recent_average_eligible_warriors,
             "items_per_minute": recent_items_per_minute,
+            "normalization": "per_eligible_warrior",
             "latest_sample_at": latest_sample_at,
             "latest_sample_age_seconds": latest_sample_age_seconds,
             "current": recent_data_current,
@@ -1075,7 +1098,7 @@ def get_project_history(project_slug: str = "") -> dict[str, Any]:
         for selected_project in selected_projects:
             samples = _project_history.get(selected_project, ())
             projects_data[selected_project] = [
-                {"t": sample[0], "items": sample[1], "bytes": sample[2]}
+                {"t": sample[0], "items": sample[1], "bytes": sample[2], "eligible_warriors": sample[3], "items_per_warrior": sample[1] / sample[3], "bytes_per_warrior": sample[2] / sample[3]}
                 for sample in samples
                 if sample[0] >= cutoff
             ]
