@@ -789,39 +789,6 @@ body {
     opacity: 0.82;
 }
 
-/* Keep the status centered independently of left/right header widths on desktop. */
-@media (min-width: 1024px) {
-    #header-row {
-        position: relative;
-    }
-
-    .project-health-header-indicator:not(.hidden) {
-        position: absolute;
-        left: 50%;
-        transform: translateX(-50%);
-    }
-}
-
-/* At widths where the centered pill could overlap title or statistics, let it
-   participate in the existing wrapped header flow instead. */
-@media (min-width: 1024px) and (max-width: 1399.98px) {
-    .project-health-header-indicator:not(.hidden) {
-        position: static;
-        order: 3;
-        width: 100%;
-        max-width: none;
-        transform: none;
-    }
-}
-
-@media (max-width: 1023.98px) {
-    .project-health-header-indicator:not(.hidden) {
-        order: 3;
-        width: 100%;
-        max-width: none;
-    }
-}
-
 @media (max-width: 639px) {
     .project-health-header-indicator {
         justify-content: space-between;
@@ -1296,19 +1263,41 @@ body.has-selection #instances-grid {
         min-height: 0;
     }
 }
-/*
- * Allow the Project Health header badge to size to its complete label and
- * detail text without shrinking or overflowing into adjacent header controls.
- */
+
+/* ------------------------------------------------------------------
+   Project Health header placement (v4.7.2)
+   ------------------------------------------------------------------ */
+#header-brand-status {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.75rem;
+}
 .project-health-header-indicator {
     width: max-content;
-    max-width: none;
     min-width: max-content;
+    max-width: none;
     flex: 0 0 auto;
     white-space: nowrap;
 }
-
 .project-health-header-indicator > span {
     flex: 0 0 auto;
     white-space: nowrap;
+}
+@media (max-width: 1023.98px) {
+    #header-row { align-items: flex-start; }
+    #header-brand-status { flex-wrap: wrap; }
+    .project-health-header-indicator:not(.hidden) {
+        width: max-content;
+        max-width: 100%;
+    }
+}
+@media (max-width: 639.98px) {
+    #header-brand-status { width: 100%; }
+    .project-health-header-indicator:not(.hidden) {
+        order: 3;
+        width: 100%;
+        min-width: 0;
+        justify-content: space-between;
+    }
 }
