@@ -321,10 +321,15 @@ def record_project_activity(
     if not normalized_slug or not get_policy().get("monitoring_enabled", True):
         return
     sample_time = float(timestamp if timestamp is not None else time.time())
-    eligible_warriors = max(0, int(eligible_warriors))
-    if eligible_warriors <= 0:
+    normalized_eligible_warriors = max(0, int(eligible_warriors))
+    if normalized_eligible_warriors <= 0:
         return
-    sample = (sample_time, max(0, int(items_delta)), max(0, int(bytes_delta)), eligible_warriors)
+    sample = (
+        sample_time,
+        max(0, int(items_delta)),
+        max(0, int(bytes_delta)),
+        normalized_eligible_warriors,
+    )
     cutoff = sample_time - HISTORY_SECONDS
     with _lock:
         samples = _project_history.setdefault(
@@ -584,7 +589,9 @@ def evaluate_project_health(project_slug: str, now: float | None = None) -> dict
     recent_items = sum(sample[1] / sample[3] for sample in recent_samples)
     recent_bytes = sum(sample[2] / sample[3] for sample in recent_samples)
     recent_warrior_samples = sum(sample[3] for sample in recent_samples)
-    recent_average_eligible_warriors = recent_warrior_samples / len(recent_samples) if recent_samples else 0.0
+    recent_average_eligible_warriors = (
+        recent_warrior_samples / len(recent_samples) if recent_samples else 0.0
+    )
     recent_coverage = _coverage(len(recent_samples), RECENT_WINDOW_SECONDS)
     latest_sample_at = recent_samples[-1][0] if recent_samples else None
     latest_sample_age_seconds = (
@@ -1098,7 +1105,14 @@ def get_project_history(project_slug: str = "") -> dict[str, Any]:
         for selected_project in selected_projects:
             samples = _project_history.get(selected_project, ())
             projects_data[selected_project] = [
-                {"t": sample[0], "items": sample[1], "bytes": sample[2], "eligible_warriors": sample[3], "items_per_warrior": sample[1] / sample[3], "bytes_per_warrior": sample[2] / sample[3]}
+                {
+                    "t": sample[0],
+                    "items": sample[1],
+                    "bytes": sample[2],
+                    "eligible_warriors": sample[3],
+                    "items_per_warrior": sample[1] / sample[3],
+                    "bytes_per_warrior": sample[2] / sample[3],
+                }
                 for sample in samples
                 if sample[0] >= cutoff
             ]
@@ -1109,9 +1123,59 @@ def get_project_history(project_slug: str = "") -> dict[str, Any]:
     }
 
 
+def classify_instance_for_project_health(instance: Any) -> dict[str, Any]:
+    raw = instance.model_dump() if hasattr(instance, "model_dump") else dict(instance)
+    name = str(raw.get("name") or "")
+    role = get_role_assignments().get(name, "unassigned")
+    policy = get_policy()
+    primary = policy.get("primary_project", "")
+    secondary = policy.get("fallback_project", "")
+    project = _normalize_project_slug(raw.get("project_slug"))
+    connection = raw.get("connection_state")
+    if hasattr(connection, "value"):
+        connection = connection.value
+    online = connection == "online"
+    restarting = bool(raw.get("restarting"))
+    if not project:
+        placement = "unknown"
+    elif project == primary:
+        placement = "primary"
+    elif project == secondary:
+        placement = "secondary"
+    else:
+        placement = "other"
+    switchable = (
+        role == "fallback_fleet"
+        and online
+        and not restarting
+        and placement in ("primary", "secondary")
+    )
+    return {
+        "name": name,
+        "role": role,
+        "project": project,
+        "placement": placement,
+        "online": online,
+        "restarting": restarting,
+        "eligible_for_sampling": switchable,
+        "switchable": switchable,
+    }
+
+
+def get_fleet_placement(instances: Iterable[Any]) -> dict[str, Any]:
+    classified = [classify_instance_for_project_health(instance) for instance in instances]
+    counts = {"primary": 0, "secondary": 0, "other": 0, "unknown": 0}
+    names = {key: [] for key in counts}
+    for item in classified:
+        counts[item["placement"]] += 1
+        names[item["placement"]].append(item["name"])
+    return {"counts": counts, "names": names, "instances": classified}
+
+
 def get_status(instances: Iterable[Any] = ()) -> dict[str, Any]:
     """Return the complete Project Health modal payload."""
     policy = get_policy()
+    instance_list = list(instances)
     project_slugs = set(get_project_history()["projects"].keys())
     if policy.get("primary_project"):
         project_slugs.add(policy["primary_project"])
@@ -1131,7 +1195,8 @@ def get_status(instances: Iterable[Any] = ()) -> dict[str, Any]:
         "health": evaluations,
         "roles": get_role_assignments(),
         "failover": failover_availability(),
-        "recommendation": recommend_canaries(instances),
+        "recommendation": recommend_canaries(instance_list),
+        "fleet_placement": get_fleet_placement(instance_list),
         "decision_log": get_decision_log(100),
         "thresholds": {
             "minimum_baseline_hours": policy["minimum_baseline_hours"],

@@ -16,6 +16,7 @@ import tempfile
 import unittest
 from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend import project_health
@@ -84,6 +85,7 @@ class ProjectHealthSmokeTests(unittest.TestCase):
         sample_count: int,
         items_per_sample: int = 10,
         bytes_per_sample: int = 1_000_000,
+        eligible_warriors: int = 100,
     ) -> None:
         duration_seconds = hours * 60 * 60
         start_time = end_time - duration_seconds
@@ -97,6 +99,7 @@ class ProjectHealthSmokeTests(unittest.TestCase):
                 project_slug,
                 items_per_sample,
                 bytes_per_sample,
+                eligible_warriors=eligible_warriors,
                 timestamp=start_time + sample_index * interval,
             )
 
@@ -176,8 +179,9 @@ class ProjectHealthSmokeTests(unittest.TestCase):
         for sample_index in range(60):
             project_health.record_project_activity(
                 PROJECT,
-                10,
-                1_000_000,
+                1_000,
+                100_000_000,
+                eligible_warriors=100,
                 timestamp=BASE_TIME - (59 - sample_index) * 60,
             )
         # Ten items/minute with 200 remaining gives a 20-minute runway.
@@ -288,6 +292,123 @@ class ProjectHealthSmokeTests(unittest.TestCase):
         )
 
 
+    def test_normalization_preserves_rate_when_fleet_size_halves(self) -> None:
+        self._record_window(
+            PROJECT,
+            BASE_TIME - 60 * 60,
+            hours=5,
+            sample_count=225,
+            items_per_sample=1_000,
+            bytes_per_sample=100_000_000,
+            eligible_warriors=100,
+        )
+        self._record_window(
+            PROJECT,
+            BASE_TIME,
+            hours=1,
+            sample_count=45,
+            items_per_sample=500,
+            bytes_per_sample=50_000_000,
+            eligible_warriors=50,
+        )
+        evaluation = project_health.evaluate_project_health(PROJECT, now=BASE_TIME)
+        self.assertAlmostEqual(evaluation["item_activity_ratio"], 1.0, delta=0.25)
+        self.assertAlmostEqual(evaluation["byte_activity_ratio"], 1.0, delta=0.25)
+        self.assertAlmostEqual(
+            evaluation["recent"]["average_eligible_warriors"],
+            50.0,
+            delta=0.1,
+        )
+        self.assertEqual(evaluation["recent"]["normalization"], "per_eligible_warrior")
+
+    def test_genuine_per_warrior_decline_remains_stalled(self) -> None:
+        self._record_window(
+            PROJECT,
+            BASE_TIME - 60 * 60,
+            hours=5,
+            sample_count=225,
+            items_per_sample=1_000,
+            bytes_per_sample=100_000_000,
+            eligible_warriors=100,
+        )
+        self._record_window(
+            PROJECT,
+            BASE_TIME,
+            hours=1,
+            sample_count=45,
+            items_per_sample=100,
+            bytes_per_sample=10_000_000,
+            eligible_warriors=50,
+        )
+        evaluation = project_health.evaluate_project_health(PROJECT, now=BASE_TIME)
+        self.assertLess(evaluation["item_activity_ratio"], project_health.STALLED_RATIO)
+        self.assertLess(evaluation["byte_activity_ratio"], project_health.STALLED_RATIO)
+        self.assertEqual(evaluation["decision_reason"], "throughput_stalled")
+
+    def test_legacy_samples_without_denominator_are_not_loaded(self) -> None:
+        Path(project_health.STATE_FILE).write_text(
+            '{"version":3,"project_history":{"telegram":[[1800000000,10,1000]]}}',
+            encoding="utf-8",
+        )
+        project_health.load()
+        history = project_health.get_project_history(PROJECT)
+        self.assertEqual(history["projects"][PROJECT], [])
+
+    def test_fleet_placement_uses_actual_project(self) -> None:
+        instances = (
+            SimpleNamespace(
+                name="warrior-02", project_slug=PROJECT,
+                connection_state="online", restarting=False,
+                model_dump=lambda: {
+                    "name": "warrior-02", "project_slug": PROJECT,
+                    "connection_state": "online", "restarting": False,
+                },
+            ),
+            SimpleNamespace(
+                name="warrior-03", project_slug=FALLBACK,
+                connection_state="online", restarting=False,
+                model_dump=lambda: {
+                    "name": "warrior-03", "project_slug": FALLBACK,
+                    "connection_state": "online", "restarting": False,
+                },
+            ),
+            SimpleNamespace(
+                name="warrior-04", project_slug="usgovernment",
+                connection_state="online", restarting=False,
+                model_dump=lambda: {
+                    "name": "warrior-04", "project_slug": "usgovernment",
+                    "connection_state": "online", "restarting": False,
+                },
+            ),
+            SimpleNamespace(
+                name="warrior-05", project_slug="",
+                connection_state="online", restarting=False,
+                model_dump=lambda: {
+                    "name": "warrior-05", "project_slug": "",
+                    "connection_state": "online", "restarting": False,
+                },
+            ),
+        )
+        with project_health._lock:
+            project_health._role_assignments.update({
+                "warrior-03": "fallback_fleet",
+                "warrior-04": "fallback_fleet",
+                "warrior-05": "fallback_fleet",
+            })
+        placement = project_health.get_fleet_placement(instances)
+        self.assertEqual(
+            placement["counts"],
+            {"primary": 1, "secondary": 1, "other": 1, "unknown": 1},
+        )
+        classifications = {
+            item["name"]: item for item in placement["instances"]
+        }
+        self.assertTrue(classifications["warrior-02"]["switchable"])
+        self.assertTrue(classifications["warrior-03"]["switchable"])
+        self.assertFalse(classifications["warrior-04"]["switchable"])
+        self.assertFalse(classifications["warrior-05"]["switchable"])
+
+
 class ManualFailoverContractTests(unittest.TestCase):
     """Source-level contract checks that do not require FastAPI or Pydantic."""
 
@@ -357,7 +478,9 @@ class ManualFailoverContractTests(unittest.TestCase):
             'policy.get("fallback_project", "")',
             '"target": target_role',
             '"target_project": target_project',
-            '_switch_failover_instance(name, target_project)',
+            '_switch_failover_instance(name, target_project, policy)',
+            "summary = _summarize_project_switch_results(results)",
+            "**summary",
         )
         for required_text in required_source:
             with self.subTest(required_text=required_text):
@@ -368,6 +491,41 @@ class ManualFailoverContractTests(unittest.TestCase):
             "project_health.failover_availability()",
             endpoint_source,
         )
+
+    def test_main_records_eligible_warrior_denominator(self) -> None:
+        self.assertIn(
+            "def _eligible_warrior_count(project_slug: str) -> int:",
+            self.main_source,
+        )
+        self.assertIn("eligible_warriors=eligible_warriors", self.main_source)
+
+    def test_switch_helper_preserves_third_project_assignments(self) -> None:
+        helper = next(
+            node
+            for node in self.main_tree.body
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+            and node.name == "_switch_failover_instance"
+        )
+        helper_source = ast.get_source_segment(self.main_source, helper) or ""
+        self.assertIn(
+            "current_project not in {primary_project, secondary_project}",
+            helper_source,
+        )
+        self.assertIn('"skipped_unrelated_project"', helper_source)
+        self.assertIn('"skipped_project_unknown"', helper_source)
+        self.assertIn('"already_at_target"', helper_source)
+
+    def test_policy_response_exposes_primary_change_metadata(self) -> None:
+        endpoint = next(
+            node
+            for node in self.main_tree.body
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+            and node.name == "update_project_health_policy"
+        )
+        endpoint_source = ast.get_source_segment(self.main_source, endpoint) or ""
+        self.assertIn('"primary_changed"', endpoint_source)
+        self.assertIn('"previous_primary_project"', endpoint_source)
+        self.assertIn('"fleet_placement"', endpoint_source)
 
     def test_automatic_failover_still_targets_secondary_project(self) -> None:
         automatic_endpoint = next(
@@ -380,7 +538,7 @@ class ManualFailoverContractTests(unittest.TestCase):
             ast.get_source_segment(self.main_source, automatic_endpoint) or ""
         )
         self.assertIn(
-            '_switch_failover_instance(name, policy["fallback_project"])',
+            '_switch_failover_instance(name, policy["fallback_project"], policy)',
             automatic_source,
         )
 

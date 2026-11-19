@@ -199,6 +199,18 @@ async def _refresh_project_health_queue_evidence(force: bool = False) -> dict[st
     return evidence
 
 
+def _eligible_warrior_count(project_slug: str) -> int:
+    """Count dashboard-managed Warriors contributing to one project sample."""
+    return sum(
+        1
+        for name, client in clients.items()
+        if client.status.connection_state == ConnectionState.ONLINE
+        and not client.status.restarting
+        and name not in _pause_state
+        and client.status.project_slug == project_slug
+    )
+
+
 async def _tracker_poll_loop():
     """Poll the ArchiveTeam tracker for per-project item and byte deltas.
 
@@ -326,15 +338,19 @@ async def _tracker_poll_loop():
                             bytes_used,
                         )
 
-                # Retain zero-delta samples so Project Health coverage remains
-                # measurable, including deliberate stale-gap resets.
-                project_health.record_project_activity(
-                    project_slug,
-                    items_delta,
-                    bytes_delta,
-                    timestamp=sample_timestamp,
-                )
-                project_health.update_health_state_log(project_slug)
+                # Project Health compares tracker activity per contributing,
+                # dashboard-managed Warrior. Fleet-size changes therefore do not
+                # look like throughput collapses when per-Warrior work is stable.
+                eligible_warriors = _eligible_warrior_count(project_slug)
+                if eligible_warriors > 0:
+                    project_health.record_project_activity(
+                        project_slug,
+                        items_delta,
+                        bytes_delta,
+                        eligible_warriors=eligible_warriors,
+                        timestamp=sample_timestamp,
+                    )
+                    project_health.update_health_state_log(project_slug)
 
                 # Every successful tracker observation becomes the new baseline,
                 # even when migration or stale-gap protection rejected its delta.
@@ -1025,6 +1041,8 @@ async def get_project_health_history(project: str = ""):
 
 @app.put("/api/project-health/policy")
 async def update_project_health_policy(request: ProjectHealthPolicyRequest):
+    previous_policy = project_health.get_policy()
+    previous_primary_project = previous_policy.get("primary_project", "")
     try:
         policy = project_health.configure_policy(
             request.primary_project,
@@ -1040,7 +1058,17 @@ async def update_project_health_policy(request: ProjectHealthPolicyRequest):
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
-    return {"status": "ok", "policy": policy}
+    primary_project = policy.get("primary_project", "")
+    return {
+        "status": "ok",
+        "policy": policy,
+        "primary_changed": previous_primary_project != primary_project,
+        "previous_primary_project": previous_primary_project,
+        "primary_project": primary_project,
+        "fleet_placement": project_health.get_fleet_placement(
+            client.status for client in clients.values()
+        ),
+    }
 
 
 @app.post("/api/project-health/preview")
@@ -1109,22 +1137,66 @@ _MANUAL_FAILOVER_BATCH_DELAY_SECONDS = 1
 _manual_failover_lock = asyncio.Lock()
 
 
-async def _switch_failover_instance(name, target_project):
+def _summarize_project_switch_results(results):
+    categories = {
+        "switched": 0,
+        "already_at_target": 0,
+        "skipped_unrelated_project": 0,
+        "skipped_project_unknown": 0,
+        "failed": 0,
+    }
+    for result in results.values():
+        category = result.get("status", "failed")
+        if category in categories:
+            categories[category] += 1
+        else:
+            categories["failed"] += 1
+    return categories
+
+
+async def _switch_failover_instance(name, target_project, policy):
+    """Switch one role-managed Warrior without overriding third-project work."""
     client = clients.get(name)
     if not client:
-        return name, {"status": "error", "detail": "Not found"}
+        return name, {"status": "failed", "detail": "Not found"}
     if client.status.connection_state != ConnectionState.ONLINE:
-        return name, {"status": "error", "detail": "Warrior is offline"}
+        return name, {"status": "failed", "detail": "Warrior is offline"}
     if client.status.restarting:
-        return name, {"status": "error", "detail": "Warrior is restarting"}
+        return name, {"status": "failed", "detail": "Warrior is restarting"}
     if name in _pause_state:
-        return name, {"status": "error", "detail": "Warrior is paused"}
+        return name, {"status": "failed", "detail": "Warrior is paused"}
+
+    current_project = str(client.status.project_slug or "").strip()
+    primary_project = str(policy.get("primary_project") or "").strip()
+    secondary_project = str(policy.get("fallback_project") or "").strip()
+    if not current_project:
+        return name, {
+            "status": "skipped_project_unknown",
+            "detail": "Current project is unknown",
+        }
+    if current_project not in {primary_project, secondary_project}:
+        return name, {
+            "status": "skipped_unrelated_project",
+            "detail": "Warrior is intentionally assigned to an unrelated project",
+            "current_project": current_project,
+        }
+    if current_project == target_project:
+        return name, {
+            "status": "already_at_target",
+            "detail": "Warrior is already on the requested project",
+            "current_project": current_project,
+        }
     try:
         success = await client.change_project(target_project)
     except Exception as error:
-        logger.error("Manual failover error for %s: %s", _safe_log(name), error)
+        logger.error("Project Health switch error for %s: %s", _safe_log(name), error)
         success = False
-    return name, {"status": "ok" if success else "error", "detail": "" if success else "Project switch failed"}
+    return name, {
+        "status": "switched" if success else "failed",
+        "detail": "" if success else "Project switch failed",
+        "from_project": current_project,
+        "target_project": target_project,
+    }
 
 
 @app.post("/api/project-health/failover")
@@ -1181,35 +1253,35 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
         for start in range(0, len(fallback_names), _MANUAL_FAILOVER_BATCH_SIZE):
             batch = fallback_names[start:start + _MANUAL_FAILOVER_BATCH_SIZE]
             for name, result in await asyncio.gather(*(
-                _switch_failover_instance(name, target_project) for name in batch
+                _switch_failover_instance(name, target_project, policy) for name in batch
             )):
                 results[name] = result
             if start + _MANUAL_FAILOVER_BATCH_SIZE < len(fallback_names):
                 await asyncio.sleep(_MANUAL_FAILOVER_BATCH_DELAY_SECONDS)
 
-    switched = sum(1 for result in results.values() if result["status"] == "ok")
-    failed = len(results) - switched
+    summary = _summarize_project_switch_results(results)
     final_details = {
         **event_details,
-        "switched": switched,
-        "failed": failed,
+        **summary,
         "results": results,
         "primary_canaries_unchanged": primary_canaries,
+        "fleet_placement": project_health.get_fleet_placement(
+            client.status for client in clients.values()
+        ),
     }
     project_health.log_manual_failover_decision(
-        "completed" if failed == 0 else "failed",
+        "completed" if summary["failed"] == 0 else "failed",
         request.actor,
         final_details,
     )
     return {
-        "status": "ok" if failed == 0 else "partial",
+        "status": "ok" if summary["failed"] == 0 else "partial",
         "mode": "manual",
         "target": target_role,
         "target_project": target_project,
         "automatic_switching_enabled": policy.get("automatic_failover_enabled", False),
         "primary_canaries_unchanged": primary_canaries,
-        "switched": switched,
-        "failed": failed,
+        **summary,
         "results": results,
         "project_health": project_health.get_status(
             client.status for client in clients.values()
@@ -1233,17 +1305,27 @@ async def _execute_automatic_failover():
             break
         batch = fallback_names[start:start + _MANUAL_FAILOVER_BATCH_SIZE]
         for name, result in await asyncio.gather(*(
-            _switch_failover_instance(name, policy["fallback_project"]) for name in batch
+            _switch_failover_instance(name, policy["fallback_project"], policy) for name in batch
         )):
             results[name] = result
         if start + _MANUAL_FAILOVER_BATCH_SIZE < len(fallback_names):
             await asyncio.sleep(_MANUAL_FAILOVER_BATCH_DELAY_SECONDS)
-    switched = sum(1 for result in results.values() if result["status"] == "ok")
-    failed = len(results) - switched
-    project_health.complete_automatic_failover(switched, failed, results)
+    summary = _summarize_project_switch_results(results)
+    project_health.complete_automatic_failover(
+        summary["switched"],
+        summary["failed"],
+        results,
+    )
     logger.warning(
-        "Automatic failover completed: %d switched, %d failed; %d primary canaries unchanged",
-        switched, failed, len(primary_canaries),
+        "Automatic failover completed: %d switched, %d already target, "
+        "%d unrelated skipped, %d unknown skipped, %d failed; "
+        "%d primary canaries unchanged",
+        summary["switched"],
+        summary["already_at_target"],
+        summary["skipped_unrelated_project"],
+        summary["skipped_project_unknown"],
+        summary["failed"],
+        len(primary_canaries),
     )
 
 

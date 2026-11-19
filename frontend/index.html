@@ -385,7 +385,7 @@
                 <section class="project-health-section" aria-labelledby="project-health-evidence-title">
                     <div class="flex flex-col gap-1">
                         <h3 id="project-health-evidence-title" class="text-base font-semibold text-white">Operational evidence</h3>
-                        <p class="text-sm text-gray-400">Queue availability, recent tracker activity, baseline comparisons, and automatic-failover confirmation state for the configured primary project.</p>
+                        <p class="text-sm text-gray-400">Primary and secondary tracker activity, normalized per-Warrior baselines, fleet placement, and automatic-failover confirmation state.</p>
                     </div>
 
                     <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 mt-4">
@@ -395,20 +395,35 @@
                             <p id="project-health-current-state-detail" class="project-health-summary-detail">Waiting for Project Health status.</p>
                         </article>
                         <article class="project-health-summary-card" aria-labelledby="project-health-queue-label">
-                            <p id="project-health-queue-label" class="project-health-summary-label">Tracker queue</p>
+                            <p id="project-health-queue-label" class="project-health-summary-label">Primary tracker queue</p>
                             <p id="project-health-queue-todo" class="project-health-summary-value">TODO unavailable</p>
                             <p id="project-health-queue-runway" class="project-health-summary-detail">Estimated runway unavailable.</p>
                         </article>
                         <article class="project-health-summary-card" aria-labelledby="project-health-recent-label">
-                            <p id="project-health-recent-label" class="project-health-summary-label">Recent activity</p>
+                            <p id="project-health-recent-label" class="project-health-summary-label">Primary recent activity</p>
                             <p id="project-health-recent-items" class="project-health-summary-value">0 items/min</p>
                             <p id="project-health-recent-bytes" class="project-health-summary-detail">0 B/min · newest sample unavailable</p>
                         </article>
                         <article class="project-health-summary-card" aria-labelledby="project-health-comparison-label">
-                            <p id="project-health-comparison-label" class="project-health-summary-label">Baseline comparison</p>
+                            <p id="project-health-comparison-label" class="project-health-summary-label">Primary baseline comparison</p>
                             <p id="project-health-comparison-ratios" class="project-health-summary-value">Items — · Bytes —</p>
                             <p id="project-health-comparison-detail" class="project-health-summary-detail">Baseline not established.</p>
                         </article>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 mt-3">
+                        <article class="project-health-summary-card"><p class="project-health-summary-label">Secondary recent activity</p><p id="project-health-secondary-items" class="project-health-summary-value">Unavailable</p><p id="project-health-secondary-bytes" class="project-health-summary-detail">No secondary activity sample.</p></article>
+                        <article class="project-health-summary-card"><p class="project-health-summary-label">Secondary tracker queue</p><p id="project-health-secondary-todo" class="project-health-summary-value">TODO unavailable</p><p id="project-health-secondary-runway" class="project-health-summary-detail">Estimated runway unavailable.</p></article>
+                        <article class="project-health-summary-card"><p class="project-health-summary-label">Normalized population</p><p id="project-health-eligible-warriors" class="project-health-summary-value">0 eligible Warriors</p><p id="project-health-normalization-detail" class="project-health-summary-detail">Waiting for normalized samples.</p></article>
+                    </div>
+                    <div class="project-health-evidence-panel mt-3" aria-labelledby="project-health-placement-title">
+                        <h4 id="project-health-placement-title" class="text-sm font-semibold text-white">Fleet placement</h4>
+                        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
+                            <div><p class="project-health-summary-label">Primary</p><p id="project-health-placement-primary" class="project-health-summary-value">0</p></div>
+                            <div><p class="project-health-summary-label">Secondary</p><p id="project-health-placement-secondary" class="project-health-summary-value">0</p></div>
+                            <div><p class="project-health-summary-label">Other</p><p id="project-health-placement-other" class="project-health-summary-value">0</p></div>
+                            <div><p class="project-health-summary-label">Unknown</p><p id="project-health-placement-unknown" class="project-health-summary-value">0</p></div>
+                        </div>
                     </div>
 
                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
@@ -535,10 +550,28 @@
                         </table>
                     </div>
                     <div id="project-health-log-controls" class="hidden flex flex-wrap items-center gap-3 mt-4">
-                        <button id="btn-project-health-log-more" type="button" class="bg-gray-800 hover:bg-gray-700 border border-gray-700 px-3 py-2 rounded-lg text-sm font-semibold">Show 20 more</button>
+                        <button id="btn-project-health-log-more" type="button" class="bg-gray-800 hover:bg-gray-700 border border-gray-700 px-3 py-2 rounded-lg text-sm font-semibold">Show 10 more</button>
                         <button id="btn-project-health-log-less" type="button" class="hidden text-gray-400 hover:text-white px-3 py-2 rounded-lg text-sm font-semibold">Show less</button>
                     </div>
                 </section>
+            </div>
+        </div>
+    </div>
+
+    <div id="project-health-primary-change-dialog" class="hidden fixed inset-0 bg-black/80 z-[60] p-4 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="project-health-primary-change-title">
+        <div class="bg-gray-900 border border-blue-800 rounded-xl shadow-2xl w-full max-w-2xl mx-auto my-16 p-6">
+            <h2 id="project-health-primary-change-title" class="text-xl font-bold text-blue-200">Switch Project Health Warriors now?</h2>
+            <p id="project-health-primary-change-summary" class="mt-3 text-sm text-gray-300">The configured primary project changed.</p>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5">
+                <div class="project-health-summary-card"><p class="project-health-summary-label">Eligible</p><p id="project-health-primary-change-eligible" class="project-health-summary-value">0</p></div>
+                <div class="project-health-summary-card"><p class="project-health-summary-label">Already target</p><p id="project-health-primary-change-already" class="project-health-summary-value">0</p></div>
+                <div class="project-health-summary-card"><p class="project-health-summary-label">Other</p><p id="project-health-primary-change-other" class="project-health-summary-value">0</p></div>
+                <div class="project-health-summary-card"><p class="project-health-summary-label">Unknown</p><p id="project-health-primary-change-unknown" class="project-health-summary-value">0</p></div>
+            </div>
+            <p class="mt-4 text-xs text-gray-500">Warriors intentionally assigned to unrelated projects, plus Warriors whose current project is unknown, will remain unchanged.</p>
+            <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-3 mt-6">
+                <button id="btn-project-health-primary-change-later" type="button" class="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg text-sm font-semibold">Not now</button>
+                <button id="btn-project-health-primary-change-now" type="button" class="bg-blue-700 hover:bg-blue-600 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed px-4 py-2 rounded-lg text-sm font-semibold">Switch now</button>
             </div>
         </div>
     </div>

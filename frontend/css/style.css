@@ -1256,3 +1256,43 @@ body.has-selection #instances-grid {
         width: 100%;
     }
 }
+/* ------------------------------------------------------------------
+   Project Health v4.7.0 normalized evidence and primary-change prompt
+   ------------------------------------------------------------------ */
+
+#project-health-placement-primary,
+#project-health-placement-secondary,
+#project-health-placement-other,
+#project-health-placement-unknown,
+#project-health-primary-change-eligible,
+#project-health-primary-change-already,
+#project-health-primary-change-other,
+#project-health-primary-change-unknown {
+    font-variant-numeric: tabular-nums;
+}
+
+#project-health-secondary-items,
+#project-health-secondary-todo,
+#project-health-eligible-warriors {
+    overflow-wrap: anywhere;
+}
+
+#project-health-primary-change-dialog .project-health-summary-card {
+    min-height: 6.5rem;
+}
+
+#project-health-primary-change-summary {
+    overflow-wrap: anywhere;
+}
+
+#btn-project-health-primary-change-now:focus-visible,
+#btn-project-health-primary-change-later:focus-visible {
+    outline: 2px solid #60a5fa;
+    outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+    #project-health-primary-change-dialog .project-health-summary-card {
+        min-height: 0;
+    }
+}

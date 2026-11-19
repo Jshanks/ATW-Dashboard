@@ -25,6 +25,7 @@
  * v4.6.11: patch changed card regions in place instead of replacing entire cards.
  * v4.6.12: refresh visible cards immediately and throttle offscreen cards.
  * v4.6.13: suspend dashboard rendering while hidden and reconcile on return.
+ * v4.7.0: per-Warrior Project Health evidence, fleet placement, and safe switching.
  */
 (function () {
     "use strict";
@@ -312,7 +313,11 @@ function updateInstanceCard(card, inst) {
         if (groupKey === GROUP_PAUSED) return "\u23F8 Paused";
         if (groupKey === GROUP_OFFLINE) return "Offline / Connecting";
         if (groupKey === GROUP_UNASSIGNED) return "No project selected";
-        return groupKey;
+        var policy = projectHealthState && projectHealthState.policy ? projectHealthState.policy : {};
+        var projectTitle = projectTitles[groupKey] || groupKey;
+        if (groupKey === policy.primary_project) return "Primary · " + projectTitle;
+        if (groupKey === policy.fallback_project) return "Secondary · " + projectTitle;
+        return projectTitle;
     }
 
     // Returns [{ key, members: [inst...] }] in display order, filter applied
@@ -363,7 +368,8 @@ function updateInstanceCard(card, inst) {
 
     // Layout key changes whenever card ORDER/VISIBILITY must change -> full rebuild
     function computeLayoutKey(instances, groups) {
-        var key = viewFilter + "|" + (viewGrouped ? "g" : "f") + "|";
+        var policy = projectHealthState && projectHealthState.policy ? projectHealthState.policy : {};
+        var key = viewFilter + "|" + (viewGrouped ? "g" : "f") + "|" + (policy.primary_project || "") + "|" + (policy.fallback_project || "") + "|";
         if (viewGrouped) {
             for (var g = 0; g < groups.length; g++) {
                 key += groups[g].key + (collapsedGroups[groups[g].key] ? "(c)" : "") + ":";
@@ -2016,6 +2022,14 @@ function applyVersionBadge(cfg) {
     var btnOpenReset = document.getElementById("btn-open-project-health-reset");
     var btnCancelReset = document.getElementById("btn-cancel-project-health-reset");
     var btnConfirmReset = document.getElementById("btn-confirm-project-health-reset");
+    var primaryChangeDialog = document.getElementById("project-health-primary-change-dialog");
+    var primaryChangeSummary = document.getElementById("project-health-primary-change-summary");
+    var primaryChangeEligible = document.getElementById("project-health-primary-change-eligible");
+    var primaryChangeAlready = document.getElementById("project-health-primary-change-already");
+    var primaryChangeOther = document.getElementById("project-health-primary-change-other");
+    var primaryChangeUnknown = document.getElementById("project-health-primary-change-unknown");
+    var btnPrimaryChangeNow = document.getElementById("btn-project-health-primary-change-now");
+    var btnPrimaryChangeLater = document.getElementById("btn-project-health-primary-change-later");
 
     function projectHealthErrorDetail(response) {
         return response.json().then(function (data) {
@@ -2070,7 +2084,7 @@ function applyVersionBadge(cfg) {
         function fill(select, placeholder, selected) {
             var html = '<option value="">' + escapeHtml(placeholder) + '</option>';
             slugs.forEach(function (slug) {
-                var baseName = projectTitles[slug] || slug;
+                var baseName = projectHealthProjectLabel(slug);
                 html += '<option value="' + escapeHtml(slug) + '">' + escapeHtml(projectSelectorLabel(slug, baseName)) + '</option>';
             });
             select.innerHTML = html;
@@ -2087,6 +2101,13 @@ function applyVersionBadge(cfg) {
         fill(fallbackProjectSelect, "Select fallback project", currentFallback);
     }
 
+    function projectHealthProjectLabel(slug) {
+        var policy = projectHealthState && projectHealthState.policy ? projectHealthState.policy : {};
+        var title = projectTitles[slug] || slug;
+        if (slug === policy.primary_project) return "Primary · " + title;
+        if (slug === policy.fallback_project) return "Secondary · " + title;
+        return title;
+    }
     function formatActivityRatio(value) {
         if (value === null || value === undefined || !isFinite(value)) return "Unavailable";
         return value.toFixed(2) + "x (" + Math.round(value * 100) + "%)";
@@ -2262,6 +2283,10 @@ function applyVersionBadge(cfg) {
         projectHealthHeaderIndicator.classList.remove("hidden");
     }
 
+    function setTextIfPresent(elementId, value) {
+        var element = document.getElementById(elementId);
+        if (element) element.textContent = value;
+    }
     function renderProjectHealthOperationalEvidence(state, evaluation) {
         var policy = state.policy || {};
         var runtime = state.runtime || {};
@@ -2269,31 +2294,44 @@ function applyVersionBadge(cfg) {
         var recent = evaluation && evaluation.recent ? evaluation.recent : {};
         var queue = evaluation && evaluation.queue ? evaluation.queue : {};
         var stateName = evaluation ? evaluation.state : "Unavailable";
-        document.getElementById("project-health-current-state").textContent = stateName;
-        document.getElementById("project-health-current-state-detail").textContent = policy.primary_project ? String(projectTitles[policy.primary_project] || policy.primary_project) : "No primary project configured.";
-        document.getElementById("project-health-queue-todo").textContent = formatProjectHealthTodo(queue.todo_items);
-        document.getElementById("project-health-queue-runway").textContent = queue.stale ? "Queue observation is stale." : formatProjectHealthRunway(queue.runway_minutes);
-        document.getElementById("project-health-recent-items").textContent = (Math.round(Number(recent.items_per_minute || 0) * 10) / 10) + " items/min";
-        document.getElementById("project-health-recent-bytes").textContent = formatProjectHealthBytes(Number(recent.bytes || 0) / Math.max(1, Number(recent.window_seconds || 3600) / 60)) + "/min · newest sample " + formatProjectHealthAge(recent.latest_sample_age_seconds);
-        document.getElementById("project-health-comparison-ratios").textContent = "Items " + formatActivityRatio(evaluation && evaluation.item_activity_ratio) + " · Bytes " + formatActivityRatio(evaluation && evaluation.byte_activity_ratio);
-        document.getElementById("project-health-comparison-detail").textContent = readiness.established ? "Baseline established" : "Baseline not established";
+        setTextIfPresent("project-health-current-state", stateName);
+        setTextIfPresent("project-health-current-state-detail", policy.primary_project ? projectHealthProjectLabel(policy.primary_project) : "No primary project configured.");
+        setTextIfPresent("project-health-queue-todo", formatProjectHealthTodo(queue.todo_items));
+        setTextIfPresent("project-health-queue-runway", queue.stale ? "Queue observation is stale." : formatProjectHealthRunway(queue.runway_minutes));
+        setTextIfPresent("project-health-recent-items", (Math.round(Number(recent.items_per_minute || 0) * 10) / 10) + " items/Warrior/min");
+        setTextIfPresent("project-health-recent-bytes", formatProjectHealthBytes(Number(recent.bytes || 0) / Math.max(1, Number(recent.window_seconds || 3600) / 60)) + "/Warrior/min · newest sample " + formatProjectHealthAge(recent.latest_sample_age_seconds));
+        setTextIfPresent("project-health-comparison-ratios", "Items " + formatActivityRatio(evaluation && evaluation.item_activity_ratio) + " · Bytes " + formatActivityRatio(evaluation && evaluation.byte_activity_ratio));
+        setTextIfPresent("project-health-comparison-detail", readiness.established ? "Normalized baseline established" : "Normalized baseline not established");
         var interval = state.thresholds ? Number(state.thresholds.evaluation_interval_seconds || 300) : 300;
-        document.getElementById("project-health-evaluation-interval").textContent = Math.round(interval / 60) + " minutes";
-        document.getElementById("project-health-confirmation-progress").textContent = Number(runtime.consecutive_stalled_evaluations || 0) + " / " + Number(policy.stalled_evaluations_required || 3);
-        document.getElementById("project-health-latest-sample").textContent = formatProjectHealthAge(recent.latest_sample_age_seconds);
-        var fallbackEvaluation = state.health && policy.fallback_project ? state.health[policy.fallback_project] : null;
-        var fallbackQueue = fallbackEvaluation && fallbackEvaluation.queue ? fallbackEvaluation.queue : null;
-        document.getElementById("project-health-fallback-queue").textContent = fallbackQueue ? formatProjectHealthTodo(fallbackQueue.todo_items) : "Unavailable";
-        document.getElementById("project-health-decision-explanation").textContent = projectHealthExplanation(evaluation, policy, runtime, readiness);
+        setTextIfPresent("project-health-evaluation-interval", Math.round(interval / 60) + " minutes");
+        setTextIfPresent("project-health-confirmation-progress", Number(runtime.consecutive_stalled_evaluations || 0) + " / " + Number(policy.stalled_evaluations_required || 3));
+        setTextIfPresent("project-health-latest-sample", formatProjectHealthAge(recent.latest_sample_age_seconds));
+        var secondaryEvaluation = state.health && policy.fallback_project ? state.health[policy.fallback_project] : null;
+        var secondaryRecent = secondaryEvaluation && secondaryEvaluation.recent ? secondaryEvaluation.recent : {};
+        var secondaryQueue = secondaryEvaluation && secondaryEvaluation.queue ? secondaryEvaluation.queue : {};
+        setTextIfPresent("project-health-fallback-queue", secondaryEvaluation ? formatProjectHealthTodo(secondaryQueue.todo_items) : "Unavailable");
+        setTextIfPresent("project-health-secondary-items", secondaryEvaluation ? (Math.round(Number(secondaryRecent.items_per_minute || 0) * 10) / 10) + " items/Warrior/min" : "Unavailable");
+        setTextIfPresent("project-health-secondary-bytes", secondaryEvaluation ? formatProjectHealthBytes(Number(secondaryRecent.bytes || 0) / Math.max(1, Number(secondaryRecent.window_seconds || 3600) / 60)) + "/Warrior/min" : "No secondary activity sample.");
+        setTextIfPresent("project-health-secondary-todo", secondaryEvaluation ? formatProjectHealthTodo(secondaryQueue.todo_items) : "TODO unavailable");
+        setTextIfPresent("project-health-secondary-runway", secondaryEvaluation && secondaryQueue.stale ? "Queue observation is stale." : formatProjectHealthRunway(secondaryQueue.runway_minutes));
+        var placement = state.fleet_placement || {};
+        var counts = placement.counts || {};
+        setTextIfPresent("project-health-placement-primary", Number(counts.primary || 0));
+        setTextIfPresent("project-health-placement-secondary", Number(counts.secondary || 0));
+        setTextIfPresent("project-health-placement-other", Number(counts.other || 0));
+        setTextIfPresent("project-health-placement-unknown", Number(counts.unknown || 0));
+        var eligibleWarriors = Number(recent.average_eligible_warriors || 0);
+        setTextIfPresent("project-health-eligible-warriors", (Math.round(eligibleWarriors * 10) / 10) + " eligible Warriors");
+        setTextIfPresent("project-health-normalization-detail", recent.normalization === "per_eligible_warrior" ? "Items and bytes are normalized per eligible Warrior." : "Waiting for normalized samples.");
+        setTextIfPresent("project-health-decision-explanation", projectHealthExplanation(evaluation, policy, runtime, readiness));
         if (readiness.minimum) {
             var baselineWindow = activeBaselineWindow(readiness, policy);
             var baselineData = baselineWindow.data;
-            document.getElementById("project-health-coverage-detail").textContent = baselineWindow.label + " (" + baselineWindow.hours + "h) coverage: " + Number(baselineData.coverage_percent || 0).toFixed(1) + "% · " + Number(baselineData.sample_count || 0) + " / " + Number(baselineData.expected_sample_count || 0) + " samples · " + Number(baselineData.missing_sample_count || 0) + " missing · 75% required";
+            setTextIfPresent("project-health-coverage-detail", baselineWindow.label + " (" + baselineWindow.hours + "h) coverage: " + Number(baselineData.coverage_percent || 0).toFixed(1) + "% · " + Number(baselineData.sample_count || 0) + " / " + Number(baselineData.expected_sample_count || 0) + " samples · " + Number(baselineData.missing_sample_count || 0) + " missing · 75% required");
         } else {
-            document.getElementById("project-health-coverage-detail").textContent = "Coverage details unavailable.";
+            setTextIfPresent("project-health-coverage-detail", "Coverage details unavailable.");
         }
     }
-
     function renderProjectHealth(state) {
         projectHealthState = state;
         populateProjectHealthProjects();
@@ -2348,6 +2386,8 @@ function applyVersionBadge(cfg) {
         document.getElementById("project-health-fallback-count").textContent = projectHealthPreview.fallback_fleet.length + " Warriors";
         renderProjectHealthOperationalEvidence(state, evaluation);
         renderProjectHealthDecisionLog(state.decision_log || []);
+        lastLayoutKey = "";
+        if (viewGrouped) render();
         updateProjectHealthActions();
     }
 
@@ -2424,6 +2464,33 @@ function applyVersionBadge(cfg) {
         }
     });
 
+    function closePrimaryChangeDialog() {
+        if (primaryChangeDialog) primaryChangeDialog.classList.add("hidden");
+    }
+    function openPrimaryChangeDialog(result) {
+        if (!primaryChangeDialog) return;
+        var placement = result.fleet_placement || {};
+        var counts = placement.counts || {};
+        var instances = placement.instances || [];
+        var target = result.primary_project || "";
+        var eligible = instances.filter(function (item) { return item.switchable && item.project !== target; }).length;
+        var already = instances.filter(function (item) { return item.switchable && item.project === target; }).length;
+        primaryChangeSummary.textContent = "Primary project changed from " + (projectTitles[result.previous_primary_project] || result.previous_primary_project || "unconfigured") + " to " + (projectTitles[target] || target) + ". Switch the eligible Fallback fleet now?";
+        primaryChangeEligible.textContent = eligible;
+        primaryChangeAlready.textContent = already;
+        primaryChangeOther.textContent = Number(counts.other || 0);
+        primaryChangeUnknown.textContent = Number(counts.unknown || 0);
+        btnPrimaryChangeNow.disabled = eligible === 0;
+        primaryChangeDialog.classList.remove("hidden");
+        btnPrimaryChangeLater.focus();
+    }
+    function formatManualSwitchSummary(result) {
+        return Number(result.switched || 0) + " switched · " +
+            Number(result.already_at_target || 0) + " already target · " +
+            Number(result.skipped_unrelated_project || 0) + " other skipped · " +
+            Number(result.skipped_project_unknown || 0) + " unknown skipped · " +
+            Number(result.failed || 0) + " failed";
+    }
     projectHealthPolicyForm.addEventListener("submit", function (event) {
         event.preventDefault();
         var primaryProject = primaryProjectSelect.value;
@@ -2445,7 +2512,12 @@ function applyVersionBadge(cfg) {
         if (!Number.isInteger(stabilizationMinutes) || stabilizationMinutes < 15 || stabilizationMinutes > 120) return setProjectHealthMessage("Resume stabilization must be from 15 to 120 minutes.", "error");
         setProjectHealthBusy(true);
         projectHealthRequest("api/project-health/policy", { method: "PUT", body: JSON.stringify({ primary_project: primaryProject, fallback_project: fallbackProject, canary_percent: canaryPercent, minimum_baseline_hours: minimumBaselineHours, full_baseline_hours: fullBaselineHours, monitoring_enabled: monitoringEnabledInput.checked, automatic_failover_enabled: automaticFailoverEnabledInput.checked, stalled_evaluations_required: stalledEvaluations, cooldown_hours: cooldownHours, resume_stabilization_minutes: stabilizationMinutes }) })
-            .then(function () { projectHealthPreview = null; showToast("Project Health policy saved", "success"); return loadProjectHealth(); })
+            .then(function (result) {
+                projectHealthPreview = null;
+                showToast("Project Health policy saved", "success");
+                if (result.primary_changed) openPrimaryChangeDialog(result);
+                return loadProjectHealth();
+            })
             .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
             .finally(function () { setProjectHealthBusy(false); });
     });
@@ -2502,6 +2574,18 @@ function applyVersionBadge(cfg) {
             .finally(function () { setProjectHealthBusy(false); });
     });
 
+    if (btnPrimaryChangeLater) btnPrimaryChangeLater.addEventListener("click", closePrimaryChangeDialog);
+    if (primaryChangeDialog) primaryChangeDialog.addEventListener("click", function (event) { if (event.target === primaryChangeDialog) closePrimaryChangeDialog(); });
+    if (btnPrimaryChangeNow) btnPrimaryChangeNow.addEventListener("click", function () {
+        btnPrimaryChangeNow.disabled = true;
+        projectHealthRequest("api/project-health/failover", { method: "POST", body: JSON.stringify({ target: "primary", actor: "dashboard-primary-change" }) })
+            .then(function (result) {
+                closePrimaryChangeDialog();
+                showToast("Primary-project switch: " + formatManualSwitchSummary(result), result.failed ? "info" : "success");
+                return loadProjectHealth();
+            })
+            .catch(function (error) { setProjectHealthMessage(error.message, "error"); btnPrimaryChangeNow.disabled = false; });
+    });
     function executeManualProjectSwitch(target) {
         var policy = projectHealthState ? (projectHealthState.policy || {}) : {};
         var targetProject = target === "primary" ? policy.primary_project : policy.fallback_project;
@@ -2518,7 +2602,7 @@ function applyVersionBadge(cfg) {
         })
             .then(function (result) {
                 showToast(
-                    "Manual switch to " + target + " finished: " + result.switched + " switched, " + result.failed + " failed",
+                    "Manual switch to " + target + ": " + formatManualSwitchSummary(result),
                     result.failed ? "info" : "success"
                 );
                 if (result.project_health) {
