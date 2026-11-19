@@ -40,7 +40,7 @@
 
     var activityChart = null;
     var CHART_REBUILD_INTERVAL = 3600000; // 1 hour
-    var lastChartRebuild = Date.now(); 
+    var lastChartRebuild = Date.now();
     var pingIntervalId = null;
     var reconnectTimerId = null;
     var pendingDashboardState = null;
@@ -2227,6 +2227,12 @@ function applyVersionBadge(cfg) {
         var queue = evaluation.queue || {};
         var confirmation = runtime ? Number(runtime.consecutive_stalled_evaluations || 0) : 0;
         var required = policy ? Number(policy.stalled_evaluations_required || 3) : 3;
+        if (evaluation.state === "Building baseline") return primary + " is building a normalized per-Warrior baseline before automated switching is available.";
+        if (evaluation.state === "Failover cooldown") return "Automatic switching is in cooldown. Primary health continues to be evaluated, but no automatic transition will occur until cooldown expires.";
+        if (String(evaluation.state).indexOf("Evaluating stalled project ") === 0) return primary + " is below the stalled threshold. Project Health is confirming the condition before moving the Fallback fleet.";
+        if (String(evaluation.state).indexOf("Evaluating primary recovery ") === 0) return primary + " has met the recovery tests. Project Health is confirming sustained recovery and at least 60 minutes of queue runway before returning the fleet.";
+        if (evaluation.state === "Failing over") return "Project Health is moving eligible Fallback-fleet Warriors to the configured secondary project.";
+        if (evaluation.state === "Returning to primary") return "Project Health is returning eligible Fallback-fleet Warriors to the recovered primary project.";
         if (evaluation.state === "Queue exhausted") return primary + " reports zero queued items. Automatic failover confirmation is " + confirmation + " of " + required + ".";
         if (evaluation.state === "Queue nearly exhausted") return primary + " has an estimated queue runway under " + Math.round(queue.low_runway_threshold_minutes || 30) + " minutes. Automatic failover confirmation is " + confirmation + " of " + required + ".";
         if (evaluation.state === "Likely stalled") return primary + " reports queued work, but both item and byte activity are below 25% of baseline. Automatic failover confirmation is " + confirmation + " of " + required + ".";
@@ -2260,17 +2266,28 @@ function applyVersionBadge(cfg) {
             label = "Project Health: Off";
             detail = "Monitoring disabled";
             classes += " project-health-header-off";
-        } else if (!readiness || !readiness.established) {
+        } else if (!readiness || !readiness.established || stateName === "Building baseline") {
             var coverage = readiness ? Number(readiness.coverage_percent || 0) : 0;
-            label = "Baseline: " + coverage.toFixed(1) + "%";
-            detail = readiness && readiness.minimum ? (formatBaselineHours(Number(readiness.minimum.span_seconds || 0) / 3600) + " / " + readiness.minimum.hours + "h") : "Building baseline";
+            label = "Project Health: Building baseline";
+            detail = coverage.toFixed(1) + "% coverage";
             classes += " project-health-header-building";
+        } else if (stateName === "Failover cooldown") {
+            label = "Project Health: Failover cooldown";
+            detail = primary ? String(projectTitles[primary] || primary) : "Cooldown active";
+            classes += " project-health-header-building";
+        } else if (stateName.indexOf("Evaluating stalled project ") === 0) {
+            label = "Project Health: " + stateName;
+            detail = primary ? String(projectTitles[primary] || primary) : "Primary project";
+            classes += " project-health-header-warning";
+        } else if (stateName.indexOf("Evaluating primary recovery ") === 0) {
+            label = "Project Health: " + stateName;
+            detail = "Waiting to return to " + (projectTitles[primary] || primary || "primary");
+            classes += " project-health-header-building";
+        } else if (stateName === "Failing over" || stateName === "Returning to primary") {
+            classes += " project-health-header-attention";
         } else if (stateName === "Healthy" || stateName === "Recovering") {
             classes += " project-health-header-healthy";
         } else if (stateName === "Queue exhausted" || stateName === "Queue nearly exhausted" || stateName === "Likely stalled" || stateName === "Reduced activity") {
-            var current = Number(runtime.consecutive_stalled_evaluations || 0);
-            var required = Number(policy.stalled_evaluations_required || 3);
-            label = stateName + ": " + current + " / " + required;
             classes += " project-health-header-warning";
         } else if (stateName === "Monitoring delayed") {
             classes += " project-health-header-warning";
@@ -2459,7 +2476,7 @@ function applyVersionBadge(cfg) {
     });
 
     automaticFailoverEnabledInput.addEventListener("change", function () {
-        if (automaticFailoverEnabledInput.checked && !window.confirm("Enable automatic failover? The saved Fallback fleet may be switched after the configured consecutive stalled evaluations. Primary canaries remain on the primary project. Automatic failback is not enabled.")) {
+        if (automaticFailoverEnabledInput.checked && !window.confirm("Enable automatic failover and failback? The saved Fallback fleet may switch to secondary after the configured stalled confirmations, then return to primary after cooldown, sustained recovery, and at least 60 minutes of primary queue runway. Primary canaries remain on primary during failover.")) {
             automaticFailoverEnabledInput.checked = false;
         }
     });
@@ -2473,9 +2490,16 @@ function applyVersionBadge(cfg) {
         var counts = placement.counts || {};
         var instances = placement.instances || [];
         var target = result.primary_project || "";
-        var eligible = instances.filter(function (item) { return item.switchable && item.project !== target; }).length;
-        var already = instances.filter(function (item) { return item.switchable && item.project === target; }).length;
-        primaryChangeSummary.textContent = "Primary project changed from " + (projectTitles[result.previous_primary_project] || result.previous_primary_project || "unconfigured") + " to " + (projectTitles[target] || target) + ". Switch the eligible Fallback fleet now?";
+        var eligible = instances.filter(function (item) {
+            return (item.role === "fallback_fleet" || item.role === "primary_canary") &&
+                item.online && !item.restarting && item.project !== target &&
+                (item.placement === "primary" || item.placement === "secondary");
+        }).length;
+        var already = instances.filter(function (item) {
+            return (item.role === "fallback_fleet" || item.role === "primary_canary") &&
+                item.project === target;
+        }).length;
+        primaryChangeSummary.textContent = "Primary project changed from " + (projectTitles[result.previous_primary_project] || result.previous_primary_project || "unconfigured") + " to " + (projectTitles[target] || target) + ". Switch eligible Fallback-fleet Warriors and primary canaries now?";
         primaryChangeEligible.textContent = eligible;
         primaryChangeAlready.textContent = already;
         primaryChangeOther.textContent = Number(counts.other || 0);

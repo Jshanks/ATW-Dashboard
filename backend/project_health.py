@@ -60,6 +60,8 @@ HEALTHY_RATIO = 0.75
 REDUCED_RATIO = 0.35
 STALLED_RATIO = 0.25
 RECOVERY_RATIO = 0.35
+FAILBACK_RECOVERY_RATIO = 0.50
+FAILBACK_MINIMUM_RUNWAY_MINUTES = 60.0
 MAXIMUM_CURRENT_SAMPLE_AGE_SECONDS = 10 * 60
 LOW_QUEUE_RUNWAY_MINUTES = 30.0
 
@@ -98,10 +100,15 @@ def _default_runtime() -> dict[str, Any]:
         "monitoring_resumed_at": None,
         "stabilization_until": None,
         "consecutive_stalled_evaluations": 0,
+        "consecutive_recovered_evaluations": 0,
+        "last_recovery_evaluated_sample_at": None,
         "cooldown_until": None,
         "automatic_failover_state": "disabled",
         "failover_in_progress": False,
         "last_automatic_failover_at": None,
+        "last_automatic_failback_at": None,
+        "last_automatic_transition": None,
+        "fleet_mode": "primary",
         "last_automatic_result": None,
         "last_evaluated_sample_at": None,
         "last_evaluation_at": None,
@@ -540,10 +547,10 @@ def _classify_state(
     if not recent_data_current:
         return "Monitoring delayed"
     if not readiness.get("sufficient_volume"):
-        return "Insufficient volume"
+        return "Building baseline"
     available = [ratio for ratio in (item_ratio, byte_ratio) if ratio is not None]
     if not available:
-        return "Insufficient volume"
+        return "Building baseline"
     # Either productive signal is enough to show that useful work is flowing.
     strongest_ratio = max(available)
     both_stalled = (
@@ -560,6 +567,32 @@ def _classify_state(
     if strongest_ratio >= HEALTHY_RATIO:
         return "Healthy"
     return "Reduced activity"
+
+def _operator_state(
+    health_state: str,
+    runtime: dict[str, Any],
+    policy: dict[str, Any],
+    now: float,
+) -> str:
+    """Prioritize transition state for the header and summary card."""
+    if health_state == "Building baseline":
+        return health_state
+    if runtime.get("failover_in_progress"):
+        if runtime.get("automatic_failover_state") == "failback_in_progress":
+            return "Returning to primary"
+        return "Failing over"
+    cooldown_until = runtime.get("cooldown_until")
+    if isinstance(cooldown_until, (int, float)) and float(cooldown_until) > now:
+        return "Failover cooldown"
+    required = int(policy.get("stalled_evaluations_required", 3))
+    recovery_count = int(runtime.get("consecutive_recovered_evaluations", 0))
+    if recovery_count > 0 and runtime.get("fleet_mode") in ("secondary", "mixed"):
+        return f"Evaluating primary recovery {min(recovery_count, required)}/{required}"
+    stalled_count = int(runtime.get("consecutive_stalled_evaluations", 0))
+    if stalled_count > 0:
+        return f"Evaluating stalled project {min(stalled_count, required)}/{required}"
+    return health_state
+
 
 def _last_health_state_locked(project_slug: str) -> str | None:
     for entry in reversed(_decision_log):
@@ -636,9 +669,11 @@ def evaluate_project_health(project_slug: str, now: float | None = None) -> dict
     observation_at = latest_sample_at
     if queue_reason and isinstance(queue.get("updated_at"), (int, float)):
         observation_at = max(observation_at or 0.0, float(queue["updated_at"]))
+    operator_state = _operator_state(state, get_runtime(), policy, current_time)
     return {
         "project": project_slug,
-        "state": state,
+        "state": operator_state,
+        "health_state": state,
         "decision_reason": decision_reason,
         "observation_at": observation_at,
         "baseline": readiness,
@@ -1037,11 +1072,156 @@ def complete_automatic_failover(switched: int, failed: int, results: dict[str, A
         now = time.time()
         _runtime["failover_in_progress"] = False
         _runtime["last_automatic_failover_at"] = now
+        _runtime["last_automatic_transition"] = "failover"
+        _runtime["fleet_mode"] = "secondary" if failed == 0 else "mixed"
         _runtime["cooldown_until"] = now + get_policy()["cooldown_hours"] * 3600
         _runtime["consecutive_stalled_evaluations"] = 0
+        _runtime["consecutive_recovered_evaluations"] = 0
+        _runtime["last_recovery_evaluated_sample_at"] = None
         _runtime["automatic_failover_state"] = "cooldown"
-        _runtime["last_automatic_result"] = {"switched": switched, "failed": failed}
-        _append_decision_locked("automatic_failover_completed" if failed == 0 else "automatic_failover_partial", "Automatic failover finished", "automation", {"switched": switched, "failed": failed, "results": copy.deepcopy(results)})
+        _runtime["last_automatic_result"] = {
+            "direction": "secondary",
+            "switched": switched,
+            "failed": failed,
+        }
+        _append_decision_locked(
+            "automatic_failover_completed" if failed == 0 else "automatic_failover_partial",
+            "Automatic failover finished",
+            "automation",
+            {"switched": switched, "failed": failed, "results": copy.deepcopy(results)},
+        )
+    force_save()
+
+
+def register_automatic_recovery_evaluation(
+    evaluation: dict[str, Any],
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Confirm that the primary is ready for automatic failback.
+
+    Recovery requires a current, established normalized baseline, at least one
+    activity ratio at or above 50%, and at least 60 minutes of fresh queue
+    runway. The existing stalled-evaluation count controls the number of
+    consecutive five-minute recovery observations required.
+    """
+    current_time = float(now if now is not None else time.time())
+    policy = get_policy()
+    runtime = get_runtime()
+    recent = evaluation.get("recent", {})
+    queue = evaluation.get("queue", {})
+    readiness = evaluation.get("baseline", {})
+    observation_at = evaluation.get("observation_at", recent.get("latest_sample_at"))
+    strongest_ratio = evaluation.get("strongest_activity_ratio")
+    runway_minutes = queue.get("runway_minutes")
+    cooldown_until = runtime.get("cooldown_until")
+    cooldown_complete = not cooldown_until or current_time >= float(cooldown_until)
+    fleet_on_secondary = runtime.get("fleet_mode") in ("secondary", "mixed")
+    queue_sufficient = (
+        queue.get("available")
+        and not queue.get("stale")
+        and isinstance(runway_minutes, (int, float))
+        and not isinstance(runway_minutes, bool)
+        and float(runway_minutes) >= FAILBACK_MINIMUM_RUNWAY_MINUTES
+    )
+    activity_recovered = (
+        isinstance(strongest_ratio, (int, float))
+        and not isinstance(strongest_ratio, bool)
+        and float(strongest_ratio) >= FAILBACK_RECOVERY_RATIO
+    )
+    qualifying = (
+        policy.get("monitoring_enabled")
+        and policy.get("automatic_failover_enabled")
+        and fleet_on_secondary
+        and cooldown_complete
+        and readiness.get("established")
+        and recent.get("current")
+        and activity_recovered
+        and queue_sufficient
+    )
+    with _lock:
+        previous_observation = _runtime.get("last_recovery_evaluated_sample_at")
+        new_sample = (
+            isinstance(observation_at, (int, float))
+            and not isinstance(observation_at, bool)
+            and (
+                previous_observation is None
+                or float(observation_at) > float(previous_observation)
+            )
+        )
+        if new_sample:
+            _runtime["last_recovery_evaluated_sample_at"] = float(observation_at)
+        if not fleet_on_secondary:
+            _runtime["consecutive_recovered_evaluations"] = 0
+        elif not cooldown_complete:
+            _runtime["consecutive_recovered_evaluations"] = 0
+            _runtime["automatic_failover_state"] = "cooldown"
+        elif new_sample and qualifying:
+            _runtime["consecutive_recovered_evaluations"] = int(
+                _runtime.get("consecutive_recovered_evaluations", 0)
+            ) + 1
+            _runtime["automatic_failover_state"] = "confirming_primary_recovery"
+        elif new_sample:
+            _runtime["consecutive_recovered_evaluations"] = 0
+            _runtime["automatic_failover_state"] = "waiting_for_primary_recovery"
+        trigger = (
+            new_sample
+            and qualifying
+            and _runtime["consecutive_recovered_evaluations"]
+            >= policy["stalled_evaluations_required"]
+        )
+        if trigger:
+            _runtime["failover_in_progress"] = True
+            _runtime["automatic_failover_state"] = "failback_in_progress"
+            _append_decision_locked(
+                "automatic_failback_triggered",
+                "Primary recovery threshold reached",
+                "automation",
+                {
+                    "evaluation": copy.deepcopy(evaluation),
+                    "recovery_ratio_required": FAILBACK_RECOVERY_RATIO,
+                    "minimum_runway_minutes": FAILBACK_MINIMUM_RUNWAY_MINUTES,
+                },
+            )
+    force_save()
+    return {
+        "trigger": trigger,
+        "new_sample": new_sample,
+        "qualifying": qualifying,
+        "activity_recovered": activity_recovered,
+        "queue_sufficient": queue_sufficient,
+        "cooldown_complete": cooldown_complete,
+        "runtime": get_runtime(),
+    }
+
+
+def complete_automatic_failback(
+    switched: int,
+    failed: int,
+    results: dict[str, Any],
+) -> None:
+    """Finish an automatic return to primary and restart the shared cooldown."""
+    with _lock:
+        now = time.time()
+        _runtime["failover_in_progress"] = False
+        _runtime["last_automatic_failback_at"] = now
+        _runtime["last_automatic_transition"] = "failback"
+        _runtime["fleet_mode"] = "primary" if failed == 0 else "mixed"
+        _runtime["cooldown_until"] = now + get_policy()["cooldown_hours"] * 3600
+        _runtime["consecutive_stalled_evaluations"] = 0
+        _runtime["consecutive_recovered_evaluations"] = 0
+        _runtime["last_recovery_evaluated_sample_at"] = None
+        _runtime["automatic_failover_state"] = "cooldown"
+        _runtime["last_automatic_result"] = {
+            "direction": "primary",
+            "switched": switched,
+            "failed": failed,
+        }
+        _append_decision_locked(
+            "automatic_failback_completed" if failed == 0 else "automatic_failback_partial",
+            "Automatic failback to primary finished",
+            "automation",
+            {"switched": switched, "failed": failed, "results": copy.deepcopy(results)},
+        )
     force_save()
 
 
@@ -1210,6 +1390,8 @@ def get_status(instances: Iterable[Any] = ()) -> dict[str, Any]:
             "reduced_ratio": REDUCED_RATIO,
             "stalled_ratio": STALLED_RATIO,
             "recovery_ratio": RECOVERY_RATIO,
+            "failback_recovery_ratio": FAILBACK_RECOVERY_RATIO,
+            "failback_minimum_runway_minutes": FAILBACK_MINIMUM_RUNWAY_MINUTES,
             "recommended_canary_percent": DEFAULT_CANARY_PERCENT,
             "minimum_canaries": MINIMUM_CANARY_COUNT,
             "maximum_canaries": MAXIMUM_CANARY_COUNT,

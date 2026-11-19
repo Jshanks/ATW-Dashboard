@@ -1041,6 +1041,7 @@ async def get_project_health_history(project: str = ""):
 
 @app.put("/api/project-health/policy")
 async def update_project_health_policy(request: ProjectHealthPolicyRequest):
+    global _pending_primary_change
     previous_policy = project_health.get_policy()
     previous_primary_project = previous_policy.get("primary_project", "")
     try:
@@ -1059,6 +1060,11 @@ async def update_project_health_policy(request: ProjectHealthPolicyRequest):
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
     primary_project = policy.get("primary_project", "")
+    if previous_primary_project != primary_project:
+        _pending_primary_change = {
+            "from": previous_primary_project,
+            "to": primary_project,
+        }
     return {
         "status": "ok",
         "policy": policy,
@@ -1135,6 +1141,7 @@ async def record_project_health_decision(request: ManualFailoverDecisionRequest)
 _MANUAL_FAILOVER_BATCH_SIZE = 10
 _MANUAL_FAILOVER_BATCH_DELAY_SECONDS = 1
 _manual_failover_lock = asyncio.Lock()
+_pending_primary_change = {"from": "", "to": ""}
 
 
 def _summarize_project_switch_results(results):
@@ -1154,7 +1161,12 @@ def _summarize_project_switch_results(results):
     return categories
 
 
-async def _switch_failover_instance(name, target_project, policy):
+async def _switch_failover_instance(
+    name,
+    target_project,
+    policy,
+    additional_allowed_projects=(),
+):
     """Switch one role-managed Warrior without overriding third-project work."""
     client = clients.get(name)
     if not client:
@@ -1174,7 +1186,14 @@ async def _switch_failover_instance(name, target_project, policy):
             "status": "skipped_project_unknown",
             "detail": "Current project is unknown",
         }
-    if current_project not in {primary_project, secondary_project}:
+    allowed_projects = {
+        project for project in (
+            primary_project,
+            secondary_project,
+            *additional_allowed_projects,
+        ) if project
+    }
+    if current_project not in allowed_projects:
         return name, {
             "status": "skipped_unrelated_project",
             "detail": "Warrior is intentionally assigned to an unrelated project",
@@ -1214,8 +1233,18 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
     assignments = project_health.get_role_assignments()
     fallback_names = [name for name, role in assignments.items() if role == "fallback_fleet"]
     primary_canaries = [name for name, role in assignments.items() if role == "primary_canary"]
-    if not fallback_names:
-        raise HTTPException(status_code=409, detail="No Fallback fleet is assigned")
+    primary_change_request = (
+        request.actor == "dashboard-primary-change"
+        and request.target.value == "primary"
+        and _pending_primary_change.get("to") == policy.get("primary_project")
+    )
+    operation_names = list(fallback_names)
+    if primary_change_request:
+        operation_names.extend(
+            name for name in primary_canaries if name not in operation_names
+        )
+    if not operation_names:
+        raise HTTPException(status_code=409, detail="No Project Health Warriors are assigned")
 
     target_role = request.target.value
     target_project = (
@@ -1250,21 +1279,41 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
             request.actor,
             {"target_role": target_role, "target_project": target_project},
         )
-        for start in range(0, len(fallback_names), _MANUAL_FAILOVER_BATCH_SIZE):
-            batch = fallback_names[start:start + _MANUAL_FAILOVER_BATCH_SIZE]
+        additional_allowed_projects = (
+            (_pending_primary_change.get("from", ""),)
+            if primary_change_request
+            else ()
+        )
+        for start in range(0, len(operation_names), _MANUAL_FAILOVER_BATCH_SIZE):
+            batch = operation_names[start:start + _MANUAL_FAILOVER_BATCH_SIZE]
             for name, result in await asyncio.gather(*(
-                _switch_failover_instance(name, target_project, policy) for name in batch
+                _switch_failover_instance(
+                    name,
+                    target_project,
+                    policy,
+                    additional_allowed_projects,
+                )
+                for name in batch
             )):
                 results[name] = result
-            if start + _MANUAL_FAILOVER_BATCH_SIZE < len(fallback_names):
+            if start + _MANUAL_FAILOVER_BATCH_SIZE < len(operation_names):
                 await asyncio.sleep(_MANUAL_FAILOVER_BATCH_DELAY_SECONDS)
 
     summary = _summarize_project_switch_results(results)
+    canary_results = {
+        name: results[name]
+        for name in primary_canaries
+        if name in results
+    }
+    if primary_change_request:
+        _pending_primary_change = {"from": "", "to": ""}
     final_details = {
         **event_details,
         **summary,
         "results": results,
-        "primary_canaries_unchanged": primary_canaries,
+        "primary_canaries_unchanged": [] if primary_change_request else primary_canaries,
+        "primary_canary_results": canary_results,
+        "primary_change_request": primary_change_request,
         "fleet_placement": project_health.get_fleet_placement(
             client.status for client in clients.values()
         ),
@@ -1280,7 +1329,9 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
         "target": target_role,
         "target_project": target_project,
         "automatic_switching_enabled": policy.get("automatic_failover_enabled", False),
-        "primary_canaries_unchanged": primary_canaries,
+        "primary_canaries_unchanged": [] if primary_change_request else primary_canaries,
+        "primary_canary_results": canary_results,
+        "primary_change_request": primary_change_request,
         **summary,
         "results": results,
         "project_health": project_health.get_status(
@@ -1326,6 +1377,57 @@ async def _execute_automatic_failover():
         summary["skipped_project_unknown"],
         summary["failed"],
         len(primary_canaries),
+    )
+
+
+async def _execute_automatic_failback():
+    """Return eligible Fallback-fleet Warriors from secondary to primary."""
+    policy = project_health.get_policy()
+    assignments = project_health.get_role_assignments()
+    fallback_names = [
+        name for name, role in assignments.items()
+        if role == "fallback_fleet"
+    ]
+    results = {}
+    for start in range(0, len(fallback_names), _MANUAL_FAILOVER_BATCH_SIZE):
+        current_policy = project_health.get_policy()
+        if (
+            not current_policy.get("monitoring_enabled")
+            or not current_policy.get("automatic_failover_enabled")
+        ):
+            for skipped_name in fallback_names[start:]:
+                results[skipped_name] = {
+                    "status": "failed",
+                    "detail": "Automation disabled before failback batch started",
+                }
+            break
+        batch = fallback_names[start:start + _MANUAL_FAILOVER_BATCH_SIZE]
+        for name, result in await asyncio.gather(*(
+            _switch_failover_instance(
+                name,
+                policy["primary_project"],
+                policy,
+            )
+            for name in batch
+        )):
+            results[name] = result
+        if start + _MANUAL_FAILOVER_BATCH_SIZE < len(fallback_names):
+            await asyncio.sleep(_MANUAL_FAILOVER_BATCH_DELAY_SECONDS)
+    summary = _summarize_project_switch_results(results)
+    project_health.complete_automatic_failback(
+        summary["switched"],
+        summary["failed"],
+        results,
+    )
+    logger.warning(
+        "Automatic failback completed: %d switched to primary, "
+        "%d already primary, %d unrelated skipped, %d unknown skipped, "
+        "%d failed",
+        summary["switched"],
+        summary["already_at_target"],
+        summary["skipped_unrelated_project"],
+        summary["skipped_project_unknown"],
+        summary["failed"],
     )
 
 
@@ -1412,6 +1514,56 @@ async def _automatic_failover_loop():
                     "Automatic failover held: fallback project '%s' reports zero queued items",
                     fallback_project,
                 )
+                continue
+
+            runtime = project_health.get_runtime()
+            if runtime.get("fleet_mode") in ("secondary", "mixed"):
+                recovery_decision = (
+                    project_health.register_automatic_recovery_evaluation(
+                        evaluation
+                    )
+                )
+                if recovery_decision.get("trigger"):
+                    # Recheck primary TODO immediately before returning the fleet.
+                    try:
+                        final_queue = await _refresh_project_health_queue_evidence(
+                            force=True
+                        )
+                        last_primary_todo_refresh_at = time.time()
+                        last_fallback_todo_refresh_at = last_primary_todo_refresh_at
+                        primary_queue = final_queue.get(primary_project)
+                    except Exception as projects_error:
+                        logger.debug(
+                            "Final primary queue refresh failed: %s",
+                            projects_error,
+                        )
+                        primary_queue = project_health.get_project_queue(
+                            primary_project
+                        )
+                    runway_minutes = (
+                        primary_queue.get("runway_minutes")
+                        if primary_queue
+                        else None
+                    )
+                    primary_queue_sufficient = (
+                        primary_queue
+                        and primary_queue.get("available")
+                        and not primary_queue.get("stale")
+                        and isinstance(runway_minutes, (int, float))
+                        and not isinstance(runway_minutes, bool)
+                        and runway_minutes
+                        >= project_health.FAILBACK_MINIMUM_RUNWAY_MINUTES
+                    )
+                    if primary_queue_sufficient:
+                        await _execute_automatic_failback()
+                    else:
+                        logger.warning(
+                            "Automatic failback cancelled: primary queue no "
+                            "longer has at least %.0f minutes of runway",
+                            project_health.FAILBACK_MINIMUM_RUNWAY_MINUTES,
+                        )
+                    continue
+                # While the fleet is on secondary, only evaluate recovery.
                 continue
 
             decision = project_health.register_automatic_evaluation(evaluation)

@@ -13,6 +13,7 @@ import ast
 import copy
 import os
 import tempfile
+import time
 import unittest
 from collections import deque
 from pathlib import Path
@@ -409,6 +410,129 @@ class ProjectHealthSmokeTests(unittest.TestCase):
         self.assertFalse(classifications["warrior-05"]["switchable"])
 
 
+    def test_insufficient_volume_displays_building_baseline(self) -> None:
+        self._record_window(
+            PROJECT,
+            BASE_TIME - 5 * 60 * 60,
+            hours=6,
+            sample_count=270,
+            items_per_sample=0,
+            bytes_per_sample=0,
+        )
+        evaluation = project_health.evaluate_project_health(PROJECT, now=BASE_TIME)
+        self.assertEqual(evaluation["state"], "Building baseline")
+        self.assertNotEqual(evaluation.get("health_state"), "Insufficient volume")
+
+    def test_operator_status_prioritizes_failover_cooldown(self) -> None:
+        self._establish_minimum_baseline()
+        with project_health._lock:
+            project_health._runtime["cooldown_until"] = BASE_TIME + 3600
+            project_health._runtime["consecutive_stalled_evaluations"] = 2
+        evaluation = project_health.evaluate_project_health(PROJECT, now=BASE_TIME)
+        self.assertEqual(evaluation["state"], "Failover cooldown")
+
+    def test_operator_status_shows_stalled_confirmation_progress(self) -> None:
+        self._establish_minimum_baseline()
+        with project_health._lock:
+            project_health._runtime["consecutive_stalled_evaluations"] = 2
+            project_health._runtime["cooldown_until"] = None
+        evaluation = project_health.evaluate_project_health(PROJECT, now=BASE_TIME)
+        self.assertEqual(evaluation["state"], "Evaluating stalled project 2/3")
+
+    def test_recovery_requires_cooldown_activity_and_queue_runway(self) -> None:
+        self._establish_minimum_baseline()
+        with project_health._lock:
+            project_health._policy["monitoring_enabled"] = True
+            project_health._policy["automatic_failover_enabled"] = True
+            project_health._runtime["fleet_mode"] = "secondary"
+            project_health._runtime["cooldown_until"] = BASE_TIME - 1
+        evaluation = project_health.evaluate_project_health(PROJECT, now=BASE_TIME)
+        evaluation["strongest_activity_ratio"] = 0.75
+        evaluation["recent"]["current"] = True
+        evaluation["baseline"]["established"] = True
+        evaluation["queue"] = {
+            "available": True,
+            "stale": False,
+            "runway_minutes": 120.0,
+        }
+        evaluation["observation_at"] = BASE_TIME
+        decision = project_health.register_automatic_recovery_evaluation(
+            evaluation,
+            now=BASE_TIME,
+        )
+        self.assertTrue(decision["qualifying"])
+        self.assertFalse(decision["trigger"])
+        self.assertEqual(
+            decision["runtime"]["consecutive_recovered_evaluations"],
+            1,
+        )
+
+    def test_recovery_rejects_short_primary_runway(self) -> None:
+        self._establish_minimum_baseline()
+        with project_health._lock:
+            project_health._policy["monitoring_enabled"] = True
+            project_health._policy["automatic_failover_enabled"] = True
+            project_health._runtime["fleet_mode"] = "secondary"
+            project_health._runtime["cooldown_until"] = BASE_TIME - 1
+        evaluation = project_health.evaluate_project_health(PROJECT, now=BASE_TIME)
+        evaluation["strongest_activity_ratio"] = 0.75
+        evaluation["recent"]["current"] = True
+        evaluation["baseline"]["established"] = True
+        evaluation["queue"] = {
+            "available": True,
+            "stale": False,
+            "runway_minutes": 59.0,
+        }
+        evaluation["observation_at"] = BASE_TIME
+        decision = project_health.register_automatic_recovery_evaluation(
+            evaluation,
+            now=BASE_TIME,
+        )
+        self.assertFalse(decision["queue_sufficient"])
+        self.assertFalse(decision["trigger"])
+
+    def test_three_recovery_observations_trigger_failback(self) -> None:
+        self._establish_minimum_baseline()
+        with project_health._lock:
+            project_health._policy["monitoring_enabled"] = True
+            project_health._policy["automatic_failover_enabled"] = True
+            project_health._runtime["fleet_mode"] = "secondary"
+            project_health._runtime["cooldown_until"] = BASE_TIME - 1
+        latest = None
+        for index in range(3):
+            observation = BASE_TIME + index * 300
+            evaluation = project_health.evaluate_project_health(PROJECT, now=observation)
+            evaluation["strongest_activity_ratio"] = 0.75
+            evaluation["recent"]["current"] = True
+            evaluation["baseline"]["established"] = True
+            evaluation["queue"] = {
+                "available": True,
+                "stale": False,
+                "runway_minutes": 120.0,
+            }
+            evaluation["observation_at"] = observation
+            latest = project_health.register_automatic_recovery_evaluation(
+                evaluation,
+                now=observation,
+            )
+        self.assertIsNotNone(latest)
+        self.assertTrue(latest["trigger"])
+        self.assertEqual(
+            latest["runtime"]["automatic_failover_state"],
+            "failback_in_progress",
+        )
+
+    def test_complete_failback_restarts_shared_cooldown(self) -> None:
+        with project_health._lock:
+            project_health._policy["cooldown_hours"] = 2.0
+        before = time.time()
+        project_health.complete_automatic_failback(5, 0, {})
+        runtime = project_health.get_runtime()
+        self.assertEqual(runtime["fleet_mode"], "primary")
+        self.assertEqual(runtime["last_automatic_transition"], "failback")
+        self.assertGreaterEqual(runtime["cooldown_until"], before + 7199)
+
+
 class ManualFailoverContractTests(unittest.TestCase):
     """Source-level contract checks that do not require FastAPI or Pydantic."""
 
@@ -478,7 +602,7 @@ class ManualFailoverContractTests(unittest.TestCase):
             'policy.get("fallback_project", "")',
             '"target": target_role',
             '"target_project": target_project',
-            '_switch_failover_instance(name, target_project, policy)',
+            'additional_allowed_projects',
             "summary = _summarize_project_switch_results(results)",
             "**summary",
         )
@@ -507,10 +631,8 @@ class ManualFailoverContractTests(unittest.TestCase):
             and node.name == "_switch_failover_instance"
         )
         helper_source = ast.get_source_segment(self.main_source, helper) or ""
-        self.assertIn(
-            "current_project not in {primary_project, secondary_project}",
-            helper_source,
-        )
+        self.assertIn("additional_allowed_projects", helper_source)
+        self.assertIn("current_project not in allowed_projects", helper_source)
         self.assertIn('"skipped_unrelated_project"', helper_source)
         self.assertIn('"skipped_project_unknown"', helper_source)
         self.assertIn('"already_at_target"', helper_source)
@@ -526,6 +648,48 @@ class ManualFailoverContractTests(unittest.TestCase):
         self.assertIn('"primary_changed"', endpoint_source)
         self.assertIn('"previous_primary_project"', endpoint_source)
         self.assertIn('"fleet_placement"', endpoint_source)
+
+    def test_primary_change_moves_primary_canaries(self) -> None:
+        endpoint = next(
+            node
+            for node in self.main_tree.body
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+            and node.name == "execute_manual_project_failover"
+        )
+        endpoint_source = ast.get_source_segment(self.main_source, endpoint) or ""
+        self.assertIn('request.actor == "dashboard-primary-change"', endpoint_source)
+        self.assertIn("operation_names.extend(", endpoint_source)
+        self.assertIn('"primary_canary_results": canary_results', endpoint_source)
+        self.assertIn("additional_allowed_projects", endpoint_source)
+
+    def test_automatic_loop_evaluates_and_executes_failback(self) -> None:
+        loop = next(
+            node
+            for node in self.main_tree.body
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+            and node.name == "_automatic_failover_loop"
+        )
+        loop_source = ast.get_source_segment(self.main_source, loop) or ""
+        self.assertIn(
+            "project_health.register_automatic_recovery_evaluation(",
+            loop_source,
+        )
+        self.assertIn("await _execute_automatic_failback()", loop_source)
+        self.assertIn(
+            "project_health.FAILBACK_MINIMUM_RUNWAY_MINUTES",
+            loop_source,
+        )
+
+    def test_automatic_failback_targets_primary_project(self) -> None:
+        endpoint = next(
+            node
+            for node in self.main_tree.body
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+            and node.name == "_execute_automatic_failback"
+        )
+        endpoint_source = ast.get_source_segment(self.main_source, endpoint) or ""
+        self.assertIn('policy["primary_project"]', endpoint_source)
+        self.assertIn("project_health.complete_automatic_failback(", endpoint_source)
 
     def test_automatic_failover_still_targets_secondary_project(self) -> None:
         automatic_endpoint = next(
