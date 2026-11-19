@@ -1296,3 +1296,19 @@ body.has-selection #instances-grid {
         min-height: 0;
     }
 }
+/*
+ * Allow the Project Health header badge to size to its complete label and
+ * detail text without shrinking or overflowing into adjacent header controls.
+ */
+.project-health-header-indicator {
+    width: max-content;
+    max-width: none;
+    min-width: max-content;
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.project-health-header-indicator > span {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
