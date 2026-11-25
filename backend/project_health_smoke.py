@@ -719,6 +719,60 @@ class ManualFailoverContractTests(unittest.TestCase):
         self.assertLess(source.index("_reconcile_project_health_startup_placement()"),
                         source.index("register_automatic_recovery_evaluation("))
 
+    def _source_for(self, name):
+        function = next(
+            node for node in self.main_tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        )
+        return ast.get_source_segment(self.main_source, function) or ""
+
+    def test_switch_mode_model_is_strict_and_defaults_gradual(self) -> None:
+        from backend.models import ManualFailoverRequest
+        self.assertEqual(
+            ManualFailoverRequest(target="primary").switch_mode.value, "gradual"
+        )
+        self.assertEqual(
+            ManualFailoverRequest(target="secondary", switch_mode="immediate")
+            .switch_mode.value, "immediate"
+        )
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            ManualFailoverRequest(target="primary", switch_mode="unsupported")
+
+    def test_restart_helper_only_targets_successful_switches(self) -> None:
+        source = self._source_for("_restart_switched_project_health_warriors")
+        self.assertIn('results[name].get("status") == "switched"', source)
+        self.assertIn("_restart_one(name)", source)
+        self.assertIn("_restart_lock", source)
+
+    def test_manual_switch_mode_controls_restart(self) -> None:
+        source = self._source_for("execute_manual_project_failover")
+        self.assertIn('request.switch_mode.value == "immediate"', source)
+        self.assertIn("_restart_switched_project_health_warriors(batch, results)", source)
+        self.assertIn('"restart_results": restart_results', source)
+        self.assertIn('"switch_mode": request.switch_mode.value', source)
+
+    def test_automatic_transitions_restart_switched_warriors(self) -> None:
+        for function_name in ("_execute_automatic_failover", "_execute_automatic_failback"):
+            with self.subTest(function=function_name):
+                source = self._source_for(function_name)
+                self.assertIn("_restart_switched_project_health_warriors(batch, results)", source)
+                self.assertIn("_summarize_project_health_restarts(restart_results)", source)
+
+    def test_restart_failures_are_reported_separately(self) -> None:
+        source = self._source_for("_summarize_project_health_restarts")
+        self.assertIn('"restart_accepted"', source)
+        self.assertIn('"restart_failed"', source)
+        manual = self._source_for("execute_manual_project_failover")
+        self.assertIn('restart_summary["restart_failed"]', manual)
+
+    def test_manual_restart_helper_excludes_canaries_by_default(self) -> None:
+        source = self._source_for("execute_manual_project_failover")
+        self.assertIn('operation_names = list(fallback_names)', source)
+        self.assertIn('if primary_change_request:', source)
+        self.assertIn('operation_names.extend(', source)
+
     def test_manual_failover_model_accepts_only_saved_roles(self) -> None:
         target_class = next(
             node

@@ -405,6 +405,13 @@ class ManualFailoverTarget(str, Enum):
     SECONDARY = "secondary"
 
 
+class ManualFailoverSwitchMode(str, Enum):
+    """How manually switched Warriors transition away from active work."""
+
+    GRADUAL = "gradual"
+    IMMEDIATE = "immediate"
+
+
 class ManualFailoverRequest(BaseModel):
     """Explicit operator request to move the saved fallback fleet.
 
@@ -414,6 +421,13 @@ class ManualFailoverRequest(BaseModel):
     """
 
     target: ManualFailoverTarget
+    switch_mode: ManualFailoverSwitchMode = Field(
+        ManualFailoverSwitchMode.GRADUAL,
+        description=(
+            "gradual changes the selected project without interrupting current "
+            "items; immediate requests a restart after each successful switch"
+        ),
+    )
     actor: str = Field("dashboard", min_length=1, max_length=200)
 
     @field_validator("actor")

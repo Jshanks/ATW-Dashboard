@@ -1218,6 +1218,37 @@ async def _switch_failover_instance(
     }
 
 
+async def _restart_switched_project_health_warriors(batch, results):
+    """Request immediate restarts only after successful project changes.
+
+    Restart outcomes are independent of project-switch outcomes. A rejected
+    restart leaves the selected destination intact but reports an incomplete
+    immediate transition; no retry is attempted automatically.
+    """
+    candidates = [name for name in batch if results[name].get("status") == "switched"]
+    if not candidates:
+        return {}
+    if _restart_lock.locked():
+        return {
+            name: {"status": "error", "detail": "Another restart operation is running"}
+            for name in candidates
+        }
+    async with _restart_lock:
+        return dict(await asyncio.gather(*(_restart_one(name) for name in candidates)))
+
+
+def _summarize_project_health_restarts(restart_results):
+    return {
+        "restart_requested": len(restart_results),
+        "restart_accepted": sum(
+            result.get("status") == "ok" for result in restart_results.values()
+        ),
+        "restart_failed": sum(
+            result.get("status") != "ok" for result in restart_results.values()
+        ),
+    }
+
+
 @app.post("/api/project-health/failover")
 async def execute_manual_project_failover(request: ManualFailoverRequest):
     """Move the saved fallback fleet to the configured primary or secondary project.
@@ -1265,6 +1296,7 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
         "fallback_project": policy.get("fallback_project", ""),
         "primary_canaries": primary_canaries,
         "fallback_fleet": fallback_names,
+        "switch_mode": request.switch_mode.value,
     }
     project_health.log_manual_failover_decision(
         "requested",
@@ -1273,6 +1305,7 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
     )
 
     results = {}
+    restart_results = {}
     async with _manual_failover_lock:
         project_health.log_manual_failover_decision(
             "confirmed",
@@ -1296,6 +1329,10 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
                 for name in batch
             )):
                 results[name] = result
+            if request.switch_mode.value == "immediate":
+                restart_results.update(
+                    await _restart_switched_project_health_warriors(batch, results)
+                )
             if start + _MANUAL_FAILOVER_BATCH_SIZE < len(operation_names):
                 await asyncio.sleep(_MANUAL_FAILOVER_BATCH_DELAY_SECONDS)
 
@@ -1309,6 +1346,7 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
         )
 
     summary = _summarize_project_switch_results(results)
+    restart_summary = _summarize_project_health_restarts(restart_results)
     canary_results = {
         name: results[name]
         for name in primary_canaries
@@ -1324,17 +1362,19 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
         "primary_canary_results": canary_results,
         "primary_change_request": primary_change_request,
         "fleet_mode_result": fleet_mode_result,
+        "restart_results": restart_results,
+        **restart_summary,
         "fleet_placement": project_health.get_fleet_placement(
             client.status for client in clients.values()
         ),
     }
     project_health.log_manual_failover_decision(
-        "completed" if summary["failed"] == 0 else "failed",
+        "completed" if summary["failed"] == 0 and restart_summary["restart_failed"] == 0 else "failed",
         request.actor,
         final_details,
     )
     return {
-        "status": "ok" if summary["failed"] == 0 else "partial",
+        "status": "ok" if summary["failed"] == 0 and restart_summary["restart_failed"] == 0 else "partial",
         "mode": "manual",
         "target": target_role,
         "target_project": target_project,
@@ -1342,7 +1382,10 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
         "primary_canaries_unchanged": [] if primary_change_request else primary_canaries,
         "primary_canary_results": canary_results,
         "primary_change_request": primary_change_request,
+        "switch_mode": request.switch_mode.value,
         **summary,
+        **restart_summary,
+        "restart_results": restart_results,
         "results": results,
         "project_health": project_health.get_status(
             client.status for client in clients.values()
@@ -1356,6 +1399,7 @@ async def _execute_automatic_failover():
     fallback_names = [name for name, role in assignments.items() if role == "fallback_fleet"]
     primary_canaries = [name for name, role in assignments.items() if role == "primary_canary"]
     results = {}
+    restart_results = {}
     for start in range(0, len(fallback_names), _MANUAL_FAILOVER_BATCH_SIZE):
         # Turning monitoring or automation off stops new batches. Requests already
         # in flight finish, which avoids abandoning Warriors in an unknown state.
@@ -1369,9 +1413,20 @@ async def _execute_automatic_failover():
             _switch_failover_instance(name, policy["fallback_project"], policy) for name in batch
         )):
             results[name] = result
+        restart_results.update(
+            await _restart_switched_project_health_warriors(batch, results)
+        )
         if start + _MANUAL_FAILOVER_BATCH_SIZE < len(fallback_names):
             await asyncio.sleep(_MANUAL_FAILOVER_BATCH_DELAY_SECONDS)
     summary = _summarize_project_switch_results(results)
+    restart_summary = _summarize_project_health_restarts(restart_results)
+    if restart_summary["restart_failed"]:
+        logger.warning(
+            "Project Health %s: %d restart requests failed: %s",
+            "failover" if "failover" in "_execute_automatic_failover" else "failback",
+            restart_summary["restart_failed"],
+            restart_results,
+        )
     project_health.complete_automatic_failover(
         summary["switched"],
         summary["failed"],
@@ -1399,6 +1454,7 @@ async def _execute_automatic_failback():
         if role == "fallback_fleet"
     ]
     results = {}
+    restart_results = {}
     for start in range(0, len(fallback_names), _MANUAL_FAILOVER_BATCH_SIZE):
         current_policy = project_health.get_policy()
         if (
@@ -1421,9 +1477,20 @@ async def _execute_automatic_failback():
             for name in batch
         )):
             results[name] = result
+        restart_results.update(
+            await _restart_switched_project_health_warriors(batch, results)
+        )
         if start + _MANUAL_FAILOVER_BATCH_SIZE < len(fallback_names):
             await asyncio.sleep(_MANUAL_FAILOVER_BATCH_DELAY_SECONDS)
     summary = _summarize_project_switch_results(results)
+    restart_summary = _summarize_project_health_restarts(restart_results)
+    if restart_summary["restart_failed"]:
+        logger.warning(
+            "Project Health %s: %d restart requests failed: %s",
+            "failover" if "failover" in "_execute_automatic_failback" else "failback",
+            restart_summary["restart_failed"],
+            restart_results,
+        )
     project_health.complete_automatic_failback(
         summary["switched"],
         summary["failed"],

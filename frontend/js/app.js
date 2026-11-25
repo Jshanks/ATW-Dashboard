@@ -2600,43 +2600,87 @@ function applyVersionBadge(cfg) {
 
     if (btnPrimaryChangeLater) btnPrimaryChangeLater.addEventListener("click", closePrimaryChangeDialog);
     if (primaryChangeDialog) primaryChangeDialog.addEventListener("click", function (event) { if (event.target === primaryChangeDialog) closePrimaryChangeDialog(); });
-    if (btnPrimaryChangeNow) btnPrimaryChangeNow.addEventListener("click", function () {
-        btnPrimaryChangeNow.disabled = true;
-        projectHealthRequest("api/project-health/failover", { method: "POST", body: JSON.stringify({ target: "primary", actor: "dashboard-primary-change" }) })
-            .then(function (result) {
-                closePrimaryChangeDialog();
-                showToast("Primary-project switch: " + formatManualSwitchSummary(result), result.failed ? "info" : "success");
-                return loadProjectHealth();
-            })
-            .catch(function (error) { setProjectHealthMessage(error.message, "error"); btnPrimaryChangeNow.disabled = false; });
-    });
-    function executeManualProjectSwitch(target) {
+    // Project Health manual transitions require an explicit interruption choice.
+    // Build the dialog here so the existing index.html requires no changes.
+    var projectSwitchDialog = document.createElement("div");
+    projectSwitchDialog.id = "project-health-switch-mode-dialog";
+    projectSwitchDialog.className = "hidden fixed inset-0 z-[100] bg-black/75 flex items-center justify-center p-4";
+    projectSwitchDialog.innerHTML =
+        '<div role="dialog" aria-modal="true" aria-labelledby="project-switch-title" class="w-full max-w-lg rounded-xl border border-gray-700 bg-gray-900 p-5 shadow-2xl text-gray-200">' +
+        '<h2 id="project-switch-title" class="text-lg font-semibold text-white mb-2">Choose switching behavior</h2>' +
+        '<p id="project-switch-description" class="text-sm text-gray-300 mb-4"></p>' +
+        '<fieldset class="space-y-3"><legend class="text-sm font-semibold mb-2">How should Warriors switch?</legend>' +
+        '<label class="flex gap-3 rounded-lg border border-gray-700 p-3 cursor-pointer"><input type="radio" name="project-switch-mode" value="gradual" checked class="mt-1 accent-blue-500"><span><strong class="block text-white">Gradual (no restart)</strong><span class="text-sm text-gray-400">Finish existing items before beginning work on the selected destination.</span></span></label>' +
+        '<label class="flex gap-3 rounded-lg border border-amber-800 p-3 cursor-pointer"><input type="radio" name="project-switch-mode" value="immediate" class="mt-1 accent-amber-500"><span><strong class="block text-white">Immediate (restart Warriors)</strong><span class="text-sm text-amber-300">Interrupt in-progress items. Restart each successfully switched Warrior to begin work on the destination.</span></span></label>' +
+        '</fieldset><div class="mt-5 flex flex-wrap justify-end gap-3">' +
+        '<button type="button" data-switch-cancel class="rounded-lg bg-gray-700 px-4 py-2 text-sm hover:bg-gray-600">Cancel</button>' +
+        '<button type="button" data-switch-confirm class="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500">Confirm switch</button>' +
+        '</div></div>';
+    document.body.appendChild(projectSwitchDialog);
+    var pendingProjectSwitch = null;
+    function closeProjectSwitchDialog() {
+        projectSwitchDialog.classList.add("hidden");
+        pendingProjectSwitch = null;
+    }
+    function openProjectSwitchDialog(target, actor) {
+        if (projectHealthBusy || pendingProjectSwitch) return;
         var policy = projectHealthState ? (projectHealthState.policy || {}) : {};
         var targetProject = target === "primary" ? policy.primary_project : policy.fallback_project;
         if (!targetProject) {
             setProjectHealthMessage("No " + target + " project is configured.", "error");
             return;
         }
-        if (!window.confirm("Move the saved Fallback fleet to " + targetProject + " (" + target + ")? Primary canaries will remain unchanged.")) return;
-
+        pendingProjectSwitch = { target: target, actor: actor };
+        var assigned = projectHealthState ? (projectHealthState.roles || {}) : {};
+        var count = Object.keys(assigned).filter(function (name) {
+            return assigned[name] === "fallback_fleet" || (actor === "dashboard-primary-change" && assigned[name] === "primary_canary");
+        }).length;
+        var description = projectSwitchDialog.querySelector("#project-switch-description");
+        description.textContent = "Switch up to " + count + " assigned Warriors to " + targetProject + " (" + target + "). " +
+            (actor === "dashboard-primary-change" ? "Eligible primary canaries are included. " : "Primary canaries remain unchanged. ") +
+            "Offline, paused, restarting, unknown-project, and unrelated-project Warriors are protected.";
+        projectSwitchDialog.querySelector('input[value="gradual"]').checked = true;
+        projectSwitchDialog.classList.remove("hidden");
+        projectSwitchDialog.querySelector("[data-switch-cancel]").focus();
+    }
+    projectSwitchDialog.querySelector("[data-switch-cancel]").addEventListener("click", closeProjectSwitchDialog);
+    projectSwitchDialog.addEventListener("click", function (event) {
+        if (event.target === projectSwitchDialog) closeProjectSwitchDialog();
+    });
+    projectSwitchDialog.addEventListener("keydown", function (event) {
+        if (event.key === "Escape" && !projectHealthBusy) {
+            event.stopPropagation();
+            closeProjectSwitchDialog();
+        }
+    });
+    projectSwitchDialog.querySelector("[data-switch-confirm]").addEventListener("click", function () {
+        if (!pendingProjectSwitch || projectHealthBusy) return;
+        var action = pendingProjectSwitch;
+        var selectedMode = projectSwitchDialog.querySelector('input[name="project-switch-mode"]:checked');
+        var switchMode = selectedMode ? selectedMode.value : "gradual";
+        closeProjectSwitchDialog();
         setProjectHealthBusy(true);
         projectHealthRequest("api/project-health/failover", {
             method: "POST",
-            body: JSON.stringify({ target: target, actor: "dashboard" })
-        })
-            .then(function (result) {
-                showToast(
-                    "Manual switch to " + target + ": " + formatManualSwitchSummary(result),
-                    result.failed ? "info" : "success"
-                );
-                if (result.project_health) {
-                    projectHealthState = result.project_health;
-                    renderProjectHealth(projectHealthState);
-                }
-                return loadProjectHealth();
-            })
-            .catch(function (error) { setProjectHealthMessage(error.message, "error"); })
-            .finally(function () { setProjectHealthBusy(false); });
+            body: JSON.stringify({ target: action.target, actor: action.actor, switch_mode: switchMode })
+        }).then(function (result) {
+            if (action.actor === "dashboard-primary-change") closePrimaryChangeDialog();
+            var restartInfo = switchMode === "immediate"
+                ? " · " + Number(result.restart_accepted || 0) + " restarts accepted" +
+                  (result.restart_failed ? ", " + result.restart_failed + " restart failures" : "")
+                : " · gradual (no restarts)";
+            var hasFailures = Number(result.failed || 0) > 0 || Number(result.restart_failed || 0) > 0;
+            showToast("Project switch: " + formatManualSwitchSummary(result) + restartInfo, hasFailures ? "info" : "success");
+            return loadProjectHealth();
+        }).catch(function (error) {
+            setProjectHealthMessage(error.message, "error");
+        }).finally(function () { setProjectHealthBusy(false); });
+    });
+    if (btnPrimaryChangeNow) btnPrimaryChangeNow.addEventListener("click", function () {
+        openProjectSwitchDialog("primary", "dashboard-primary-change");
+    });
+    function executeManualProjectSwitch(target) {
+        openProjectSwitchDialog(target, "dashboard");
     }
 
     btnFailoverSecondary.addEventListener("click", function () {
