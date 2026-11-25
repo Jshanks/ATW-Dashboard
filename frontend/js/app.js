@@ -287,11 +287,15 @@ function updateInstanceCard(card, inst) {
     }
 
     function groupSortRank(groupKey) {
-        if (groupKey === AUTO_PROJECT_SLUG) return 0;
-        if (groupKey === GROUP_UNASSIGNED) return 2;
-        if (groupKey === GROUP_PAUSED) return 3;
-        if (groupKey === GROUP_OFFLINE) return 4;
-        return 1;  // real projects, sorted A-Z among themselves
+        // Project Health roles take precedence over ArchiveTeam's Choice.
+        var policy = projectHealthState && projectHealthState.policy ? projectHealthState.policy : {};
+        if (policy.primary_project && groupKey === policy.primary_project) return 0;
+        if (policy.fallback_project && groupKey === policy.fallback_project) return 1;
+        if (groupKey === AUTO_PROJECT_SLUG) return 2;
+        if (groupKey === GROUP_UNASSIGNED) return 4;
+        if (groupKey === GROUP_PAUSED) return 5;
+        if (groupKey === GROUP_OFFLINE) return 6;
+        return 3;  // remaining real projects, sorted A-Z
     }
 
     function compareGroupKeys(a, b) {

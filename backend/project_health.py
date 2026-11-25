@@ -1249,6 +1249,33 @@ def register_automatic_recovery_evaluation(
     }
 
 
+def cancel_automatic_failback(
+    reason: str,
+    evidence: dict[str, Any] | None = None,
+) -> None:
+    """Cancel a triggered failback without recording a completed transition.
+
+    The recovery confirmation sequence must begin again on fresh observations.
+    Preserve the fleet mode, cooldown, and last successful transition metadata.
+    """
+    with _lock:
+        _runtime["failover_in_progress"] = False
+        _runtime["consecutive_recovered_evaluations"] = 0
+        _runtime["automatic_failover_state"] = "waiting_for_primary_recovery"
+        _runtime["last_automatic_result"] = {
+            "direction": "primary",
+            "status": "cancelled",
+            "reason": str(reason),
+        }
+        _append_decision_locked(
+            "automatic_failback_cancelled",
+            "Automatic failback cancelled: " + str(reason),
+            "automation",
+            {"reason": str(reason), "evidence": copy.deepcopy(evidence or {})},
+        )
+    force_save()
+
+
 def complete_automatic_failback(
     switched: int,
     failed: int,

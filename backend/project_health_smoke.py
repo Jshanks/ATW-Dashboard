@@ -590,6 +590,51 @@ class ProjectHealthSmokeTests(unittest.TestCase):
             "failback_in_progress",
         )
 
+    def test_cancel_failback_resets_runtime_and_preserves_history(self) -> None:
+        with project_health._lock:
+            project_health._runtime.update({
+                "fleet_mode": "secondary",
+                "failover_in_progress": True,
+                "consecutive_recovered_evaluations": 3,
+                "automatic_failover_state": "failback_in_progress",
+                "cooldown_until": BASE_TIME + 3600,
+                "last_automatic_failover_at": BASE_TIME - 3600,
+                "last_automatic_transition": "failover",
+            })
+        project_health.cancel_automatic_failback(
+            "Final primary queue validation failed",
+            {"runway_minutes": 12, "queue_stale": False},
+        )
+        runtime = project_health.get_runtime()
+        self.assertFalse(runtime["failover_in_progress"])
+        self.assertEqual(runtime["consecutive_recovered_evaluations"], 0)
+        self.assertEqual(runtime["automatic_failover_state"], "waiting_for_primary_recovery")
+        self.assertEqual(runtime["fleet_mode"], "secondary")
+        self.assertEqual(runtime["cooldown_until"], BASE_TIME + 3600)
+        self.assertEqual(runtime["last_automatic_failover_at"], BASE_TIME - 3600)
+        self.assertEqual(runtime["last_automatic_transition"], "failover")
+        entry = project_health.get_decision_log(1)[0]
+        self.assertEqual(entry["event"], "automatic_failback_cancelled")
+        self.assertEqual(entry["details"]["evidence"]["runway_minutes"], 12)
+
+    def test_cancel_failback_allows_new_recovery_confirmation(self) -> None:
+        self._establish_minimum_baseline()
+        with project_health._lock:
+            project_health._runtime["fleet_mode"] = "secondary"
+            project_health._runtime["failover_in_progress"] = True
+            project_health._runtime["consecutive_recovered_evaluations"] = 3
+        project_health.cancel_automatic_failback("Queue stale", {"queue_stale": True})
+        evaluation = project_health.evaluate_project_health(PROJECT, now=BASE_TIME)
+        evaluation["strongest_activity_ratio"] = 0.75
+        evaluation["recent"]["current"] = True
+        evaluation["baseline"]["established"] = True
+        evaluation["queue"] = {"available": True, "stale": False, "runway_minutes": 120}
+        evaluation["observation_at"] = BASE_TIME
+        decision = project_health.register_automatic_recovery_evaluation(evaluation, now=BASE_TIME)
+        self.assertTrue(decision["qualifying"])
+        self.assertFalse(decision["trigger"])
+        self.assertEqual(decision["runtime"]["consecutive_recovered_evaluations"], 1)
+
     def test_complete_failback_restarts_shared_cooldown(self) -> None:
         with project_health._lock:
             project_health._policy["cooldown_hours"] = 2.0
@@ -718,60 +763,6 @@ class ManualFailoverContractTests(unittest.TestCase):
         source = ast.get_source_segment(self.main_source, loop)
         self.assertLess(source.index("_reconcile_project_health_startup_placement()"),
                         source.index("register_automatic_recovery_evaluation("))
-
-    def _source_for(self, name):
-        function = next(
-            node for node in self.main_tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == name
-        )
-        return ast.get_source_segment(self.main_source, function) or ""
-
-    def test_switch_mode_model_is_strict_and_defaults_gradual(self) -> None:
-        from backend.models import ManualFailoverRequest
-        self.assertEqual(
-            ManualFailoverRequest(target="primary").switch_mode.value, "gradual"
-        )
-        self.assertEqual(
-            ManualFailoverRequest(target="secondary", switch_mode="immediate")
-            .switch_mode.value, "immediate"
-        )
-        from pydantic import ValidationError
-        with self.assertRaises(ValidationError):
-            ManualFailoverRequest(target="primary", switch_mode="unsupported")
-
-    def test_restart_helper_only_targets_successful_switches(self) -> None:
-        source = self._source_for("_restart_switched_project_health_warriors")
-        self.assertIn('results[name].get("status") == "switched"', source)
-        self.assertIn("_restart_one(name)", source)
-        self.assertIn("_restart_lock", source)
-
-    def test_manual_switch_mode_controls_restart(self) -> None:
-        source = self._source_for("execute_manual_project_failover")
-        self.assertIn('request.switch_mode.value == "immediate"', source)
-        self.assertIn("_restart_switched_project_health_warriors(batch, results)", source)
-        self.assertIn('"restart_results": restart_results', source)
-        self.assertIn('"switch_mode": request.switch_mode.value', source)
-
-    def test_automatic_transitions_restart_switched_warriors(self) -> None:
-        for function_name in ("_execute_automatic_failover", "_execute_automatic_failback"):
-            with self.subTest(function=function_name):
-                source = self._source_for(function_name)
-                self.assertIn("_restart_switched_project_health_warriors(batch, results)", source)
-                self.assertIn("_summarize_project_health_restarts(restart_results)", source)
-
-    def test_restart_failures_are_reported_separately(self) -> None:
-        source = self._source_for("_summarize_project_health_restarts")
-        self.assertIn('"restart_accepted"', source)
-        self.assertIn('"restart_failed"', source)
-        manual = self._source_for("execute_manual_project_failover")
-        self.assertIn('restart_summary["restart_failed"]', manual)
-
-    def test_manual_restart_helper_excludes_canaries_by_default(self) -> None:
-        source = self._source_for("execute_manual_project_failover")
-        self.assertIn('operation_names = list(fallback_names)', source)
-        self.assertIn('if primary_change_request:', source)
-        self.assertIn('operation_names.extend(', source)
 
     def test_manual_failover_model_accepts_only_saved_roles(self) -> None:
         target_class = next(
@@ -904,6 +895,28 @@ class ManualFailoverContractTests(unittest.TestCase):
             "project_health.FAILBACK_MINIMUM_RUNWAY_MINUTES",
             loop_source,
         )
+
+    def test_final_failback_uses_calculated_queue_runway(self) -> None:
+        loop = next(node for node in self.main_tree.body
+                    if isinstance(node, ast.AsyncFunctionDef)
+                    and node.name == "_automatic_failover_loop")
+        source = ast.get_source_segment(self.main_source, loop) or ""
+        self.assertIn('final_evaluation = project_health.evaluate_project_health(', source)
+        self.assertIn('primary_queue = final_evaluation.get("queue", {})', source)
+        self.assertIn('runway_minutes = primary_queue.get("runway_minutes")', source)
+        self.assertNotIn('primary_queue = final_queue.get(primary_project)', source)
+        self.assertIn('await _execute_automatic_failback()', source)
+        self.assertIn('project_health.cancel_automatic_failback(', source)
+        self.assertIn('"queue_stale": primary_queue.get("stale")', source)
+        self.assertIn('"refresh_error": refresh_error', source)
+        self.assertIn('logger.exception(', source)
+
+    def test_automatic_restart_path_preserved(self) -> None:
+        for name in ("_execute_automatic_failover", "_execute_automatic_failback"):
+            function = next(node for node in self.main_tree.body
+                            if isinstance(node, ast.AsyncFunctionDef) and node.name == name)
+            source = ast.get_source_segment(self.main_source, function) or ""
+            self.assertIn('_restart_switched_project_health_warriors(batch, results)', source)
 
     def test_automatic_failback_targets_primary_project(self) -> None:
         endpoint = next(

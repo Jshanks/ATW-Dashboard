@@ -1654,43 +1654,65 @@ async def _automatic_failover_loop():
                     )
                 )
                 if recovery_decision.get("trigger"):
-                    # Recheck primary TODO immediately before returning the fleet.
+                    # Refresh tracker TODO, then calculate runway through the
+                    # same Project Health evaluator used for recovery eligibility.
+                    # Raw queue records do not contain calculated runway_minutes.
+                    refresh_error = None
                     try:
-                        final_queue = await _refresh_project_health_queue_evidence(
-                            force=True
-                        )
+                        await _refresh_project_health_queue_evidence(force=True)
                         last_primary_todo_refresh_at = time.time()
                         last_fallback_todo_refresh_at = last_primary_todo_refresh_at
-                        primary_queue = final_queue.get(primary_project)
                     except Exception as projects_error:
-                        logger.debug(
-                            "Final primary queue refresh failed: %s",
+                        refresh_error = str(projects_error)
+                        logger.warning(
+                            "Final primary queue refresh failed for %s: %s",
+                            primary_project,
                             projects_error,
                         )
-                        primary_queue = project_health.get_project_queue(
-                            primary_project
-                        )
-                    runway_minutes = (
-                        primary_queue.get("runway_minutes")
-                        if primary_queue
-                        else None
+
+                    final_evaluation = project_health.evaluate_project_health(
+                        primary_project
                     )
+                    primary_queue = final_evaluation.get("queue", {})
+                    runway_minutes = primary_queue.get("runway_minutes")
                     primary_queue_sufficient = (
-                        primary_queue
+                        refresh_error is None
                         and primary_queue.get("available")
                         and not primary_queue.get("stale")
                         and isinstance(runway_minutes, (int, float))
                         and not isinstance(runway_minutes, bool)
-                        and runway_minutes
-                        >= project_health.FAILBACK_MINIMUM_RUNWAY_MINUTES
+                        and runway_minutes >= project_health.FAILBACK_MINIMUM_RUNWAY_MINUTES
                     )
                     if primary_queue_sufficient:
-                        await _execute_automatic_failback()
+                        try:
+                            await _execute_automatic_failback()
+                        except Exception as failback_error:
+                            logger.exception(
+                                "Automatic failback execution failed for %s",
+                                primary_project,
+                            )
+                            project_health.cancel_automatic_failback(
+                                "Failback execution raised an exception",
+                                {"project": primary_project, "error": str(failback_error)},
+                            )
                     else:
+                        evidence = {
+                            "project": primary_project,
+                            "queue_available": primary_queue.get("available"),
+                            "queue_stale": primary_queue.get("stale"),
+                            "todo_items": primary_queue.get("todo_items"),
+                            "runway_minutes": runway_minutes,
+                            "required_runway_minutes": project_health.FAILBACK_MINIMUM_RUNWAY_MINUTES,
+                            "queue_updated_at": primary_queue.get("updated_at"),
+                            "refresh_error": refresh_error,
+                        }
                         logger.warning(
-                            "Automatic failback cancelled: primary queue no "
-                            "longer has at least %.0f minutes of runway",
-                            project_health.FAILBACK_MINIMUM_RUNWAY_MINUTES,
+                            "Automatic failback cancelled: final primary queue "
+                            "validation failed: %s",
+                            evidence,
+                        )
+                        project_health.cancel_automatic_failback(
+                            "Final primary queue validation failed", evidence
                         )
                     continue
                 # While the fleet is on secondary, only evaluate recovery.
