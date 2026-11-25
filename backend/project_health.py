@@ -1020,7 +1020,14 @@ def complete_manual_fleet_switch(
 
     with _lock:
         previous_mode = _runtime.get("fleet_mode", "primary")
+        previous_transition_active = bool(_runtime.get("failover_in_progress"))
+        previous_automation_state = _runtime.get("automatic_failover_state")
         _runtime["fleet_mode"] = fleet_mode
+        # Manual placement is authoritative only after the caller has serialized
+        # this operation against automatic transitions. Clear stale transition
+        # flags so the operator badge reflects current health rather than an
+        # abandoned automatic operation.
+        _runtime["failover_in_progress"] = False
         _runtime["consecutive_stalled_evaluations"] = 0
         _runtime["consecutive_recovered_evaluations"] = 0
         _runtime["last_recovery_evaluated_sample_at"] = None
@@ -1034,6 +1041,8 @@ def complete_manual_fleet_switch(
             {
                 "destination": destination,
                 "previous_mode": previous_mode,
+                "previous_transition_active": previous_transition_active,
+                "previous_automation_state": previous_automation_state,
                 "fleet_mode": fleet_mode,
                 "managed_counts": counts,
             },

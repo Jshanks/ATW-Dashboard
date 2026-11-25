@@ -500,6 +500,31 @@ class ProjectHealthSmokeTests(unittest.TestCase):
         self.assertEqual(project_health.get_decision_log(1)[0]["event"],
                          "manual_fleet_mode_updated")
 
+    def test_manual_switch_clears_stale_transition_without_changing_cooldown(self) -> None:
+        with project_health._lock:
+            project_health._runtime.update({
+                "failover_in_progress": True,
+                "automatic_failover_state": "failback_in_progress",
+                "consecutive_stalled_evaluations": 2,
+                "consecutive_recovered_evaluations": 3,
+                "cooldown_until": BASE_TIME + 3600,
+                "last_automatic_transition": "failover",
+            })
+        project_health.complete_manual_fleet_switch(
+            "primary", self._manual_fleet("primary", "primary")
+        )
+        runtime = project_health.get_runtime()
+        self.assertFalse(runtime["failover_in_progress"])
+        self.assertEqual(runtime["fleet_mode"], "primary")
+        self.assertEqual(runtime["automatic_failover_state"], "waiting_for_new_sample")
+        self.assertEqual(runtime["consecutive_stalled_evaluations"], 0)
+        self.assertEqual(runtime["consecutive_recovered_evaluations"], 0)
+        self.assertEqual(runtime["cooldown_until"], BASE_TIME + 3600)
+        self.assertEqual(runtime["last_automatic_transition"], "failover")
+        details = project_health.get_decision_log(1)[0]["details"]
+        self.assertTrue(details["previous_transition_active"])
+        self.assertEqual(details["previous_automation_state"], "failback_in_progress")
+
     def test_manual_primary_and_partial_switches(self) -> None:
         project_health.complete_manual_fleet_switch(
             "secondary", self._manual_fleet("secondary", "secondary"))
@@ -720,7 +745,7 @@ class ManualFailoverContractTests(unittest.TestCase):
             "project_health": project_health,
             "clients": clients,
             "ConnectionState": ConnectionState,
-            "_manual_failover_lock": SimpleNamespace(locked=lambda: False),
+            "_project_health_transition_lock": SimpleNamespace(locked=lambda: False),
             "logger": Mock(),
         }
         isolated = ast.Module(body=[helper], type_ignores=[])
@@ -763,6 +788,71 @@ class ManualFailoverContractTests(unittest.TestCase):
         source = ast.get_source_segment(self.main_source, loop)
         self.assertLess(source.index("_reconcile_project_health_startup_placement()"),
                         source.index("register_automatic_recovery_evaluation("))
+
+    def test_manual_and_automatic_share_transition_lock(self) -> None:
+        functions = {
+            node.name: node for node in self.main_tree.body
+            if isinstance(node, ast.AsyncFunctionDef)
+        }
+        manual = functions["execute_manual_project_failover"]
+        automatic = functions["_automatic_failover_loop"]
+        for function in (manual, automatic):
+            locks = [node for node in ast.walk(function)
+                     if isinstance(node, ast.AsyncWith)
+                     and any(isinstance(item.context_expr, ast.Name)
+                             and item.context_expr.id == "_project_health_transition_lock"
+                             for item in node.items)]
+            self.assertEqual(len(locks), 1, function.name)
+        automatic_lock = next(node for node in ast.walk(automatic)
+                              if isinstance(node, ast.AsyncWith)
+                              and any(isinstance(item.context_expr, ast.Name)
+                                      and item.context_expr.id == "_project_health_transition_lock"
+                                      for item in node.items))
+        self.assertTrue(any(isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Name)
+                            and node.func.id == "_execute_automatic_failback"
+                            for node in ast.walk(automatic_lock)))
+        self.assertTrue(any(isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Name)
+                            and node.func.id == "_execute_automatic_failover"
+                            for node in ast.walk(automatic_lock)))
+        manual_lock = next(node for node in ast.walk(manual)
+                           if isinstance(node, ast.AsyncWith))
+        self.assertTrue(any(isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Attribute)
+                            and node.func.attr == "complete_manual_fleet_switch"
+                            for node in ast.walk(manual_lock)))
+
+    def test_transition_lock_skips_busy_automatic_evaluation(self) -> None:
+        loop = next(node for node in self.main_tree.body
+                    if isinstance(node, ast.AsyncFunctionDef)
+                    and node.name == "_automatic_failover_loop")
+        source = ast.get_source_segment(self.main_source, loop) or ""
+        self.assertIn("if _project_health_transition_lock.locked():", source)
+        self.assertIn("async with _project_health_transition_lock:", source)
+        manual = next(node for node in self.main_tree.body
+                      if isinstance(node, ast.AsyncFunctionDef)
+                      and node.name == "execute_manual_project_failover")
+        manual_source = ast.get_source_segment(self.main_source, manual) or ""
+        self.assertIn("if _project_health_transition_lock.locked():", manual_source)
+        self.assertIn("status_code=409", manual_source)
+
+    def test_async_transition_lock_released_after_exception(self) -> None:
+        import asyncio
+
+        async def exercise_lock():
+            lock = asyncio.Lock()
+            try:
+                async with lock:
+                    raise RuntimeError("simulated transition failure")
+            except RuntimeError:
+                pass
+            self.assertFalse(lock.locked())
+            async with lock:
+                self.assertTrue(lock.locked())
+            self.assertFalse(lock.locked())
+
+        asyncio.run(exercise_lock())
 
     def test_manual_failover_model_accepts_only_saved_roles(self) -> None:
         target_class = next(

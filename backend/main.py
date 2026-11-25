@@ -1140,7 +1140,7 @@ async def record_project_health_decision(request: ManualFailoverDecisionRequest)
 
 _MANUAL_FAILOVER_BATCH_SIZE = 10
 _MANUAL_FAILOVER_BATCH_DELAY_SECONDS = 1
-_manual_failover_lock = asyncio.Lock()
+_project_health_transition_lock = asyncio.Lock()
 _pending_primary_change = {"from": "", "to": ""}
 
 
@@ -1257,8 +1257,8 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
     operator may use these controls to put non-critical Warriors back to useful
     work even while Project Health is building or monitoring is disabled.
     """
-    if _manual_failover_lock.locked():
-        raise HTTPException(status_code=409, detail="Another manual failover is running")
+    if _project_health_transition_lock.locked():
+        raise HTTPException(status_code=409, detail="Another Project Health transition is running")
 
     policy = project_health.get_policy()
     assignments = project_health.get_role_assignments()
@@ -1306,7 +1306,7 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
 
     results = {}
     restart_results = {}
-    async with _manual_failover_lock:
+    async with _project_health_transition_lock:
         project_health.log_manual_failover_decision(
             "confirmed",
             request.actor,
@@ -1535,7 +1535,7 @@ def _reconcile_project_health_startup_placement() -> bool:
             return False
         observed.append(status)
 
-    if _manual_failover_lock.locked():
+    if _project_health_transition_lock.locked():
         return False
 
     placement = project_health.get_fleet_placement(observed)
@@ -1576,181 +1576,187 @@ async def _automatic_failover_loop():
                 startup_reconciled = _reconcile_project_health_startup_placement()
                 if not startup_reconciled:
                     continue
-            current_time = time.time()
-            policy = project_health.get_policy()
-            primary_project = policy.get("primary_project", "")
-            fallback_project = policy.get("fallback_project", "")
-            if not primary_project or not policy.get("monitoring_enabled"):
+            # Do not evaluate or start an automatic transition while a manual
+            # transition owns the fleet. The next five-minute tick can retry.
+            if _project_health_transition_lock.locked():
+                logger.info("Project Health automatic evaluation skipped: transition in progress")
                 continue
+            async with _project_health_transition_lock:
+                current_time = time.time()
+                policy = project_health.get_policy()
+                primary_project = policy.get("primary_project", "")
+                fallback_project = policy.get("fallback_project", "")
+                if not primary_project or not policy.get("monitoring_enabled"):
+                    continue
 
-            evaluation = project_health.update_health_state_log(primary_project)
-            runtime = project_health.get_runtime()
-            confirmation_active = int(runtime.get("consecutive_stalled_evaluations", 0)) > 0
-            adverse_evaluation = evaluation.get("decision_reason") in {
-                "queue_exhausted",
-                "queue_low",
-                "throughput_stalled",
-            }
+                evaluation = project_health.update_health_state_log(primary_project)
+                runtime = project_health.get_runtime()
+                confirmation_active = int(runtime.get("consecutive_stalled_evaluations", 0)) > 0
+                adverse_evaluation = evaluation.get("decision_reason") in {
+                    "queue_exhausted",
+                    "queue_low",
+                    "throughput_stalled",
+                }
 
-            primary_queue = evaluation.get("queue", {})
-            cached_runway = primary_queue.get("runway_minutes")
-            if isinstance(cached_runway, (int, float)) and not isinstance(cached_runway, bool):
-                if cached_runway < _LOW_RUNWAY_MONITORING_MINUTES:
-                    queue_monitoring_accelerated = True
-                elif cached_runway > _LOW_RUNWAY_EXIT_MINUTES:
-                    queue_monitoring_accelerated = False
+                primary_queue = evaluation.get("queue", {})
+                cached_runway = primary_queue.get("runway_minutes")
+                if isinstance(cached_runway, (int, float)) and not isinstance(cached_runway, bool):
+                    if cached_runway < _LOW_RUNWAY_MONITORING_MINUTES:
+                        queue_monitoring_accelerated = True
+                    elif cached_runway > _LOW_RUNWAY_EXIT_MINUTES:
+                        queue_monitoring_accelerated = False
 
-            primary_refresh_due = (
-                current_time - last_primary_todo_refresh_at >= _PRIMARY_TODO_REFRESH_SECONDS
-            )
-            fallback_refresh_due = (
-                current_time - last_fallback_todo_refresh_at >= _FALLBACK_TODO_REFRESH_SECONDS
-            )
-            confirmation_refresh_due = confirmation_active and (
-                current_time - min(last_primary_todo_refresh_at, last_fallback_todo_refresh_at)
-                >= _CONFIRMATION_TODO_REFRESH_SECONDS
-            )
-            force_queue_refresh = (
-                adverse_evaluation
-                or confirmation_refresh_due
-                or queue_monitoring_accelerated
-                or primary_refresh_due
-                or fallback_refresh_due
-            )
-
-            queue_evidence = {}
-            if force_queue_refresh:
-                try:
-                    queue_evidence = await _refresh_project_health_queue_evidence(force=True)
-                    last_primary_todo_refresh_at = current_time
-                    last_fallback_todo_refresh_at = current_time
-                    # Re-evaluate after refreshing TODO so the confirmation uses
-                    # the freshest queue evidence, not the cached classification.
-                    evaluation = project_health.update_health_state_log(primary_project)
-                except Exception as projects_error:
-                    logger.debug("Project Health queue refresh failed: %s", projects_error)
-
-            fallback_queue = queue_evidence.get(fallback_project)
-            if fallback_queue is None and fallback_project:
-                fallback_queue = project_health.get_project_queue(fallback_project)
-            fallback_explicitly_empty = bool(
-                fallback_queue
-                and fallback_queue.get("available")
-                and not fallback_queue.get("stale")
-                and fallback_queue.get("todo_items") == 0
-            )
-            if fallback_explicitly_empty:
-                logger.warning(
-                    "Automatic failover held: fallback project '%s' reports zero queued items",
-                    fallback_project,
+                primary_refresh_due = (
+                    current_time - last_primary_todo_refresh_at >= _PRIMARY_TODO_REFRESH_SECONDS
                 )
-                continue
-
-            runtime = project_health.get_runtime()
-            if runtime.get("fleet_mode") in ("secondary", "mixed"):
-                recovery_decision = (
-                    project_health.register_automatic_recovery_evaluation(
-                        evaluation
-                    )
+                fallback_refresh_due = (
+                    current_time - last_fallback_todo_refresh_at >= _FALLBACK_TODO_REFRESH_SECONDS
                 )
-                if recovery_decision.get("trigger"):
-                    # Refresh tracker TODO, then calculate runway through the
-                    # same Project Health evaluator used for recovery eligibility.
-                    # Raw queue records do not contain calculated runway_minutes.
-                    refresh_error = None
+                confirmation_refresh_due = confirmation_active and (
+                    current_time - min(last_primary_todo_refresh_at, last_fallback_todo_refresh_at)
+                    >= _CONFIRMATION_TODO_REFRESH_SECONDS
+                )
+                force_queue_refresh = (
+                    adverse_evaluation
+                    or confirmation_refresh_due
+                    or queue_monitoring_accelerated
+                    or primary_refresh_due
+                    or fallback_refresh_due
+                )
+
+                queue_evidence = {}
+                if force_queue_refresh:
                     try:
-                        await _refresh_project_health_queue_evidence(force=True)
-                        last_primary_todo_refresh_at = time.time()
-                        last_fallback_todo_refresh_at = last_primary_todo_refresh_at
+                        queue_evidence = await _refresh_project_health_queue_evidence(force=True)
+                        last_primary_todo_refresh_at = current_time
+                        last_fallback_todo_refresh_at = current_time
+                        # Re-evaluate after refreshing TODO so the confirmation uses
+                        # the freshest queue evidence, not the cached classification.
+                        evaluation = project_health.update_health_state_log(primary_project)
                     except Exception as projects_error:
-                        refresh_error = str(projects_error)
-                        logger.warning(
-                            "Final primary queue refresh failed for %s: %s",
-                            primary_project,
-                            projects_error,
-                        )
+                        logger.debug("Project Health queue refresh failed: %s", projects_error)
 
-                    final_evaluation = project_health.evaluate_project_health(
-                        primary_project
+                fallback_queue = queue_evidence.get(fallback_project)
+                if fallback_queue is None and fallback_project:
+                    fallback_queue = project_health.get_project_queue(fallback_project)
+                fallback_explicitly_empty = bool(
+                    fallback_queue
+                    and fallback_queue.get("available")
+                    and not fallback_queue.get("stale")
+                    and fallback_queue.get("todo_items") == 0
+                )
+                if fallback_explicitly_empty:
+                    logger.warning(
+                        "Automatic failover held: fallback project '%s' reports zero queued items",
+                        fallback_project,
                     )
-                    primary_queue = final_evaluation.get("queue", {})
-                    runway_minutes = primary_queue.get("runway_minutes")
-                    primary_queue_sufficient = (
-                        refresh_error is None
-                        and primary_queue.get("available")
-                        and not primary_queue.get("stale")
-                        and isinstance(runway_minutes, (int, float))
-                        and not isinstance(runway_minutes, bool)
-                        and runway_minutes >= project_health.FAILBACK_MINIMUM_RUNWAY_MINUTES
+                    continue
+
+                runtime = project_health.get_runtime()
+                if runtime.get("fleet_mode") in ("secondary", "mixed"):
+                    recovery_decision = (
+                        project_health.register_automatic_recovery_evaluation(
+                            evaluation
+                        )
                     )
-                    if primary_queue_sufficient:
+                    if recovery_decision.get("trigger"):
+                        # Refresh tracker TODO, then calculate runway through the
+                        # same Project Health evaluator used for recovery eligibility.
+                        # Raw queue records do not contain calculated runway_minutes.
+                        refresh_error = None
                         try:
-                            await _execute_automatic_failback()
-                        except Exception as failback_error:
-                            logger.exception(
-                                "Automatic failback execution failed for %s",
+                            await _refresh_project_health_queue_evidence(force=True)
+                            last_primary_todo_refresh_at = time.time()
+                            last_fallback_todo_refresh_at = last_primary_todo_refresh_at
+                        except Exception as projects_error:
+                            refresh_error = str(projects_error)
+                            logger.warning(
+                                "Final primary queue refresh failed for %s: %s",
                                 primary_project,
+                                projects_error,
+                            )
+
+                        final_evaluation = project_health.evaluate_project_health(
+                            primary_project
+                        )
+                        primary_queue = final_evaluation.get("queue", {})
+                        runway_minutes = primary_queue.get("runway_minutes")
+                        primary_queue_sufficient = (
+                            refresh_error is None
+                            and primary_queue.get("available")
+                            and not primary_queue.get("stale")
+                            and isinstance(runway_minutes, (int, float))
+                            and not isinstance(runway_minutes, bool)
+                            and runway_minutes >= project_health.FAILBACK_MINIMUM_RUNWAY_MINUTES
+                        )
+                        if primary_queue_sufficient:
+                            try:
+                                await _execute_automatic_failback()
+                            except Exception as failback_error:
+                                logger.exception(
+                                    "Automatic failback execution failed for %s",
+                                    primary_project,
+                                )
+                                project_health.cancel_automatic_failback(
+                                    "Failback execution raised an exception",
+                                    {"project": primary_project, "error": str(failback_error)},
+                                )
+                        else:
+                            evidence = {
+                                "project": primary_project,
+                                "queue_available": primary_queue.get("available"),
+                                "queue_stale": primary_queue.get("stale"),
+                                "todo_items": primary_queue.get("todo_items"),
+                                "runway_minutes": runway_minutes,
+                                "required_runway_minutes": project_health.FAILBACK_MINIMUM_RUNWAY_MINUTES,
+                                "queue_updated_at": primary_queue.get("updated_at"),
+                                "refresh_error": refresh_error,
+                            }
+                            logger.warning(
+                                "Automatic failback cancelled: final primary queue "
+                                "validation failed: %s",
+                                evidence,
                             )
                             project_health.cancel_automatic_failback(
-                                "Failback execution raised an exception",
-                                {"project": primary_project, "error": str(failback_error)},
+                                "Final primary queue validation failed", evidence
                             )
-                    else:
-                        evidence = {
-                            "project": primary_project,
-                            "queue_available": primary_queue.get("available"),
-                            "queue_stale": primary_queue.get("stale"),
-                            "todo_items": primary_queue.get("todo_items"),
-                            "runway_minutes": runway_minutes,
-                            "required_runway_minutes": project_health.FAILBACK_MINIMUM_RUNWAY_MINUTES,
-                            "queue_updated_at": primary_queue.get("updated_at"),
-                            "refresh_error": refresh_error,
-                        }
-                        logger.warning(
-                            "Automatic failback cancelled: final primary queue "
-                            "validation failed: %s",
-                            evidence,
-                        )
-                        project_health.cancel_automatic_failback(
-                            "Final primary queue validation failed", evidence
-                        )
+                        continue
+                    # While the fleet is on secondary, only evaluate recovery.
                     continue
-                # While the fleet is on secondary, only evaluate recovery.
-                continue
 
-            decision = project_health.register_automatic_evaluation(evaluation)
-            if not decision.get("trigger"):
-                continue
+                decision = project_health.register_automatic_evaluation(evaluation)
+                if not decision.get("trigger"):
+                    continue
 
-            # Verify the fallback one final time immediately before changing the
-            # fleet. TODO unavailable remains neutral; a fresh explicit zero holds.
-            try:
-                final_queue = await _refresh_project_health_queue_evidence(force=True)
-                last_primary_todo_refresh_at = time.time()
-                last_fallback_todo_refresh_at = last_primary_todo_refresh_at
-                fallback_queue = final_queue.get(fallback_project)
-            except Exception as projects_error:
-                logger.debug("Final fallback queue refresh failed: %s", projects_error)
-                fallback_queue = project_health.get_project_queue(fallback_project)
+                # Verify the fallback one final time immediately before changing the
+                # fleet. TODO unavailable remains neutral; a fresh explicit zero holds.
+                try:
+                    final_queue = await _refresh_project_health_queue_evidence(force=True)
+                    last_primary_todo_refresh_at = time.time()
+                    last_fallback_todo_refresh_at = last_primary_todo_refresh_at
+                    fallback_queue = final_queue.get(fallback_project)
+                except Exception as projects_error:
+                    logger.debug("Final fallback queue refresh failed: %s", projects_error)
+                    fallback_queue = project_health.get_project_queue(fallback_project)
 
-            if (
-                fallback_queue
-                and fallback_queue.get("available")
-                and not fallback_queue.get("stale")
-                and fallback_queue.get("todo_items") == 0
-            ):
-                logger.warning(
-                    "Automatic failover cancelled: fallback project '%s' now reports zero queued items",
-                    fallback_project,
-                )
-                project_health.complete_automatic_failover(
-                    False,
-                    fallback_project,
-                    "Fallback reports zero queued items",
-                )
-                continue
+                if (
+                    fallback_queue
+                    and fallback_queue.get("available")
+                    and not fallback_queue.get("stale")
+                    and fallback_queue.get("todo_items") == 0
+                ):
+                    logger.warning(
+                        "Automatic failover cancelled: fallback project '%s' now reports zero queued items",
+                        fallback_project,
+                    )
+                    project_health.complete_automatic_failover(
+                        False,
+                        fallback_project,
+                        "Fallback reports zero queued items",
+                    )
+                    continue
 
-            await _execute_automatic_failover()
+                await _execute_automatic_failover()
         except asyncio.CancelledError:
             break
         except Exception as error:
