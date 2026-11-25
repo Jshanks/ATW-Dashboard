@@ -987,6 +987,61 @@ def log_manual_failover_decision(
     return copy.deepcopy(entry)
 
 
+def complete_manual_fleet_switch(
+    destination: str,
+    instances: Iterable[Any],
+    actor: str = "dashboard",
+) -> dict[str, Any]:
+    """Synchronize automation with observed placement after a manual switch.
+
+    Call only after the manual switch operation finishes, using a fresh fleet
+    snapshot. Canary Warriors are excluded: fleet_mode describes the managed
+    fallback fleet, not the primary canary population. Unknown or unrelated
+    placements prevent a false declaration of complete recovery/failover.
+    """
+    if destination not in ("primary", "secondary"):
+        raise ValueError("Manual switch destination must be primary or secondary")
+
+    classified = [classify_instance_for_project_health(instance) for instance in instances]
+    managed = [item for item in classified if item["role"] == "fallback_fleet"]
+    if not managed:
+        raise ValueError("Cannot synchronize fleet mode without assigned fallback Warriors")
+
+    counts = {"primary": 0, "secondary": 0, "other": 0, "unknown": 0}
+    for item in managed:
+        counts[item["placement"]] += 1
+
+    if counts["primary"] == len(managed):
+        fleet_mode = "primary"
+    elif counts["secondary"] == len(managed):
+        fleet_mode = "secondary"
+    else:
+        fleet_mode = "mixed"
+
+    with _lock:
+        previous_mode = _runtime.get("fleet_mode", "primary")
+        _runtime["fleet_mode"] = fleet_mode
+        _runtime["consecutive_stalled_evaluations"] = 0
+        _runtime["consecutive_recovered_evaluations"] = 0
+        _runtime["last_recovery_evaluated_sample_at"] = None
+        _runtime["last_evaluated_sample_at"] = None
+        # Do not alter cooldown or automatic-transition timestamps.
+        _runtime["automatic_failover_state"] = "waiting_for_new_sample"
+        _append_decision_locked(
+            "manual_fleet_mode_updated",
+            "Manual switch synchronized Project Health fleet mode",
+            actor,
+            {
+                "destination": destination,
+                "previous_mode": previous_mode,
+                "fleet_mode": fleet_mode,
+                "managed_counts": counts,
+            },
+        )
+    force_save()
+    return {"fleet_mode": fleet_mode, "managed_counts": counts}
+
+
 def get_runtime() -> dict[str, Any]:
     with _lock:
         return copy.deepcopy(_runtime or _default_runtime())

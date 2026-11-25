@@ -467,6 +467,74 @@ class ProjectHealthSmokeTests(unittest.TestCase):
             1,
         )
 
+    def _manual_fleet(self, *placements):
+        projects = {"primary": PROJECT, "secondary": FALLBACK,
+                    "other": "unrelated", "unknown": ""}
+        with project_health._lock:
+            project_health._role_assignments = {
+                "canary": "primary_canary",
+                **{f"fallback-{index}": "fallback_fleet"
+                   for index in range(len(placements))},
+            }
+        return [
+            {"name": "canary", "project_slug": PROJECT,
+             "connection_state": "online"},
+            *({"name": f"fallback-{index}",
+               "project_slug": projects[placement],
+               "connection_state": "online"}
+              for index, placement in enumerate(placements)),
+        ]
+
+    def test_manual_secondary_switch_updates_mode_without_cooldown(self) -> None:
+        with project_health._lock:
+            project_health._runtime["cooldown_until"] = BASE_TIME - 100
+            project_health._runtime["consecutive_recovered_evaluations"] = 2
+            project_health._runtime["last_recovery_evaluated_sample_at"] = BASE_TIME
+        result = project_health.complete_manual_fleet_switch(
+            "secondary", self._manual_fleet("secondary", "secondary"))
+        self.assertEqual(result["fleet_mode"], "secondary")
+        runtime = project_health.get_runtime()
+        self.assertEqual(runtime["cooldown_until"], BASE_TIME - 100)
+        self.assertEqual(runtime["consecutive_recovered_evaluations"], 0)
+        self.assertIsNone(runtime["last_recovery_evaluated_sample_at"])
+        self.assertEqual(project_health.get_decision_log(1)[0]["event"],
+                         "manual_fleet_mode_updated")
+
+    def test_manual_primary_and_partial_switches(self) -> None:
+        project_health.complete_manual_fleet_switch(
+            "secondary", self._manual_fleet("secondary", "secondary"))
+        partial = project_health.complete_manual_fleet_switch(
+            "primary", self._manual_fleet("primary", "secondary"))
+        self.assertEqual(partial["fleet_mode"], "mixed")
+        complete = project_health.complete_manual_fleet_switch(
+            "primary", self._manual_fleet("primary", "primary"))
+        self.assertEqual(complete["fleet_mode"], "primary")
+
+    def test_manual_switch_preserves_unknown_and_unrelated(self) -> None:
+        result = project_health.complete_manual_fleet_switch(
+            "primary", self._manual_fleet("primary", "unknown", "other"))
+        self.assertEqual(result["fleet_mode"], "mixed")
+        self.assertEqual(result["managed_counts"]["unknown"], 1)
+        self.assertEqual(result["managed_counts"]["other"], 1)
+
+    def test_manual_switch_enables_recovery_confirmation(self) -> None:
+        self._establish_minimum_baseline()
+        project_health.complete_manual_fleet_switch(
+            "secondary", self._manual_fleet("secondary"))
+        latest = None
+        for index in range(3):
+            now = BASE_TIME + index * 300
+            evaluation = project_health.evaluate_project_health(PROJECT, now=now)
+            evaluation["strongest_activity_ratio"] = 0.75
+            evaluation["recent"]["current"] = True
+            evaluation["baseline"]["established"] = True
+            evaluation["queue"] = {"available": True, "stale": False,
+                                   "runway_minutes": 120.0}
+            evaluation["observation_at"] = now
+            latest = project_health.register_automatic_recovery_evaluation(
+                evaluation, now=now)
+        self.assertTrue(latest["trigger"])
+
     def test_recovery_rejects_short_primary_runway(self) -> None:
         self._establish_minimum_baseline()
         with project_health._lock:
@@ -547,6 +615,109 @@ class ManualFailoverContractTests(unittest.TestCase):
         )
         cls.models_tree = ast.parse(cls.models_source)
         cls.main_tree = ast.parse(cls.main_source)
+
+    def setUp(self) -> None:
+        with project_health._lock:
+            project_health._policy = project_health._default_policy()
+            project_health._policy.update({
+                "primary_project": PROJECT,
+                "fallback_project": FALLBACK,
+                "monitoring_enabled": True,
+                "automatic_failover_enabled": True,
+            })
+            project_health._runtime = project_health._default_runtime()
+            project_health._role_assignments = {}
+            project_health._decision_log = deque(
+                maxlen=project_health.MAX_DECISION_LOG_ENTRIES)
+        save_patch = patch.object(project_health, "force_save", return_value=None)
+        save_patch.start()
+        self.addCleanup(save_patch.stop)
+
+    def _startup_reconciler(self, placements, persisted_mode="primary"):
+        """Execute the actual startup helper with isolated Warrior clients."""
+        helper = next(
+            node for node in self.main_tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_reconcile_project_health_startup_placement"
+        )
+        from backend.models import ConnectionState
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        names = [f"fallback-{index}" for index in range(len(placements))]
+        with project_health._lock:
+            project_health._role_assignments = {
+                "canary": "primary_canary",
+                **{name: "fallback_fleet" for name in names},
+            }
+            project_health._runtime["fleet_mode"] = persisted_mode
+        project_map = {"primary": PROJECT, "secondary": FALLBACK,
+                       "other": "unrelated", "unknown": ""}
+        clients = {}
+        for name, placement in zip(names, placements):
+            if placement == "missing":
+                continue
+            online = placement != "offline"
+            status = SimpleNamespace(
+                name=name,
+                project_slug=project_map.get(placement, FALLBACK),
+                connection_state=(ConnectionState.ONLINE if online
+                                  else ConnectionState.OFFLINE),
+                restarting=False,
+            )
+            status.model_dump = lambda status=status: {
+                "name": status.name,
+                "project_slug": status.project_slug,
+                "connection_state": status.connection_state,
+                "restarting": status.restarting,
+            }
+            clients[name] = SimpleNamespace(status=status)
+        namespace = {
+            "project_health": project_health,
+            "clients": clients,
+            "ConnectionState": ConnectionState,
+            "_manual_failover_lock": SimpleNamespace(locked=lambda: False),
+            "logger": Mock(),
+        }
+        isolated = ast.Module(body=[helper], type_ignores=[])
+        exec(compile(isolated, "main.py", "exec"), namespace)
+        return namespace["_reconcile_project_health_startup_placement"]()
+
+    def test_startup_reconciles_secondary_fleet_with_primary_canary(self) -> None:
+        self.assertTrue(self._startup_reconciler(["secondary"] * 94))
+        self.assertEqual(project_health.get_runtime()["fleet_mode"], "secondary")
+        self.assertEqual(project_health.get_decision_log(1)[0]["actor"],
+                         "startup-reconciliation")
+
+    def test_startup_reconciles_mixed_and_primary_fleets(self) -> None:
+        self.assertTrue(self._startup_reconciler(["secondary", "primary"]))
+        self.assertEqual(project_health.get_runtime()["fleet_mode"], "mixed")
+        self.assertTrue(self._startup_reconciler(["primary", "primary"], "mixed"))
+        self.assertEqual(project_health.get_runtime()["fleet_mode"], "primary")
+
+    def test_startup_waits_for_missing_offline_or_unknown(self) -> None:
+        for unresolved in ("missing", "offline", "unknown"):
+            with self.subTest(unresolved=unresolved):
+                self.assertFalse(self._startup_reconciler(
+                    ["secondary", unresolved]))
+                self.assertEqual(project_health.get_runtime()["fleet_mode"],
+                                 "primary")
+
+    def test_startup_noop_does_not_reset_cooldown(self) -> None:
+        with project_health._lock:
+            project_health._runtime["cooldown_until"] = BASE_TIME + 3600
+        self.assertTrue(self._startup_reconciler(["primary", "primary"]))
+        self.assertEqual(project_health.get_runtime()["cooldown_until"],
+                         BASE_TIME + 3600)
+        self.assertFalse(any(entry["event"] == "manual_fleet_mode_updated"
+                             for entry in project_health.get_decision_log()))
+
+    def test_startup_reconciliation_precedes_automatic_evaluation(self) -> None:
+        loop = next(node for node in self.main_tree.body
+                    if isinstance(node, ast.AsyncFunctionDef)
+                    and node.name == "_automatic_failover_loop")
+        source = ast.get_source_segment(self.main_source, loop)
+        self.assertLess(source.index("_reconcile_project_health_startup_placement()"),
+                        source.index("register_automatic_recovery_evaluation("))
 
     def test_manual_failover_model_accepts_only_saved_roles(self) -> None:
         target_class = next(

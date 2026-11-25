@@ -1299,6 +1299,15 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
             if start + _MANUAL_FAILOVER_BATCH_SIZE < len(operation_names):
                 await asyncio.sleep(_MANUAL_FAILOVER_BATCH_DELAY_SECONDS)
 
+        # Reconcile automation against the actual managed fleet after all batches.
+        # This must remain under the manual-operation lock so another manual
+        # switch cannot interleave before runtime synchronization finishes.
+        fleet_mode_result = project_health.complete_manual_fleet_switch(
+            destination=target_role,
+            instances=(client.status for client in clients.values()),
+            actor=request.actor,
+        )
+
     summary = _summarize_project_switch_results(results)
     canary_results = {
         name: results[name]
@@ -1314,6 +1323,7 @@ async def execute_manual_project_failover(request: ManualFailoverRequest):
         "primary_canaries_unchanged": [] if primary_change_request else primary_canaries,
         "primary_canary_results": canary_results,
         "primary_change_request": primary_change_request,
+        "fleet_mode_result": fleet_mode_result,
         "fleet_placement": project_health.get_fleet_placement(
             client.status for client in clients.values()
         ),
@@ -1431,6 +1441,54 @@ async def _execute_automatic_failback():
     )
 
 
+def _reconcile_project_health_startup_placement() -> bool:
+    """Reconcile persisted mode once actual fallback placement is observable.
+
+    Never infer placement from a default or missing project during startup.
+    An unresolved Warrior delays reconciliation rather than incorrectly
+    declaring the managed fleet fully primary or secondary.
+    """
+    assignments = project_health.get_role_assignments()
+    fallback_names = [
+        name for name, role in assignments.items() if role == "fallback_fleet"
+    ]
+    if not fallback_names:
+        return True
+
+    observed = []
+    for name in fallback_names:
+        client = clients.get(name)
+        if client is None:
+            return False
+        status = client.status
+        if (
+            status.connection_state != ConnectionState.ONLINE
+            or not str(status.project_slug or "").strip()
+        ):
+            return False
+        observed.append(status)
+
+    if _manual_failover_lock.locked():
+        return False
+
+    placement = project_health.get_fleet_placement(observed)
+    counts = placement["counts"]
+    total = len(fallback_names)
+    actual_mode = (
+        "primary" if counts["primary"] == total
+        else "secondary" if counts["secondary"] == total
+        else "mixed"
+    )
+    if project_health.get_runtime().get("fleet_mode") != actual_mode:
+        project_health.complete_manual_fleet_switch(
+            destination="primary" if actual_mode == "primary" else "secondary",
+            instances=observed,
+            actor="startup-reconciliation",
+        )
+        logger.warning("Project Health startup reconciled fleet mode to %s", actual_mode)
+    return True
+
+
 async def _automatic_failover_loop():
     """Evaluate every five minutes and refresh TODO evidence adaptively.
 
@@ -1439,6 +1497,7 @@ async def _automatic_failover_loop():
     confirmation sequence, or a low-runway project forces a fresh queue lookup.
     A final forced lookup verifies the fallback immediately before switching.
     """
+    startup_reconciled = False
     queue_monitoring_accelerated = False
     last_primary_todo_refresh_at = 0.0
     last_fallback_todo_refresh_at = 0.0
@@ -1446,6 +1505,10 @@ async def _automatic_failover_loop():
     while True:
         try:
             await asyncio.sleep(_PROJECT_HEALTH_EVALUATION_INTERVAL_SECONDS)
+            if not startup_reconciled:
+                startup_reconciled = _reconcile_project_health_startup_placement()
+                if not startup_reconciled:
+                    continue
             current_time = time.time()
             policy = project_health.get_policy()
             primary_project = policy.get("primary_project", "")
@@ -1635,4 +1698,3 @@ async def websocket_endpoint(ws: WebSocket):
     finally:
         if ws in ws_connections:
             ws_connections.remove(ws)
-        logger.info("WebSocket client disconnected (%d total)", len(ws_connections))
